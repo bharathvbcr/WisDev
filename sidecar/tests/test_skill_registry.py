@@ -1,5 +1,4 @@
 import pytest
-from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 from fastapi import FastAPI
 from services.dynamic_skill_registry import router

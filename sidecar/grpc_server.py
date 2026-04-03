@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import time
-from typing import AsyncIterator
 
 import grpc
 from proto import llm_v1_pb2 as llm_pb2

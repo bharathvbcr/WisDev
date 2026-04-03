@@ -16,15 +16,6 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 from uuid import uuid4
 
-# ── Observability bootstrap (MUST precede all other imports that log/trace) ───
-# configure_telemetry() registers the OTel TracerProvider and reconfigures
-# structlog with GCP trace correlation before any request handling begins.
-from telemetry import configure_telemetry
-
-_SERVICE_VERSION = "1.1.0"
-configure_telemetry(service_version=_SERVICE_VERSION)
-
-# ── Application imports (after telemetry is wired) ───────────────────────────
 import structlog
 import grpc
 from fastapi import FastAPI, HTTPException, Request
@@ -41,8 +32,12 @@ from routers.ml_router import router as ml_router
 from routers.agent_router import router as agent_router
 from services.dynamic_skill_registry import router as skill_registry_router
 from services.semantic_cache import semantic_cache
+from telemetry import configure_telemetry
 
 logger = structlog.get_logger(__name__)
+
+_SERVICE_VERSION = "1.1.0"
+configure_telemetry(service_version=_SERVICE_VERSION)
 
 _grpc_thread: threading.Thread | None = None
 _grpc_failed = threading.Event()
@@ -300,27 +295,6 @@ def create_app() -> FastAPI:
             "service": "wisdev-sidecar",
             "version": _SERVICE_VERSION,
             "dependencies": {"grpc": grpc_state},
-        }
-        return JSONResponse(status_code=status_code, content=content)
-
-    @app.get("/readiness")
-    async def readiness():
-        grpc_ready, grpc_error = await _grpc_sidecar_ready()
-        if _grpc_failed.is_set() or not grpc_ready:
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "status": "not_ready",
-                    "service": "wisdev-sidecar",
-                    "reason": "gRPC thread crashed"
-                    if _grpc_failed.is_set()
-                    else (grpc_error or "grpc_unavailable"),
-                },
-            )
-        return {
-            "status": "ready",
-            "service": "wisdev-sidecar",
-            "version": _SERVICE_VERSION,
         }
         return JSONResponse(status_code=status_code, content=content)
 

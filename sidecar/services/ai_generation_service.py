@@ -790,7 +790,7 @@ IMPORTANT: Respond ONLY with valid JSON. No markdown, no explanation, just the J
         try:
             import google.genai as genai
             from google.genai.types import GenerateContentConfig, ThinkingConfig
-        except ImportError as exc:
+        except ImportError:
             logger.warning("google-genai SDK not available or lacks ThinkingConfig; falling back to generate_json.")
             return await self.generate_json(prompt, response_schema, max_tokens=8192)
 

@@ -1,4 +1,3 @@
-import pytest
 from unittest.mock import patch, MagicMock
 from services.pdf_extraction_service import extract_pdf_content, extract_year, extract_doi, _llm_fallback_extract
 
@@ -115,7 +114,6 @@ def test_extract_pdf_content_triggers_fallback(mock_llm_fallback):
             
             # For simplicity, we can test extract_pdf_content by patching fitz
             with patch("fitz.open") as mock_fitz:
-                import io
                 class MockPage:
                     def get_text(self): return "This is page 1 text"
                 class MockDoc:

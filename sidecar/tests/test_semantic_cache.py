@@ -1,7 +1,6 @@
 import pytest
-import asyncio
-from unittest.mock import AsyncMock, patch, MagicMock
-from services.semantic_cache import SemanticCache, CacheEntry
+from unittest.mock import patch
+from services.semantic_cache import SemanticCache
 
 
 @pytest.fixture

@@ -5,7 +5,6 @@ Those endpoints migrated to the Go orchestrator; this file now covers the
 Python-owned ML worker routes that feed into the Go RAG pipeline.
 """
 import base64
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from unittest.mock import patch, AsyncMock

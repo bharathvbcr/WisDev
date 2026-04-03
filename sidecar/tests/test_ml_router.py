@@ -1,6 +1,5 @@
 from unittest.mock import patch
 import base64
-import pytest
 from fastapi.testclient import TestClient
 from fastapi import FastAPI
 
@@ -49,7 +48,6 @@ def test_pdf_endpoint_surfaces_extractor_failures():
     assert "PDF extraction failed" in resp.json()["detail"]
 
 def test_embed_endpoint_returns_vector():
-    import asyncio
     mock_vector = [0.1] * 768
     async def fake_embed(text, **kwargs):
         return mock_vector

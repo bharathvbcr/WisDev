@@ -1,11 +1,8 @@
 import pytest
-import json
 import os
-import httpx
 from unittest.mock import AsyncMock, patch, MagicMock
 from services.ai_generation_service import (
-    AiGenerationService, ModelSelectionStrategy, AiGenerationRetryableError,
-    AiGenerationRateLimitError, AiGenerationServiceError, AiGenerationParsingError
+    AiGenerationService, ModelSelectionStrategy
 )
 from pydantic import BaseModel
 

@@ -1,0 +1,10 @@
+[
+  {
+    "name": "sparse_attention_v1",
+    "description": "Sparse attention mechanism",
+    "steps": "apply sparse mask\ncompute attention scores",
+    "source_paper": {
+      "arxiv_id": "2401.00001"
+    }
+  }
+]

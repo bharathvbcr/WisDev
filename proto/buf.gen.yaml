@@ -1,0 +1,12 @@
+version: v1
+plugins:
+  - plugin: buf.build/protocolbuffers/python
+    out: ../sidecar/proto
+  - plugin: buf.build/grpc/python
+    out: ../sidecar/proto
+  - plugin: buf.build/protocolbuffers/go
+    out: ../orchestrator/proto
+    opt: paths=source_relative
+  - plugin: buf.build/grpc/go
+    out: ../orchestrator/proto
+    opt: paths=source_relative

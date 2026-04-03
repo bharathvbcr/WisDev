@@ -1,0 +1,65 @@
+runtime:
+  name: WisDev
+  version: '1.0'
+  framework: google-adk-go
+  agentId: wisdev-orchestrator
+  configMode: yaml
+
+telemetry:
+  openTelemetry: true
+  serviceName: wisdev-orchestrator-orchestrator
+  namespace: wisdev
+
+hitl:
+  enabled: true
+  confirmationWindowMinutes: 10
+  mediumRiskRequiresConfirmation: true
+  highRiskRequiresConfirmation: true
+  allowedActions:
+    - approve
+    - skip
+    - edit_payload
+    - reject_replan
+
+a2a:
+  enabled: true
+  protocolVersion: refined
+  exposeAgentCard: true
+
+plugins:
+  - name: go-native-tools
+    description: Native ScholarLM Go retrieval, RAG, and orchestration primitives.
+    executionTargets:
+      - GO_NATIVE
+    tools:
+      - research.retrievePapers
+      - research.fullPaperRetrieve
+      - research.fullPaperGatewayDispatch
+  - name: python-capability-tools
+    description: Python-backed WisDev research and synthesis capabilities.
+    executionTargets:
+      - PYTHON_CAPABILITY
+    tools:
+      - research.initializeFlow
+      - research.generateQueries
+      - research.dynamicOptions
+      - research.recommendedAnswers
+      - research.regenerateOptions
+      - research.enhanceQuery
+      - research.queryDecompose
+      - research.proposeHypotheses
+      - research.coordinateReplan
+      - research.generateThoughts
+      - research.buildClaimEvidenceTable
+      - research.graphRagMap
+      - research.systematicReviewPrisma
+      - research.snowballCitations
+      - research.verifyClaims
+      - research.verifyCitations
+      - research.finalDraft
+  - name: python-sandbox-tools
+    description: High-control sandboxed execution for allowlisted research primitives.
+    executionTargets:
+      - PYTHON_SANDBOX
+    tools:
+      - script.runResearchPrimitive

@@ -1,0 +1,18 @@
+agent:
+  mode: autonomous
+  max_steps: 15
+  token_budget: 100000
+
+llm:
+  provider: custom
+  model: gpt-4o
+  api_key: ${WISDEV_LLM_API_KEY}
+  base_url: "http://localhost:11434/v1"
+
+storage:
+  type: sqlite
+  dsn: "file:./wisdev_state.db"
+
+observability:
+  enable_otel: true
+  otlp_endpoint: "localhost:4317"

@@ -1,0 +1,155 @@
+syntax = "proto3";
+
+package llm.v1;
+
+option go_package = "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/llm/v1;llmv1";
+
+// LLMService is the gRPC interface for the Python LLM sidecar.
+// Go calls this for all LLM and embedding operations.
+// Python implements this (sidecar/grpc_server.py).
+service LLMService {
+  // Generate produces a text completion given a prompt.
+  rpc Generate(GenerateRequest) returns (GenerateResponse);
+
+  // GenerateStream streams a text completion chunk-by-chunk (SSE-compatible).
+  rpc GenerateStream(GenerateRequest) returns (stream GenerateChunk);
+
+  // StructuredOutput generates a JSON response conforming to the given schema.
+  rpc StructuredOutput(StructuredRequest) returns (StructuredResponse);
+
+  // Embed embeds a single text string.
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
+
+  // EmbedBatch embeds multiple texts in one call (up to 250).
+  rpc EmbedBatch(EmbedBatchRequest) returns (EmbedBatchResponse);
+
+  // Health returns the sidecar's readiness state.
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // GenerateImages generates images using Imagen.
+  rpc GenerateImages(GenerateImagesRequest) returns (GenerateImagesResponse);
+}
+
+// ============================================================
+// Generate Images
+// ============================================================
+
+message GenerateImagesRequest {
+  string prompt = 1;
+  string model = 2;             // "" = default (imagen-3.0-generate-001)
+  int32 count = 3;              // 1-4
+  string aspect_ratio = 4;      // "1:1", "4:3", "16:9"
+  map<string, string> metadata = 5;
+}
+
+message GenerateImagesResponse {
+  repeated GeneratedImage images = 1;
+  int64 latency_ms = 2;
+}
+
+message GeneratedImage {
+  bytes image_bytes = 1;
+  string mime_type = 2;
+}
+
+// ============================================================
+// Generate
+// ============================================================
+
+message GenerateRequest {
+  string prompt = 1;
+  string system_prompt = 2;     // optional system instruction
+  string model = 3;             // e.g. "gemini-2.5-flash" or "" for default
+  float temperature = 4;        // 0.0–2.0, default 0.7
+  int32 max_tokens = 5;         // 0 = model default
+  repeated string stop_sequences = 6;
+  map<string, string> metadata = 7; // trace_id, user_id, etc.
+}
+
+message GenerateResponse {
+  string text = 1;
+  string model_used = 2;
+  int32 input_tokens = 3;
+  int32 output_tokens = 4;
+  string finish_reason = 5;     // "stop", "max_tokens", "error"
+  int64 latency_ms = 6;
+}
+
+message GenerateChunk {
+  string delta = 1;             // incremental text
+  bool done = 2;
+  string finish_reason = 3;
+}
+
+// ============================================================
+// Structured Output
+// ============================================================
+
+message StructuredRequest {
+  string prompt = 1;
+  string system_prompt = 2;
+  string json_schema = 3;       // JSON Schema as string
+  string model = 4;
+  float temperature = 5;
+  int32 max_tokens = 6;
+  map<string, string> metadata = 7;
+}
+
+message StructuredResponse {
+  string json_result = 1;       // validated JSON string
+  string model_used = 2;
+  int32 input_tokens = 3;
+  int32 output_tokens = 4;
+  bool schema_valid = 5;
+  string error = 6;             // populated if schema validation failed
+  int64 latency_ms = 7;
+}
+
+// ============================================================
+// Embed
+// ============================================================
+
+message EmbedRequest {
+  string text = 1;
+  string model = 2;             // "" = default (text-embedding-005)
+  string task_type = 3;         // "RETRIEVAL_DOCUMENT", "RETRIEVAL_QUERY", etc.
+  map<string, string> metadata = 4;
+}
+
+message EmbedResponse {
+  repeated float embedding = 1;
+  int32 token_count = 2;
+  string model_used = 3;
+  int64 latency_ms = 4;
+}
+
+message EmbedBatchRequest {
+  repeated string texts = 1;
+  string model = 2;
+  string task_type = 3;
+  map<string, string> metadata = 4;
+}
+
+message EmbedBatchResponse {
+  repeated EmbedVector embeddings = 1;
+  string model_used = 2;
+  int64 latency_ms = 3;
+}
+
+message EmbedVector {
+  repeated float values = 1;
+  int32 token_count = 2;
+}
+
+// ============================================================
+// Health
+// ============================================================
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ok = 1;
+  string version = 2;
+  repeated string models_available = 3;
+  string error = 4;
+}

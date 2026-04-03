@@ -1,0 +1,57 @@
+version: "3.8"
+
+services:
+  orchestrator:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+      args:
+        VERSION: dev
+    ports:
+      - "8081:8081"
+      - "50052:50052"
+    environment:
+      - SIDECAR_HOST=sidecar
+      - SIDECAR_PORT=8000
+      - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
+      - LOG_LEVEL=debug
+    volumes:
+      - wisdev-data:/app/data
+    depends_on:
+      sidecar:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    restart: unless-stopped
+
+  sidecar:
+    build:
+      context: ./sidecar
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
+      - EMBEDDING_API_URL=
+    volumes:
+      - wisdev-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    restart: unless-stopped
+
+volumes:
+  wisdev-data:

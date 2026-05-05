@@ -674,6 +674,9 @@ func (s *RuntimeStateStore) SaveFullPaperJob(jobID string, payload map[string]an
 	}
 	payload = cloneAnyMap(payload)
 	updatedAt := time.Now().UnixMilli()
+	if requestedUpdatedAt := IntValue64(payload["updatedAt"]); requestedUpdatedAt > updatedAt {
+		updatedAt = requestedUpdatedAt
+	}
 	payload["updatedAt"] = updatedAt
 	if err := s.ensureStorage(); err != nil && s.db == nil {
 		return err

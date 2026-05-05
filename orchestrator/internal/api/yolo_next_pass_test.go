@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
@@ -93,6 +95,21 @@ func (db yoloScheduleDBStub) Begin(context.Context) (pgx.Tx, error) {
 }
 func (db yoloScheduleDBStub) Ping(context.Context) error { return nil }
 func (db yoloScheduleDBStub) Close()                     {}
+
+func setIsolatedYoloJournalPath(t *testing.T) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "wisdev-yolo-journal-*")
+	require.NoError(t, err)
+	t.Setenv("WISDEV_JOURNAL_PATH", filepath.Join(dir, "wisdev_journal.jsonl"))
+	t.Cleanup(func() {
+		for i := 0; i < 5; i++ {
+			if err := os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(time.Duration(i+1) * 10 * time.Millisecond)
+		}
+	})
+}
 
 func TestYoloNextPass(t *testing.T) {
 	useIsolatedYoloState(t)
@@ -213,7 +230,7 @@ func TestYoloNextPass(t *testing.T) {
 	})
 
 	t.Run("runWisDevPipeline writes replayable unified events into the session journal", func(t *testing.T) {
-		t.Setenv("WISDEV_JOURNAL_PATH", filepath.Join(t.TempDir(), "wisdev_journal.jsonl"))
+		setIsolatedYoloJournalPath(t)
 		gateway := &wisdev.AgentGateway{Journal: wisdev.NewRuntimeJournal(nil)}
 		previousGateway := GlobalYoloGateway
 		previousRunner := runUnifiedWisDevJobLoop
@@ -274,7 +291,7 @@ func TestYoloNextPass(t *testing.T) {
 	})
 
 	t.Run("runYoloPipeline writes replayable legacy events into the job journal", func(t *testing.T) {
-		t.Setenv("WISDEV_JOURNAL_PATH", filepath.Join(t.TempDir(), "wisdev_journal.jsonl"))
+		setIsolatedYoloJournalPath(t)
 		gateway := &wisdev.AgentGateway{Journal: wisdev.NewRuntimeJournal(nil)}
 		previousGateway := GlobalYoloGateway
 		GlobalYoloGateway = gateway
@@ -540,7 +557,7 @@ func TestYoloNextPass(t *testing.T) {
 	})
 
 	t.Run("WisDevStreamHandler replays journal terminal event after in-memory job loss", func(t *testing.T) {
-		t.Setenv("WISDEV_JOURNAL_PATH", filepath.Join(t.TempDir(), "wisdev_journal.jsonl"))
+		setIsolatedYoloJournalPath(t)
 		gateway := &wisdev.AgentGateway{Journal: wisdev.NewRuntimeJournal(nil)}
 		previousGateway := GlobalYoloGateway
 		GlobalYoloGateway = gateway
@@ -589,7 +606,7 @@ func TestYoloNextPass(t *testing.T) {
 	})
 
 	t.Run("WisDevStreamHandler synthesizes lost-state failure from journal registration after restart", func(t *testing.T) {
-		t.Setenv("WISDEV_JOURNAL_PATH", filepath.Join(t.TempDir(), "wisdev_journal.jsonl"))
+		setIsolatedYoloJournalPath(t)
 		gateway := &wisdev.AgentGateway{Journal: wisdev.NewRuntimeJournal(nil)}
 		previousGateway := GlobalYoloGateway
 		GlobalYoloGateway = gateway
@@ -735,7 +752,7 @@ func TestYoloNextPass(t *testing.T) {
 	})
 
 	t.Run("YoloStreamHandler replays journal terminal event after in-memory job loss", func(t *testing.T) {
-		t.Setenv("WISDEV_JOURNAL_PATH", filepath.Join(t.TempDir(), "wisdev_journal.jsonl"))
+		setIsolatedYoloJournalPath(t)
 		gateway := &wisdev.AgentGateway{Journal: wisdev.NewRuntimeJournal(nil)}
 		previousGateway := GlobalYoloGateway
 		GlobalYoloGateway = gateway
@@ -772,7 +789,7 @@ func TestYoloNextPass(t *testing.T) {
 	})
 
 	t.Run("YoloStreamHandler synthesizes lost-state failure from journal registration after restart", func(t *testing.T) {
-		t.Setenv("WISDEV_JOURNAL_PATH", filepath.Join(t.TempDir(), "wisdev_journal.jsonl"))
+		setIsolatedYoloJournalPath(t)
 		gateway := &wisdev.AgentGateway{Journal: wisdev.NewRuntimeJournal(nil)}
 		previousGateway := GlobalYoloGateway
 		GlobalYoloGateway = gateway
@@ -832,7 +849,7 @@ func TestYoloNextPass(t *testing.T) {
 	})
 
 	t.Run("YoloStatusHandler recovers completed status from journal after in-memory loss", func(t *testing.T) {
-		t.Setenv("WISDEV_JOURNAL_PATH", filepath.Join(t.TempDir(), "wisdev_journal.jsonl"))
+		setIsolatedYoloJournalPath(t)
 		gateway := &wisdev.AgentGateway{Journal: wisdev.NewRuntimeJournal(nil)}
 		previousGateway := GlobalYoloGateway
 		GlobalYoloGateway = gateway
@@ -869,7 +886,7 @@ func TestYoloNextPass(t *testing.T) {
 	})
 
 	t.Run("YoloStatusHandler recovers failed status from registration-only journal after in-memory loss", func(t *testing.T) {
-		t.Setenv("WISDEV_JOURNAL_PATH", filepath.Join(t.TempDir(), "wisdev_journal.jsonl"))
+		setIsolatedYoloJournalPath(t)
 		gateway := &wisdev.AgentGateway{Journal: wisdev.NewRuntimeJournal(nil)}
 		previousGateway := GlobalYoloGateway
 		GlobalYoloGateway = gateway
@@ -933,7 +950,7 @@ func TestYoloNextPass(t *testing.T) {
 	})
 
 	t.Run("WisDevJobStatusHandler recovers failed status from journal registration after in-memory loss", func(t *testing.T) {
-		t.Setenv("WISDEV_JOURNAL_PATH", filepath.Join(t.TempDir(), "wisdev_journal.jsonl"))
+		setIsolatedYoloJournalPath(t)
 		gateway := &wisdev.AgentGateway{Journal: wisdev.NewRuntimeJournal(nil)}
 		previousGateway := GlobalYoloGateway
 		GlobalYoloGateway = gateway
@@ -966,7 +983,7 @@ func TestYoloNextPass(t *testing.T) {
 
 	t.Run("WisDevJobStatusHandler recovers persisted durable research job", func(t *testing.T) {
 		t.Setenv("WISDEV_STATE_DIR", t.TempDir())
-		t.Setenv("WISDEV_JOURNAL_PATH", filepath.Join(t.TempDir(), "wisdev_journal.jsonl"))
+		setIsolatedYoloJournalPath(t)
 		gateway := &wisdev.AgentGateway{
 			Journal:    wisdev.NewRuntimeJournal(nil),
 			StateStore: wisdev.NewRuntimeStateStore(nil, nil),
@@ -1052,7 +1069,7 @@ func TestYoloNextPass(t *testing.T) {
 
 	t.Run("WisDevJobCancelHandler cancels persisted durable research job through canonical route", func(t *testing.T) {
 		t.Setenv("WISDEV_STATE_DIR", t.TempDir())
-		t.Setenv("WISDEV_JOURNAL_PATH", filepath.Join(t.TempDir(), "wisdev_journal.jsonl"))
+		setIsolatedYoloJournalPath(t)
 		gateway := &wisdev.AgentGateway{
 			Journal:    wisdev.NewRuntimeJournal(nil),
 			StateStore: wisdev.NewRuntimeStateStore(nil, nil),
@@ -1103,7 +1120,7 @@ func TestYoloNextPass(t *testing.T) {
 	})
 
 	t.Run("yoloCancelHandler recovers journal-backed running legacy job after restart", func(t *testing.T) {
-		t.Setenv("WISDEV_JOURNAL_PATH", filepath.Join(t.TempDir(), "wisdev_journal.jsonl"))
+		setIsolatedYoloJournalPath(t)
 		gateway := &wisdev.AgentGateway{Journal: wisdev.NewRuntimeJournal(nil)}
 		previousGateway := GlobalYoloGateway
 		GlobalYoloGateway = gateway
@@ -1153,7 +1170,7 @@ func TestYoloNextPass(t *testing.T) {
 	})
 
 	t.Run("yoloCancelHandler returns conflict for recovered completed legacy job", func(t *testing.T) {
-		t.Setenv("WISDEV_JOURNAL_PATH", filepath.Join(t.TempDir(), "wisdev_journal.jsonl"))
+		setIsolatedYoloJournalPath(t)
 		gateway := &wisdev.AgentGateway{Journal: wisdev.NewRuntimeJournal(nil)}
 		previousGateway := GlobalYoloGateway
 		GlobalYoloGateway = gateway
@@ -1189,7 +1206,7 @@ func TestYoloNextPass(t *testing.T) {
 	})
 
 	t.Run("yoloCancelHandler is idempotent for recovered cancelled legacy job", func(t *testing.T) {
-		t.Setenv("WISDEV_JOURNAL_PATH", filepath.Join(t.TempDir(), "wisdev_journal.jsonl"))
+		setIsolatedYoloJournalPath(t)
 		gateway := &wisdev.AgentGateway{Journal: wisdev.NewRuntimeJournal(nil)}
 		previousGateway := GlobalYoloGateway
 		GlobalYoloGateway = gateway

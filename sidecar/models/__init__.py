@@ -1,4 +1,4 @@
-"""Shared API request/response models for Container Service endpoints."""
+"""Shared API request/response models for Cloud Run endpoints."""
 
 from . import draft_models
 from . import export_models

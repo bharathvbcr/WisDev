@@ -9,8 +9,8 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/llm"
-	llmv1 "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/llm/v1"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
 )
 
 // RaptorNode represents a node in the RAPTOR tree.
@@ -21,7 +21,7 @@ type RaptorNode struct {
 	Level     int       `json:"level"`
 	Children  []string  `json:"children,omitempty"`
 	PaperIDs  []string  `json:"paper_ids,omitempty"`
-	
+
 	// Optional metadata from chunks
 	CharStart int `json:"char_start,omitempty"`
 	CharEnd   int `json:"char_end,omitempty"`
@@ -30,10 +30,10 @@ type RaptorNode struct {
 
 // RaptorTree represents the full hierarchical structure.
 type RaptorTree struct {
-	ID       string                `json:"id"`
-	Nodes    map[string]*RaptorNode `json:"nodes"`
-	Root     *RaptorNode           `json:"root,omitempty"`
-	Levels   int                   `json:"levels"`
+	ID     string                 `json:"id"`
+	Nodes  map[string]*RaptorNode `json:"nodes"`
+	Root   *RaptorNode            `json:"root,omitempty"`
+	Levels int                    `json:"levels"`
 }
 
 // RaptorService handles tree building and querying.
@@ -42,6 +42,8 @@ type RaptorService struct {
 	trees     map[string]*RaptorTree
 	llmClient *llm.Client
 }
+
+var raptorClusterNodes = (*RaptorService).clusterNodes
 
 // NewRaptorService creates a new RAPTOR service.
 func NewRaptorService(client *llm.Client) *RaptorService {
@@ -92,7 +94,7 @@ func (s *RaptorService) BuildTree(ctx context.Context, papers []PaperChunksReque
 	maxLevels := 4
 
 	for level < maxLevels && len(currentLevelNodes) > minClusters {
-		clusters := s.clusterNodes(currentLevelNodes, minClusters)
+		clusters := raptorClusterNodes(s, currentLevelNodes, minClusters)
 		if len(clusters) <= 1 && level > 1 {
 			break
 		}
@@ -100,12 +102,12 @@ func (s *RaptorService) BuildTree(ctx context.Context, papers []PaperChunksReque
 		var nextLevelNodes []*RaptorNode
 		for i, cluster := range clusters {
 			clusterID := fmt.Sprintf("level_%d_cluster_%d_%s", level, i, treeID)
-			
+
 			// Calculate centroid
 			var embeddings [][]float64
 			var paperIDsSet = make(map[string]bool)
 			var childrenIDs []string
-			
+
 			for _, n := range cluster {
 				if len(n.Embedding) > 0 {
 					embeddings = append(embeddings, n.Embedding)
@@ -115,13 +117,13 @@ func (s *RaptorService) BuildTree(ctx context.Context, papers []PaperChunksReque
 				}
 				childrenIDs = append(childrenIDs, n.ID)
 			}
-			
+
 			centroid := VectorMean(embeddings)
 			summary, err := s.abstractiveSummary(ctx, cluster)
 			if err != nil {
 				summary = s.extractiveSummary(cluster)
 			}
-			
+
 			var paperIDs []string
 			for pid := range paperIDsSet {
 				paperIDs = append(paperIDs, pid)
@@ -135,11 +137,11 @@ func (s *RaptorService) BuildTree(ctx context.Context, papers []PaperChunksReque
 				Children:  childrenIDs,
 				PaperIDs:  paperIDs,
 			}
-			
+
 			tree.Nodes[clusterID] = node
 			nextLevelNodes = append(nextLevelNodes, node)
 		}
-		
+
 		currentLevelNodes = nextLevelNodes
 		level++
 	}
@@ -157,7 +159,7 @@ func (s *RaptorService) BuildTree(ctx context.Context, papers []PaperChunksReque
 				embeddings = append(embeddings, n.Embedding)
 				childrenIDs = append(childrenIDs, n.ID)
 			}
-			
+
 			summary, err := s.abstractiveSummary(ctx, currentLevelNodes)
 			if err != nil {
 				summary = s.extractiveSummary(currentLevelNodes)
@@ -225,7 +227,7 @@ func (s *RaptorService) clusterNodes(nodes []*RaptorNode, minClusters int) [][]*
 			}
 			newClusters[bestIdx] = append(newClusters[bestIdx], n)
 		}
-		
+
 		// Update centroids
 		for i, cluster := range newClusters {
 			if len(cluster) > 0 {
@@ -287,16 +289,16 @@ Chunks:
 
 Summary:`, contextBuilder.String())
 
-	resp, err := s.llmClient.Generate(ctx, &llmv1.GenerateRequest{
+	resp, err := s.llmClient.Generate(ctx, applyRAGLightGeneratePolicy(&llmv1.GenerateRequest{
 		Prompt:      prompt,
 		Model:       llm.ResolveLightModel(), // Use light model for intermediate summaries
 		Temperature: 0.2,
-	})
+	}))
 	if err != nil {
 		return "", err
 	}
 
-	return strings.TrimSpace(resp.Text), nil
+	return normalizeRAGGeneratedText("raptor abstractive summary", resp)
 }
 
 // QueryTree searches the tree for the most relevant nodes.

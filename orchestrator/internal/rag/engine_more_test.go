@@ -5,10 +5,10 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/llm"
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/resilience"
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/search"
-	llmv1 "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/llm/v1"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -44,5 +44,12 @@ func TestEngine_Extra(t *testing.T) {
 		resp, err := e.GenerateAnswer(ctx, AnswerRequest{Query: "q", Limit: 5})
 		assert.NoError(t, err)
 		assert.Equal(t, "ok", resp.Answer)
+	})
+
+	t.Run("GenerateAnswer - Empty Synthesis Response", func(t *testing.T) {
+		msc.On("Generate", mock.Anything, mock.Anything).Return(&llmv1.GenerateResponse{Text: "   "}, nil).Once()
+		_, err := e.GenerateAnswer(ctx, AnswerRequest{Query: "q"})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "empty text")
 	})
 }

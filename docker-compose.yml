@@ -1,57 +1,34 @@
-version: "3.8"
-
 services:
   orchestrator:
     build:
       context: ./orchestrator
-      dockerfile: Dockerfile
-      args:
-        VERSION: dev
+    environment:
+      WISDEV_CONFIG: /app/config/wisdev.example.yaml
+      WISDEV_MODEL_CONFIG: /app/config/wisdev_models.example.json
+      WISDEV_STATE_DIR: /data/state
+      WISDEV_JOURNAL_PATH: /data/wisdev_journal.jsonl
+      PYTHON_SIDECAR_HTTP_URL: http://sidecar:8090
+      PYTHON_SIDECAR_GRPC_ADDR: sidecar:50052
+      TEMPORAL_ENABLED: "false"
     ports:
       - "8081:8081"
-      - "50052:50052"
-    environment:
-      - SIDECAR_HOST=sidecar
-      - SIDECAR_PORT=8000
-      - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
-      - LOG_LEVEL=debug
+      - "50053:50053"
     volumes:
-      - wisdev-data:/app/data
+      - wisdev-data:/data
+      - ./config:/app/config:ro
     depends_on:
-      sidecar:
-        condition: service_healthy
-      jaeger:
-        condition: service_started
-    restart: unless-stopped
+      - sidecar
 
   sidecar:
     build:
       context: ./sidecar
-      dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
     environment:
-      - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
-      - EMBEDDING_API_URL=
-    volumes:
-      - wisdev-data:/app/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-    restart: unless-stopped
-
-  jaeger:
-    image: jaegertracing/all-in-one:latest
+      WISDEV_LLM_BASE_URL: ${WISDEV_LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+      WISDEV_LLM_MODEL: ${WISDEV_LLM_MODEL:-llama3.1}
+      WISDEV_LLM_API_KEY: ${WISDEV_LLM_API_KEY:-}
     ports:
-      - "16686:16686"
-      - "4317:4317"
-      - "4318:4318"
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true
-    restart: unless-stopped
+      - "8090:8090"
+      - "50052:50052"
 
 volumes:
   wisdev-data:

@@ -58,9 +58,9 @@ func TestBuildHITLRequestUsesConfiguredActions(t *testing.T) {
 		},
 	}
 	step := PlanStep{
-		ID:      "step-1",
-		Action:  "research.coordinateReplan",
-		Risk:    RiskLevelMedium,
+		ID:     "step-1",
+		Action: "research.coordinateReplan",
+		Risk:   RiskLevelMedium,
 	}
 	request := runtime.BuildHITLRequest("token-1", step, "review replanning step")
 	if request["plugin"] != "planner-plugin" {
@@ -86,7 +86,7 @@ func TestHITLTimeout(t *testing.T) {
 	if runtime.HITLTimeout() != 15*time.Minute {
 		t.Fatalf("expected 15m, got %v", runtime.HITLTimeout())
 	}
-	
+
 	runtime = nil
 	if runtime.HITLTimeout() != 10*time.Minute {
 		t.Fatalf("expected default 10m for nil, got %v", runtime.HITLTimeout())
@@ -99,7 +99,7 @@ func TestBuildA2ACard(t *testing.T) {
 			Runtime: ADKRuntimeDescriptor{
 				Name:    "WisDev",
 				Version: "1.0",
-				AgentID: "wisdev-orchestrator",
+				AgentID: "wisdev-go",
 			},
 			A2A: ADKA2AConfig{
 				Enabled:         true,
@@ -110,11 +110,14 @@ func TestBuildA2ACard(t *testing.T) {
 		toolToPlug: map[string]ADKPluginConfig{"t1": {}, "t2": {}},
 	}
 	card := runtime.BuildA2ACard()
-	if card["agentId"] != "wisdev-orchestrator" || card["protocol"] != "refined" {
+	if card["agentId"] != "wisdev-go" || card["protocol"] != "refined" {
 		t.Fatalf("unexpected card: %+v", card)
 	}
 	if card["capabilities"] != 2 {
 		t.Fatalf("expected 2 capabilities, got %v", card["capabilities"])
+	}
+	if card["ready"] != false || card["status"] != "initializing" {
+		t.Fatalf("expected initializing card readiness, got %+v", card)
 	}
 
 	runtime.Config.A2A.ExposeAgentCard = false

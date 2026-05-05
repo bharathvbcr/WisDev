@@ -19,3 +19,7 @@ type DBProvider interface {
 
 // Ensure *pgxpool.Pool implements DBProvider
 var _ DBProvider = (*pgxpool.Pool)(nil)
+
+func NormalizeDBProvider(db DBProvider) DBProvider {
+	return db
+}

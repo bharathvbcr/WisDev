@@ -1,55 +1,28 @@
-# Binaries
-*.exe
-*.dll
-*.so
-*.dylib
-
-# Go
-*.test
-*.out
-vendor/
-
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-dist/
-build/
-.eggs/
-*.egg
-
-# Virtual environments
-.venv/
-venv/
-ENV/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Config (secrets)
-wisdev.yaml
-!.example.yaml
-
-# Database
-*.db
-*.sqlite
-*.sqlite3
-
-# Docker
-.dockerenv
-
-# Coverage
-.coverage
-coverage/
+.env
+.env.*
+!.env.example
+*.log
 *.cover
-
-# Buf
-vendor/
+*.out
+coverage/
+htmlcov/
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+*.pyo
+.gocache/
+.gomodcache/
+.gopath/
+artifacts/
+dist/
+tmp/
+.wisdev/
+wisdev_journal.jsonl
+wisdev_journal.jsonl.index
+wd_*.json
+service-account*.json
+*-credentials.json
+node_modules/

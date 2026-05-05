@@ -51,7 +51,7 @@ func CollectWisdevOptimizationSignals(ctx context.Context, db DBProvider) Wisdev
 		SELECT 
 			COUNT(*),
 			COUNT(*) FILTER (WHERE status = 'error')
-		FROM wisdev_runtime_journal_v2
+		FROM wisdev_runtime_journal
 		WHERE event_type = 'search' AND created_at > $1
 	`, time.Now().Add(-24*time.Hour).UnixMilli()).Scan(&total, &errors)
 
@@ -64,7 +64,7 @@ func CollectWisdevOptimizationSignals(ctx context.Context, db DBProvider) Wisdev
 		SELECT 
 			payload_json->>'phase' as phase,
 			COUNT(*) as count
-		FROM wisdev_runtime_journal_v2
+		FROM wisdev_runtime_journal
 		WHERE status = 'error' AND created_at > $1
 		GROUP BY phase
 		ORDER BY count DESC
@@ -90,7 +90,7 @@ func CollectWisdevOptimizationSignals(ctx context.Context, db DBProvider) Wisdev
 		SELECT 
 			payload_json->>'provider' as provider,
 			AVG((payload_json->>'latencyMs')::float) as avg_latency
-		FROM wisdev_runtime_journal_v2
+		FROM wisdev_runtime_journal
 		WHERE event_type = 'search' AND status = 'ok' AND created_at > $1
 		GROUP BY provider
 	`, time.Now().Add(-24*time.Hour).UnixMilli())
@@ -112,7 +112,7 @@ func CollectWisdevOptimizationSignals(ctx context.Context, db DBProvider) Wisdev
 			COUNT(*),
 			AVG((payload_json->>'focusCount')::float),
 			AVG((payload_json->>'queryCount')::float)
-		FROM wisdev_runtime_journal_v2
+		FROM wisdev_runtime_journal
 		WHERE event_type = 'extension_event' AND created_at > $1
 	`, time.Now().Add(-7*24*time.Hour).UnixMilli()).Scan(
 		&signals.ExtensionTelemetry.TotalEvents,

@@ -1,14 +1,26 @@
+//go:build integration
+// +build integration
+
 package search
 
 import (
 	"context"
+	"os"
 	"testing"
 )
 
-func TestSSRNProvider(t *testing.T) {
+func requireLiveSearchIntegration(t *testing.T) {
+	t.Helper()
 	if testing.Short() {
-		t.Skip("skipping integration test")
+		t.Fatalf("integration test is not supported in short mode")
 	}
+	if os.Getenv("RUN_SEARCH_INTEGRATION") != "1" {
+		t.Fatalf("set RUN_SEARCH_INTEGRATION=1 to run live search integration tests")
+	}
+}
+
+func TestSSRNProvider(t *testing.T) {
+	requireLiveSearchIntegration(t)
 
 	p := NewSSRNProvider()
 	ctx := context.Background()
@@ -32,9 +44,7 @@ func TestSSRNProvider(t *testing.T) {
 }
 
 func TestDOAJProvider(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
+	requireLiveSearchIntegration(t)
 
 	p := NewDOAJProvider()
 	ctx := context.Background()

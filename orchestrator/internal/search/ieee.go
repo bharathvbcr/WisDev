@@ -130,7 +130,10 @@ func (p *IEEEProvider) Search(ctx context.Context, query string, opts SearchOpts
 			DOI:           art.DOI,
 			Link:          link,
 			CitationCount: art.CitingPaperCount,
-			Source:        "IEEE Xplore",
+			Source:        "ieee",
+			SourceApis:    []string{"ieee"},
+			Venue:         art.PublicationTitle,
+			PdfUrl:        art.PDFURL,
 		})
 	}
 

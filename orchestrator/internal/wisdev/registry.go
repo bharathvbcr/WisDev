@@ -3,6 +3,7 @@ package wisdev
 import (
 	"encoding/json"
 	"errors"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
 	"sync"
 )
 
@@ -99,7 +100,7 @@ func (r *ToolRegistry) registerDefaults() {
 	r.Register(ToolDefinition{
 		Name:               "research.coordinateReplan",
 		Description:        "Mediate between agents to coordinate a replan when evidence is insufficient or steps fail.",
-		Risk:               RiskLevelMedium,
+		Risk:               RiskLevelLow,
 		ModelTier:          ModelTierStandard,
 		ExecutionTarget:    ExecutionTargetPythonCapability,
 		Parallelizable:     false,
@@ -118,16 +119,16 @@ func (r *ToolRegistry) registerDefaults() {
 	})
 	r.Register(ToolDefinition{
 		Name:               "research.retrievePapers",
-		Description:        "Run high-throughput retrieval across academic sources.",
+		Description:        "Run provider-backed academic paper retrieval with the same typed contract exposed by the MCP-style /search/tools surface.",
 		Risk:               RiskLevelLow,
 		ModelTier:          ModelTierLight,
 		ExecutionTarget:    ExecutionTargetGoNative,
 		Parallelizable:     true,
 		EstimatedCostCents: 1,
-		ParameterSchema:    json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}`),
+		ParameterSchema:    search.SearchPapersToolSchema,
 	})
 	r.Register(ToolDefinition{
-		Name:               "research.fullPaperRetrieve",
+		Name:               ActionResearchFullPaperRetrieve,
 		Description:        "Run bounded multi-query retrieval for Full Paper Mode and return trajectory plus Source bundles.",
 		Risk:               RiskLevelLow,
 		ExecutionTarget:    ExecutionTargetGoNative,
@@ -136,7 +137,7 @@ func (r *ToolRegistry) registerDefaults() {
 		ParameterSchema:    json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"planQueries":{"type":"array","items":{"type":"string"}},"categories":{"type":"array","items":{"type":"string"}},"limit":{"type":"integer"},"domain":{"type":"string"}},"required":["query"]}`),
 	})
 	r.Register(ToolDefinition{
-		Name:               "research.fullPaperGatewayDispatch",
+		Name:               ActionResearchFullPaperGatewayDispatch,
 		Description:        "Execute bounded, stage-scoped Full Paper gateway actions such as academic search and Source bundle preview.",
 		Risk:               RiskLevelLow,
 		ExecutionTarget:    ExecutionTargetGoNative,
@@ -190,6 +191,15 @@ func (r *ToolRegistry) registerDefaults() {
 		ParameterSchema:    json.RawMessage(`{"type":"object","properties":{"claims":{"type":"array","items":{"type":"string"}},"context_documents":{"type":"array","items":{"type":"string"}}}}`),
 	})
 	r.Register(ToolDefinition{
+		Name:               ActionResearchVerifyClaimsBatch,
+		Description:        "Batch-rank candidate claims or reasoning branches for verifier-guided pruning.",
+		Risk:               RiskLevelMedium,
+		ExecutionTarget:    ExecutionTargetGoNative,
+		Parallelizable:     false,
+		EstimatedCostCents: 3,
+		ParameterSchema:    json.RawMessage(`{"type":"object","properties":{"candidateOutputs":{"type":"array","items":{"type":"object","additionalProperties":true}},"papers":{"type":"array","items":{"type":"object","additionalProperties":true}}}}`),
+	})
+	r.Register(ToolDefinition{
 		Name:               "research.verifyCitations",
 		Description:        "Run citation metadata consistency and integrity checks.",
 		Risk:               RiskLevelMedium,
@@ -216,6 +226,26 @@ func (r *ToolRegistry) registerDefaults() {
 		EstimatedCostCents: 5,
 		ParameterSchema:    json.RawMessage(`{"type":"object","properties":{"primitiveId":{"type":"string"},"input":{"type":"object"}},"required":["primitiveId"]}`),
 	})
+	r.Register(ToolDefinition{
+		Name:               ActionResearchSynthesizeAnswer,
+		Description:        "Compose a final, grounded research synthesis from promoted claims and verified evidence packets.",
+		Risk:               RiskLevelHigh,
+		ModelTier:          ModelTierHeavy,
+		ExecutionTarget:    ExecutionTargetGoNative,
+		Parallelizable:     false,
+		EstimatedCostCents: 5,
+		ParameterSchema:    json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"evidence":{"type":"array","items":{"type":"object","additionalProperties":true}},"promotedClaimIds":{"type":"array","items":{"type":"string"}},"verifierVerdict":{"type":"string"},"mode":{"type":"string"}},"required":["query"]}`),
+	})
+	r.Register(ToolDefinition{
+		Name:               ActionResearchEvaluateEvidence,
+		Description:        "Evaluate structured answer evidence against canonical grounding gates.",
+		Risk:               RiskLevelMedium,
+		ModelTier:          ModelTierStandard,
+		ExecutionTarget:    ExecutionTargetPythonCapability,
+		Parallelizable:     false,
+		EstimatedCostCents: 2,
+		ParameterSchema:    json.RawMessage(`{"type":"object","properties":{"structured_answer":{"type":"object","additionalProperties":true},"sources":{"type":"array","items":{"type":"object","additionalProperties":true}}},"required":["structured_answer"]}`),
+	})
 }
 
 func (r *ToolRegistry) Register(Tool ToolDefinition) {
@@ -237,7 +267,8 @@ func (r *ToolRegistry) Register(Tool ToolDefinition) {
 func (r *ToolRegistry) Get(name string) (ToolDefinition, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	Tool, ok := r.tools[name]
+	// Resolve legacy aliases before lookup so callers can use either form.
+	Tool, ok := r.tools[CanonicalizeWisdevAction(name)]
 	if !ok {
 		return ToolDefinition{}, errToolNotFound
 	}

@@ -6,17 +6,21 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // PhilPapersProvider searches PhilPapers for philosophy research.
 type PhilPapersProvider struct {
 	BaseProvider
+	baseURL string
 }
 
 var _ SearchProvider = (*PhilPapersProvider)(nil)
 
 func NewPhilPapersProvider() *PhilPapersProvider {
-	return &PhilPapersProvider{}
+	return &PhilPapersProvider{
+		baseURL: "https://philpapers.org/philpapers/raw/search.json",
+	}
 }
 
 func (p *PhilPapersProvider) Name() string { return "philpapers" }
@@ -43,7 +47,7 @@ type philPapersResponse struct {
 }
 
 func (p *PhilPapersProvider) Search(ctx context.Context, query string, opts SearchOpts) ([]Paper, error) {
-	u, _ := url.Parse("https://philpapers.org/philpapers/raw/search.json")
+	u, _ := url.Parse(p.baseURL)
 	q := u.Query()
 	q.Set("searchStr", query)
 	q.Set("limit", fmt.Sprintf("%d", opts.Limit))
@@ -95,7 +99,10 @@ func (p *PhilPapersProvider) Search(ctx context.Context, query string, opts Sear
 			DOI:           entry.DOI,
 			Link:          link,
 			CitationCount: entry.Citations,
-			Source:        "PhilPapers",
+			Source:        "philpapers",
+			SourceApis:    []string{"philpapers"},
+			Venue:         strings.TrimSpace(entry.Pub),
+			OpenAccessUrl: strings.TrimSpace(entry.OpenAccessURL),
 		})
 	}
 

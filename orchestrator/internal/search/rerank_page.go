@@ -1,17 +1,15 @@
 package search
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"sort"
 	"strings"
-	"time"
 
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
 )
 
 type pageIndexRanking struct {
@@ -22,6 +20,38 @@ type pageIndexRanking struct {
 
 type pageIndexResponse struct {
 	Rankings []pageIndexRanking `json:"rankings"`
+}
+
+type pageIndexStructuredGenerator interface {
+	GenerateStructured(ctx context.Context, modelID, prompt, systemPrompt string, jsonSchemaStr string, temperature float32, maxTokens int32) (string, error)
+}
+
+var pageIndexResponseSchema = map[string]any{
+	"type":                 "object",
+	"additionalProperties": false,
+	"properties": map[string]any{
+		"rankings": map[string]any{
+			"type": "array",
+			"items": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]any{
+					"index":  map[string]any{"type": "integer", "minimum": 0},
+					"score":  map[string]any{"type": "number", "minimum": 0, "maximum": 100},
+					"reason": map[string]any{"type": "string"},
+				},
+				"required": []string{"index", "score", "reason"},
+			},
+		},
+	},
+	"required": []string{"rankings"},
+}
+
+var jsonMarshalFn = json.Marshal
+var newPageIndexStructuredGenerator = func(ctx context.Context) (pageIndexStructuredGenerator, error) {
+	location := strings.TrimSpace(os.Getenv("GOOGLE_CLOUD_LOCATION"))
+	projectID := resilience.ResolveGoogleCloudProjectID()
+	return llm.NewVertexClient(ctx, projectID, location)
 }
 
 func shouldEnablePageIndexRerank() bool {
@@ -81,8 +111,12 @@ func PageIndexRerankPapers(ctx context.Context, query string, papers []Paper, to
 }
 
 func fetchGeminiPageIndexRankings(ctx context.Context, query string, papers []Paper, topK int) ([]pageIndexRanking, bool) {
-	apiKey := strings.TrimSpace(os.Getenv("GOOGLE_API_KEY"))
-	if apiKey == "" {
+	schemaBytes, err := jsonMarshalFn(pageIndexResponseSchema)
+	if err != nil {
+		return nil, false
+	}
+	client, err := newPageIndexStructuredGenerator(ctx)
+	if err != nil {
 		return nil, false
 	}
 
@@ -91,51 +125,16 @@ func fetchGeminiPageIndexRankings(ctx context.Context, query string, papers []Pa
 		model = llm.ResolveStandardModel()
 	}
 
-	body, err := json.Marshal(map[string]any{
-		"contents": []map[string]any{
-			{
-				"parts": []map[string]any{
-					{"text": buildPageIndexPrompt(query, papers, topK)},
-				},
-			},
-		},
-		"generationConfig": map[string]any{
-			"temperature":      0.1,
-			"responseMimeType": "application/json",
-		},
-	})
-	if err != nil {
-		return nil, false
-	}
-
-	endpoint := fmt.Sprintf(
-		"https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
+	text, err := client.GenerateStructured(
+		ctx,
 		model,
-		apiKey,
+		buildPageIndexPrompt(query, papers, topK),
+		"",
+		string(schemaBytes),
+		0.1,
+		512,
 	)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, false
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 8 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, false
-	}
-
-	var payload map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, false
-	}
-	text := extractGenerateContentText(payload)
-	if text == "" {
+	if err != nil || strings.TrimSpace(text) == "" {
 		return nil, false
 	}
 
@@ -153,9 +152,9 @@ func fetchGeminiPageIndexRankings(ctx context.Context, query string, papers []Pa
 func buildPageIndexPrompt(query string, papers []Paper, topK int) string {
 	var b strings.Builder
 	b.WriteString("You are an academic PageIndex reranker.\n")
-	b.WriteString("Return strict JSON: {\"rankings\":[{\"index\":0,\"score\":95,\"reason\":\"...\"}]}\n")
 	b.WriteString("Rank papers by true relevance to the query.\n")
 	b.WriteString("Consider semantic alignment, methodological fit, evidence strength, and whether the paper directly answers the query.\n")
+	b.WriteString("Provide a ranked justification for the best candidates using the supplied schema.\n")
 	b.WriteString(fmt.Sprintf("Return up to %d papers.\n", topK))
 	b.WriteString("Query: ")
 	b.WriteString(query)
@@ -177,25 +176,6 @@ func truncateForPrompt(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
-}
-
-func extractGenerateContentText(payload map[string]any) string {
-	candidates, ok := payload["candidates"].([]any)
-	if !ok || len(candidates) == 0 {
-		return ""
-	}
-	candidate := candidates[0].(map[string]any)
-	content, ok := candidate["content"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	parts, ok := content["parts"].([]any)
-	if !ok || len(parts) == 0 {
-		return ""
-	}
-	part := parts[0].(map[string]any)
-	text, _ := part["text"].(string)
-	return text
 }
 
 func clampFloat(v, min, max float64) float64 {

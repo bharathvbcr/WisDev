@@ -24,7 +24,7 @@ var _ SearchProvider = (*SSRNProvider)(nil)
 func NewSSRNProvider() *SSRNProvider {
 	email := os.Getenv("CROSSREF_POLITE_EMAIL")
 	if email == "" {
-		email = "api@wisdev.com"
+		email = "api@wisdev.local"
 	}
 	return &SSRNProvider{
 		baseURL:    "https://api.crossref.org/works",
@@ -60,7 +60,7 @@ func (s *SSRNProvider) Search(ctx context.Context, query string, opts SearchOpts
 		s.RecordFailure()
 		return nil, providerError("ssrn", "build request: %v", err)
 	}
-	req.Header.Set("User-Agent", "ScholarLM/1.0 (mailto:"+s.politePool+")")
+	req.Header.Set("User-Agent", "WisDev/1.0 (mailto:"+s.politePool+")")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := SharedHTTPClient.Do(req)
@@ -129,14 +129,15 @@ func (s *SSRNProvider) Search(ctx context.Context, query string, opts SearchOpts
 		abstract := stripHTMLTags(item.Abstract)
 
 		papers = append(papers, Paper{
-			ID:       "ssrn:" + item.DOI,
-			Title:    title,
-			Abstract: abstract,
-			Link:     link,
-			DOI:      item.DOI,
-			Source:   "ssrn",
-			Authors:  authors,
-			Year:     year,
+			ID:         "ssrn:" + item.DOI,
+			Title:      title,
+			Abstract:   abstract,
+			Link:       link,
+			DOI:        item.DOI,
+			Source:     "ssrn",
+			SourceApis: []string{"ssrn"},
+			Authors:    authors,
+			Year:       year,
 		})
 	}
 

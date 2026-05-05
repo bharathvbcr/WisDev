@@ -2,10 +2,12 @@ package wisdev
 
 import (
 	"context"
+	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/search"
-	llmv1 "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/llm/v1"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
 	"google.golang.org/grpc"
 )
 
@@ -55,15 +57,32 @@ func (m *mockLLMServiceClient) Health(ctx context.Context, in *llmv1.HealthReque
 	}
 	return args.Get(0).(*llmv1.HealthResponse), args.Error(1)
 }
-func (m *mockLLMServiceClient) GenerateImages(ctx context.Context, in *llmv1.GenerateImagesRequest, opts ...grpc.CallOption) (*llmv1.GenerateImagesResponse, error) {
-	return &llmv1.GenerateImagesResponse{}, nil
+
+func assertWisdevStructuredPromptHygiene(t *testing.T, prompt string) {
+	t.Helper()
+	assert.NotEmpty(t, prompt)
+	assert.Contains(t, prompt, wisdevStructuredOutputSchemaInstruction)
+
+	legacyPhrases := []string{
+		"Return JSON",
+		"Return ONLY JSON",
+		"Return a JSON",
+		"return a JSON object",
+		"Output ONLY a JSON",
+		"Respond with JSON",
+		"Respond with JSON consensus",
+	}
+	for _, phrase := range legacyPhrases {
+		assert.NotContains(t, prompt, phrase)
+	}
 }
 
 type mockSearchProvider struct {
 	search.BaseProvider
-	name       string
-	papers     []search.Paper
-	SearchFunc func(ctx context.Context, query string, opts search.SearchOpts) ([]search.Paper, error)
+	name             string
+	papers           []search.Paper
+	SearchFunc       func(ctx context.Context, query string, opts search.SearchOpts) ([]search.Paper, error)
+	GetCitationsFunc func(ctx context.Context, paperID string, limit int) ([]search.Paper, error)
 }
 
 func (m *mockSearchProvider) Name() string      { return m.name }
@@ -73,5 +92,11 @@ func (m *mockSearchProvider) Search(ctx context.Context, query string, opts sear
 		return m.SearchFunc(ctx, query, opts)
 	}
 	return m.papers, nil
+}
+func (m *mockSearchProvider) GetCitations(ctx context.Context, paperID string, limit int) ([]search.Paper, error) {
+	if m.GetCitationsFunc != nil {
+		return m.GetCitationsFunc(ctx, paperID, limit)
+	}
+	return nil, nil
 }
 func (m *mockSearchProvider) Healthy() bool { return true }

@@ -1,4 +1,4 @@
-"""Router exports for Container Service API."""
+"""Router exports for Cloud Run API."""
 
 from routers.ml_router import router as ml_router
 

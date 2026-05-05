@@ -28,8 +28,8 @@ func TestEuropePMCProvider(t *testing.T) {
 				fmt.Fprint(rec, `{
 					"resultList": {
 						"result": [
-							{"id":"1", "title":"T1", "pmcid":"PMC123", "pubYear":"2024"},
-							{"id":"2", "title":"T2", "pmid":"456"},
+							{"id":"1", "title":"T1", "pmcid":"PMC123", "pubYear":"2024", "authorString":"Ada Lovelace; Grace Hopper"},
+							{"id":"2", "title":"T2", "pmid":"456", "authorString":"Katherine Johnson"},
 							{"id":"3", "title":"T3", "doi":"10.1"},
 							{"id":"4", "title":""}
 						]
@@ -46,6 +46,9 @@ func TestEuropePMCProvider(t *testing.T) {
 		assert.Equal(t, "https://europepmc.org/article/med/456", papers[1].Link)
 		assert.Equal(t, "https://doi.org/10.1", papers[2].Link)
 		assert.Equal(t, 2024, papers[0].Year)
+		assert.Equal(t, []string{"Ada Lovelace", "Grace Hopper"}, papers[0].Authors)
+		assert.Equal(t, []string{"Katherine Johnson"}, papers[1].Authors)
+		assert.Equal(t, []string{"europe_pmc"}, papers[0].SourceApis)
 	})
 
 	t.Run("HTTP Error", func(t *testing.T) {
@@ -70,6 +73,24 @@ func TestEuropePMCProvider(t *testing.T) {
 			}),
 		}
 		p := NewEuropePMCProvider()
+		_, err := p.Search(context.Background(), "q", SearchOpts{})
+		assert.Error(t, err)
+	})
+
+	t.Run("Request Error", func(t *testing.T) {
+		SharedHTTPClient = &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return nil, fmt.Errorf("boom")
+			}),
+		}
+		p := NewEuropePMCProvider()
+		_, err := p.Search(context.Background(), "q", SearchOpts{})
+		assert.Error(t, err)
+	})
+
+	t.Run("Build Request Error", func(t *testing.T) {
+		p := NewEuropePMCProvider()
+		p.baseURL = "http://[::1"
 		_, err := p.Search(context.Background(), "q", SearchOpts{})
 		assert.Error(t, err)
 	})

@@ -20,6 +20,24 @@ type GoogleScholarProvider struct {
 
 var _ SearchProvider = (*GoogleScholarProvider)(nil)
 
+var buildGoogleScholarSearchEndpoint = func(limit int, query, apiKey string) string {
+	return fmt.Sprintf(
+		"https://serpapi.com/search.json?engine=google_scholar&hl=en&num=%d&q=%s&api_key=%s",
+		limit,
+		url.QueryEscape(query),
+		url.QueryEscape(apiKey),
+	)
+}
+
+var buildGoogleScholarAuthorEndpoint = func(limit int, authorID, apiKey string) string {
+	return fmt.Sprintf(
+		"https://serpapi.com/search.json?engine=google_scholar_author&hl=en&num=%d&author_id=%s&api_key=%s",
+		limit,
+		url.QueryEscape(authorID),
+		url.QueryEscape(apiKey),
+	)
+}
+
 // NewGoogleScholarProvider returns the Google Scholar provider using SerpAPI.
 func NewGoogleScholarProvider() *GoogleScholarProvider {
 	return &GoogleScholarProvider{
@@ -47,12 +65,7 @@ func (g *GoogleScholarProvider) Search(ctx context.Context, query string, opts S
 		limit = 10
 	}
 
-	endpoint := fmt.Sprintf(
-		"https://serpapi.com/search.json?engine=google_scholar&hl=en&num=%d&q=%s&api_key=%s",
-		limit,
-		url.QueryEscape(query),
-		url.QueryEscape(g.apiKey),
-	)
+	endpoint := buildGoogleScholarSearchEndpoint(limit, query, g.apiKey)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -96,12 +109,13 @@ func (g *GoogleScholarProvider) Search(ctx context.Context, query string, opts S
 		}
 
 		paper := Paper{
-			ID:       g.Name() + ":" + sanitizePaperID(title),
-			Title:    title,
-			Abstract: summary,
-			Link:     link,
-			DOI:      doi,
-			Source:   g.Name(),
+			ID:         g.Name() + ":" + sanitizePaperID(title),
+			Title:      title,
+			Abstract:   summary,
+			Link:       link,
+			DOI:        doi,
+			Source:     g.Name(),
+			SourceApis: []string{g.Name()},
 		}
 		if doi != "" {
 			paper.ID = g.Name() + ":" + doi
@@ -115,6 +129,7 @@ func (g *GoogleScholarProvider) Search(ctx context.Context, query string, opts S
 
 		if publicationInfo, ok := raw["publication_info"].(map[string]any); ok {
 			paper.Authors = parseAuthorList(publicationInfo["authors"])
+			paper.Venue = asString(publicationInfo["summary"])
 		} else if authors, ok := raw["authors"].([]any); ok {
 			paper.Authors = parseAuthorList(authors)
 		}
@@ -136,12 +151,7 @@ func (g *GoogleScholarProvider) SearchByAuthor(ctx context.Context, authorID str
 		limit = 20
 	}
 
-	endpoint := fmt.Sprintf(
-		"https://serpapi.com/search.json?engine=google_scholar_author&hl=en&num=%d&author_id=%s&api_key=%s",
-		limit,
-		url.QueryEscape(authorID),
-		url.QueryEscape(g.apiKey),
-	)
+	endpoint := buildGoogleScholarAuthorEndpoint(limit, authorID, g.apiKey)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -173,6 +183,7 @@ func (g *GoogleScholarProvider) SearchByAuthor(ctx context.Context, authorID str
 			Title:         title,
 			Link:          asString(raw["link"]),
 			Source:        g.Name(),
+			SourceApis:    []string{g.Name()},
 			Authors:       parseAuthorList(raw["authors"]),
 			Year:          parseYearFromString(asString(raw["year"])),
 			CitationCount: parseCitationCount(raw),

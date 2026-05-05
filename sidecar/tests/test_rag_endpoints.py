@@ -5,6 +5,7 @@ Those endpoints migrated to the Go orchestrator; this file now covers the
 Python-owned ML worker routes that feed into the Go RAG pipeline.
 """
 import base64
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from unittest.mock import patch, AsyncMock
@@ -75,9 +76,9 @@ def test_pdf_extract_default_filename(mock_extract):
 
 # ── Embeddings ────────────────────────────────────────────────────────────────
 
-@patch("routers.ml_router.gemini_service")
+@patch("routers.ml_router.embedding_service")
 def test_embed_returns_vector_of_expected_length(mock_gs):
-    mock_gs.embed = AsyncMock(return_value=[0.1] * 768)
+    mock_gs.embed_single_async = AsyncMock(return_value=[0.1] * 768)
     response = client.post("/ml/embed", json={"text": "neural networks in medicine"})
     assert response.status_code == 200
     data = response.json()
@@ -90,9 +91,9 @@ def test_embed_missing_text_returns_422():
     assert response.status_code == 422
 
 
-@patch("routers.ml_router.gemini_service")
+@patch("routers.ml_router.embedding_service")
 def test_embed_surfaces_service_error_as_503(mock_gs):
-    mock_gs.embed = AsyncMock(side_effect=Exception("embedding service down"))
+    mock_gs.embed_single_async = AsyncMock(side_effect=Exception("embedding service down"))
     response = client.post("/ml/embed", json={"text": "test"})
     assert response.status_code == 503
     assert "embedding service down" in response.json()["detail"]

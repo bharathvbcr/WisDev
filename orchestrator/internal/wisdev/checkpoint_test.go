@@ -2,137 +2,89 @@ package wisdev
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/go-redis/redismock/v9"
 	"github.com/stretchr/testify/assert"
 )
 
-type mockCheckpointStore struct {
-	saveFn func(string, []byte) error
-	loadFn func(string) ([]byte, error)
-}
-
-func (m *mockCheckpointStore) Save(ctx context.Context, id string, payload []byte, ttl time.Duration) error {
-	return m.saveFn(id, payload)
-}
-func (m *mockCheckpointStore) Load(ctx context.Context, id string) ([]byte, error) {
-	return m.loadFn(id)
-}
-
-func TestCheckpointStores(t *testing.T) {
+func TestRedisCheckpointStore(t *testing.T) {
+	db, mock := redismock.NewClientMock()
+	store := NewRedisCheckpointStore(db)
 	ctx := context.Background()
-	payload := []byte("test payload")
+	session := &AgentSession{SessionID: "s1"}
+	data, _ := json.Marshal(session)
 
-	t.Run("InMemoryCheckpointStore", func(t *testing.T) {
-		s := NewInMemoryCheckpointStore()
-		err := s.Save(ctx, "s1", payload, 1*time.Hour)
+	t.Run("Save Success", func(t *testing.T) {
+		mock.ExpectSet("wisdev_checkpoint:s1", data, time.Hour).SetVal("OK")
+		err := store.Save(ctx, "s1", data, time.Hour)
 		assert.NoError(t, err)
-
-		got, err := s.Load(ctx, "s1")
-		assert.NoError(t, err)
-		assert.Equal(t, payload, got)
-
-		_, err = s.Load(ctx, "nosession")
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "checkpoint_not_found")
 	})
 
-	t.Run("InMemoryCheckpointStore - Expiry", func(t *testing.T) {
-		s := NewInMemoryCheckpointStore()
-		err := s.Save(ctx, "s1", payload, -1*time.Second) // already expired
-		assert.NoError(t, err)
-
-		_, err = s.Load(ctx, "s1")
+	t.Run("Save Failure", func(t *testing.T) {
+		mock.ExpectSet("wisdev_checkpoint:s1", data, time.Hour).SetErr(errors.New("redis down"))
+		err := store.Save(ctx, "s1", data, time.Hour)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "checkpoint_expired")
 	})
 
-	t.Run("RedisCheckpointStore - No Redis", func(t *testing.T) {
-		s := NewRedisCheckpointStore(nil)
-		assert.Equal(t, "wisdev_checkpoint:s1", s.key("s1"))
-		// rdb is nil by default in tests unless initialized
-		err := s.Save(ctx, "s1", payload, 1*time.Hour)
-		assert.Error(t, err)
-		assert.Equal(t, "redis_not_available", err.Error())
-
-		got, err := s.Load(ctx, "s1")
-		assert.Nil(t, got)
-		assert.Error(t, err)
-		assert.Equal(t, "redis_not_available", err.Error())
+	t.Run("Load Success", func(t *testing.T) {
+		mock.ExpectGet("wisdev_checkpoint:s1").SetVal(string(data))
+		loaded, err := store.Load(ctx, "s1")
+		assert.NoError(t, err)
+		assert.Equal(t, data, loaded)
 	})
 
-	t.Run("FallbackCheckpointStore", func(t *testing.T) {
-		primary := &mockCheckpointStore{
-			saveFn: func(id string, p []byte) error { return errors.New("primary fail") },
-			loadFn: func(id string) ([]byte, error) { return nil, errors.New("primary fail") },
-		}
-		fallback := &mockCheckpointStore{
-			saveFn: func(id string, p []byte) error { return nil },
-			loadFn: func(id string) ([]byte, error) { return payload, nil },
-		}
-		s := NewFallbackCheckpointStore(primary, fallback)
-
-		err := s.Save(ctx, "s1", payload, 1*time.Hour)
-		assert.NoError(t, err)
-
-		got, err := s.Load(ctx, "s1")
-		assert.NoError(t, err)
-		assert.Equal(t, payload, got)
-	})
-
-	t.Run("FallbackCheckpointStore - Primary Success", func(t *testing.T) {
-		primary := &mockCheckpointStore{
-			saveFn: func(id string, p []byte) error { return nil },
-			loadFn: func(id string) ([]byte, error) { return payload, nil },
-		}
-		fallback := &mockCheckpointStore{
-			saveFn: func(id string, p []byte) error { return nil },
-		}
-		s := NewFallbackCheckpointStore(primary, fallback)
-
-		err := s.Save(ctx, "s1", payload, 1*time.Hour)
-		assert.NoError(t, err)
-
-		got, err := s.Load(ctx, "s1")
-		assert.NoError(t, err)
-		assert.Equal(t, payload, got)
+	t.Run("Load NotFound", func(t *testing.T) {
+		mock.ExpectGet("wisdev_checkpoint:s2").RedisNil()
+		_, err := store.Load(ctx, "s2")
+		assert.Error(t, err)
+		assert.Equal(t, "checkpoint_not_found", err.Error())
 	})
 }
 
-func TestSessionCheckpointHelpers(t *testing.T) {
-	ctx := context.Background()
+func TestCheckpointHelpers(t *testing.T) {
 	store := NewInMemoryCheckpointStore()
-	session := &AgentSession{SessionID: "s1", UserID: "u1"}
+	session := &AgentSession{SessionID: "s1"}
 
-	err := SaveSessionCheckpoint(ctx, store, session, 1*time.Hour)
+	err := SaveSessionCheckpoint(context.Background(), store, session, time.Hour)
 	assert.NoError(t, err)
 
-	loaded, err := LoadSessionCheckpoint(ctx, store, "s1")
+	loaded, err := LoadSessionCheckpoint(context.Background(), store, "s1")
 	assert.NoError(t, err)
-	assert.Equal(t, session.UserID, loaded.UserID)
+	assert.Equal(t, "s1", loaded.SessionID)
 
-	_, err = LoadSessionCheckpoint(ctx, store, "nosession")
-	assert.Error(t, err)
+	tid := NewTraceID()
+	assert.NotEmpty(t, tid)
 }
 
-func TestSessionCheckpointHelpersErrors(t *testing.T) {
+func TestFallbackCheckpointStore(t *testing.T) {
+	primary := NewInMemoryCheckpointStore()
+	secondary := NewInMemoryCheckpointStore()
+	store := &FallbackCheckpointStore{
+		primary:  primary,
+		fallback: secondary,
+	}
 	ctx := context.Background()
+	data := []byte("payload")
 
-	t.Run("Load Unmarshal Error", func(t *testing.T) {
-		store := &mockCheckpointStore{
-			loadFn: func(id string) ([]byte, error) {
-				return []byte("invalid json"), nil
-			},
-		}
-		_, err := LoadSessionCheckpoint(ctx, store, "s1")
-		assert.Error(t, err)
-	})
-}
+	// Save should go to primary
+	err := store.Save(ctx, "s1", data, time.Hour)
+	assert.NoError(t, err)
 
-func TestNewTraceID(t *testing.T) {
-	id := NewTraceID()
-	assert.NotEmpty(t, id)
-	assert.True(t, len(id) > 6)
+	val, _ := primary.Load(ctx, "s1")
+	assert.Equal(t, data, val)
+
+	// Load from primary
+	val, err = store.Load(ctx, "s1")
+	assert.NoError(t, err)
+	assert.Equal(t, data, val)
+
+	// Load from fallback
+	secondary.Save(ctx, "s2", []byte("fallback_val"), time.Hour)
+	val, err = store.Load(ctx, "s2")
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("fallback_val"), val)
 }

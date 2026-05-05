@@ -1,18 +1,32 @@
 agent:
-  mode: autonomous
-  max_steps: 15
-  token_budget: 100000
+  mode: yolo
+  max_steps: 25
+  require_approval: false
+  workspace: "."
 
 llm:
-  provider: custom
-  model: gpt-4o
-  api_key: ${WISDEV_LLM_API_KEY}
-  base_url: "http://localhost:11434/v1"
+  provider: openai-compatible
+  model_tier: standard
+  model: "${WISDEV_LLM_MODEL}"
+  api_key_env: WISDEV_LLM_API_KEY
+  base_url: "${WISDEV_LLM_BASE_URL}"
 
 storage:
-  type: sqlite
-  dsn: "file:./wisdev_state.db"
+  type: local
+  state_dir: "${WISDEV_STATE_DIR}"
+  journal_path: "${WISDEV_JOURNAL_PATH}"
+
+execution:
+  backend: local-journal
+  temporal_enabled: false
+
+sidecar:
+  enabled: true
+  http_url: "${PYTHON_SIDECAR_HTTP_URL}"
+  grpc_addr: "${PYTHON_SIDECAR_GRPC_ADDR}"
 
 observability:
-  enable_otel: true
-  otlp_endpoint: "localhost:4317"
+  structured_logs: true
+  otel_enabled: false
+  redact_prompts: true
+

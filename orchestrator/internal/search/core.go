@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/resilience"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
 	"time"
 )
 
@@ -101,13 +101,14 @@ func (c *COREProvider) Search(ctx context.Context, query string, opts SearchOpts
 			link = "https://doi.org/" + w.DOI
 		}
 		papers = append(papers, Paper{
-			ID:       fmt.Sprintf("core:%d", w.ID),
-			Title:    w.Title,
-			Abstract: w.Abstract,
-			Link:     link,
-			DOI:      w.DOI,
-			Source:   "core",
-			Year:     w.YearPublished,
+			ID:         fmt.Sprintf("core:%d", w.ID),
+			Title:      w.Title,
+			Abstract:   w.Abstract,
+			Link:       link,
+			DOI:        w.DOI,
+			Source:     "core",
+			SourceApis: []string{"core"},
+			Year:       w.YearPublished,
 		})
 	}
 

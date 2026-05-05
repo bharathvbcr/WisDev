@@ -16,10 +16,10 @@ import (
 
 // WebSearchResultItem loosely maps to the TS `WebSearchResultItem` structure
 type WebSearchResultItem struct {
-	Title       string                 `json:"title,omitempty"`
-	Link        string                 `json:"link,omitempty"`
-	Snippet     string                 `json:"snippet,omitempty"`
-	DisplayLink string                 `json:"displayLink,omitempty"`
+	Title       string         `json:"title,omitempty"`
+	Link        string         `json:"link,omitempty"`
+	Snippet     string         `json:"snippet,omitempty"`
+	DisplayLink string         `json:"displayLink,omitempty"`
 	Pagemap     map[string]any `json:"pagemap,omitempty"`
 }
 

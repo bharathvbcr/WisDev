@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 )
 
 var errSessionNotFound = errors.New("session_not_found")
+var errSessionStoreUnavailable = errors.New("session_store_unavailable")
 
 type SessionStore interface {
 	Get(ctx context.Context, sessionID string) (*AgentSession, error)
@@ -34,7 +36,7 @@ func (s *PostgresSessionStore) Get(ctx context.Context, sessionID string) (*Agen
 	}
 	var raw []byte
 	err := s.db.QueryRow(ctx, `
-SELECT payload_json FROM wisdev_agent_sessions_v2 WHERE session_id = $1
+SELECT payload_json FROM wisdev_agent_sessions WHERE session_id = $1
 `, sessionID).Scan(&raw)
 	if err != nil {
 		return nil, errSessionNotFound
@@ -55,7 +57,7 @@ func (s *PostgresSessionStore) Put(ctx context.Context, session *AgentSession, _
 		return err
 	}
 	_, err = s.db.Exec(ctx, `
-INSERT INTO wisdev_agent_sessions_v2 (session_id, user_id, payload_json, updated_at)
+INSERT INTO wisdev_agent_sessions (session_id, user_id, payload_json, updated_at)
 VALUES ($1, $2, $3, $4)
 ON CONFLICT (session_id) DO UPDATE SET
 	user_id = EXCLUDED.user_id,
@@ -69,7 +71,7 @@ func (s *PostgresSessionStore) Delete(ctx context.Context, sessionID string) err
 	if s.db == nil {
 		return nil
 	}
-	_, err := s.db.Exec(ctx, `DELETE FROM wisdev_agent_sessions_v2 WHERE session_id = $1`, sessionID)
+	_, err := s.db.Exec(ctx, `DELETE FROM wisdev_agent_sessions WHERE session_id = $1`, sessionID)
 	return err
 }
 
@@ -78,7 +80,7 @@ func (s *PostgresSessionStore) List(ctx context.Context, userID string) ([]*Agen
 		return nil, errors.New("db_not_available")
 	}
 	rows, err := s.db.Query(ctx, `
-SELECT payload_json FROM wisdev_agent_sessions_v2 WHERE user_id = $1 ORDER BY updated_at DESC
+SELECT payload_json FROM wisdev_agent_sessions WHERE user_id = $1 ORDER BY updated_at DESC
 `, userID)
 	if err != nil {
 		return nil, err
@@ -183,34 +185,84 @@ func NewFallbackSessionStore(primary SessionStore, fallback SessionStore) *Fallb
 }
 
 func (s *FallbackSessionStore) Get(ctx context.Context, sessionID string) (*AgentSession, error) {
-	session, err := s.primary.Get(ctx, sessionID)
-	if err == nil {
+	if s == nil {
+		return nil, errSessionNotFound
+	}
+	if s.primary != nil {
+		session, err := s.primary.Get(ctx, sessionID)
+		if err == nil && session != nil {
+			return session, nil
+		}
+	}
+	if s.fallback == nil {
+		return nil, errSessionNotFound
+	}
+	session, err := s.fallback.Get(ctx, sessionID)
+	if err != nil || session == nil {
+		if err != nil {
+			return nil, err
+		}
+		return nil, errSessionNotFound
+	}
+	if strings.TrimSpace(session.SessionID) == "" {
+		session.SessionID = strings.TrimSpace(sessionID)
+	}
+	if strings.TrimSpace(session.SessionID) != "" {
 		return session, nil
 	}
-	return s.fallback.Get(ctx, sessionID)
+	return nil, errSessionNotFound
 }
 
 func (s *FallbackSessionStore) Put(ctx context.Context, session *AgentSession, ttl time.Duration) error {
-	if err := s.primary.Put(ctx, session, ttl); err != nil {
+	if s == nil {
+		return errSessionStoreUnavailable
+	}
+	if s.primary != nil {
+		if err := s.primary.Put(ctx, session, ttl); err == nil {
+			if s.fallback != nil {
+				_ = s.fallback.Put(ctx, session, ttl)
+			}
+			return nil
+		} else if s.fallback == nil {
+			return err
+		}
+	}
+	if s.fallback != nil {
 		return s.fallback.Put(ctx, session, ttl)
 	}
-	// Also mirror to fallback for resilience.
-	_ = s.fallback.Put(ctx, session, ttl)
-	return nil
+	return errSessionStoreUnavailable
 }
 
 func (s *FallbackSessionStore) Delete(ctx context.Context, sessionID string) error {
-	_ = s.primary.Delete(ctx, sessionID)
-	_ = s.fallback.Delete(ctx, sessionID)
+	if s == nil {
+		return nil
+	}
+	if s.primary != nil {
+		_ = s.primary.Delete(ctx, sessionID)
+	}
+	if s.fallback != nil {
+		_ = s.fallback.Delete(ctx, sessionID)
+	}
 	return nil
 }
 
 func (s *FallbackSessionStore) List(ctx context.Context, userID string) ([]*AgentSession, error) {
-	sessions, err := s.primary.List(ctx, userID)
-	if err == nil && len(sessions) > 0 {
-		return sessions, nil
+	if s == nil {
+		return nil, errSessionStoreUnavailable
 	}
-	return s.fallback.List(ctx, userID)
+	if s.primary != nil {
+		sessions, err := s.primary.List(ctx, userID)
+		if err == nil && len(sessions) > 0 {
+			return sessions, nil
+		}
+		if s.fallback == nil && err != nil {
+			return nil, err
+		}
+	}
+	if s.fallback != nil {
+		return s.fallback.List(ctx, userID)
+	}
+	return nil, errSessionStoreUnavailable
 }
 
 type memorySessionRecord struct {
@@ -229,7 +281,22 @@ func NewInMemorySessionStore() *InMemorySessionStore {
 	}
 }
 
-func (s *InMemorySessionStore) Get(_ context.Context, sessionID string) (*AgentSession, error) {
+func cloneAgentSession(session *AgentSession) (*AgentSession, error) {
+	if session == nil {
+		return nil, nil
+	}
+	b, err := json.Marshal(session)
+	if err != nil {
+		return nil, err
+	}
+	var clone AgentSession
+	if err := json.Unmarshal(b, &clone); err != nil {
+		return nil, err
+	}
+	return &clone, nil
+}
+
+func (s *InMemorySessionStore) Get(ctx context.Context, sessionID string) (*AgentSession, error) {
 	s.mu.RLock()
 	record, ok := s.records[sessionID]
 	s.mu.RUnlock()
@@ -242,8 +309,7 @@ func (s *InMemorySessionStore) Get(_ context.Context, sessionID string) (*AgentS
 		s.mu.Unlock()
 		return nil, errSessionNotFound
 	}
-	clone := record.session
-	return &clone, nil
+	return cloneAgentSession(&record.session)
 }
 
 func (s *InMemorySessionStore) Put(_ context.Context, session *AgentSession, ttl time.Duration) error {
@@ -253,17 +319,12 @@ func (s *InMemorySessionStore) Put(_ context.Context, session *AgentSession, ttl
 	if ttl != 0 {
 		expiresAt = time.Now().Add(ttl)
 	}
-	// Clone via marshal/unmarshal to avoid accidental shared mutable maps.
-	b, err := json.Marshal(session)
+	clone, err := cloneAgentSession(session)
 	if err != nil {
 		return err
 	}
-	var clone AgentSession
-	if err := json.Unmarshal(b, &clone); err != nil {
-		return err
-	}
 	s.records[session.SessionID] = memorySessionRecord{
-		session:   clone,
+		session:   *clone,
 		expiresAt: expiresAt,
 	}
 	return nil
@@ -288,8 +349,11 @@ func (s *InMemorySessionStore) List(_ context.Context, userID string) ([]*AgentS
 		if userID != "" && record.session.UserID != userID {
 			continue
 		}
-		clone := record.session
-		out = append(out, &clone)
+		clone, err := cloneAgentSession(&record.session)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, clone)
 	}
 	return out, nil
 }

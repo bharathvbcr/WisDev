@@ -12,14 +12,14 @@ import (
 	"strings"
 	"testing"
 
-	llmv1 "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/llm/v1"
+	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
 
 func TestNewPaper2SkillCompiler(t *testing.T) {
-	t.Setenv("PYTHON_SIDECAR_URL", "http://python-sidecar:8080")
+	t.Setenv("PYTHON_SIDECAR_HTTP_URL", "http://python-sidecar:8080")
 	mLLM := new(mockLLM)
 	compiler := NewPaper2SkillCompiler(mLLM)
 	assert.NotNil(t, compiler)
@@ -143,17 +143,73 @@ func TestPaper2SkillCompiler_CompileArxivID_FullFlow(t *testing.T) {
 	skillJSON := `{"name":"sparse_attention_v1","description":"Sparse attention mechanism","inputs":[],"outputs":[],"steps":["apply sparse mask"],"code_template":"","source_paper":{"arxiv_id":"2401.00001","title":"","authors":null,"year":0,"doi":"","abstract":""}}`
 
 	mLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
-		return strings.Contains(req.Prompt, "methodology")
+		assertWisdevStructuredPromptHygiene(t, req.Prompt)
+		return strings.Contains(req.Prompt, "methodology") &&
+			req.GetThinkingBudget() == -1 &&
+			req.RequestClass == "structured_high_value" &&
+			req.RetryProfile == "standard" &&
+			req.ServiceTier == "priority" &&
+			req.LatencyBudgetMs > 0
 	})).Return(&llmv1.StructuredResponse{JsonResult: methodologyJSON}, nil).Once()
 
 	mLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
-		return strings.Contains(req.Prompt, "SkillSchema")
+		assertWisdevStructuredPromptHygiene(t, req.Prompt)
+		return strings.Contains(req.Prompt, "SkillSchema") &&
+			req.GetThinkingBudget() == -1 &&
+			req.RequestClass == "structured_high_value" &&
+			req.RetryProfile == "standard" &&
+			req.ServiceTier == "priority" &&
+			req.LatencyBudgetMs > 0
 	})).Return(&llmv1.StructuredResponse{JsonResult: skillJSON}, nil).Once()
 
 	schema, err := compiler.CompileArxivID(context.Background(), "2401.00001")
 
 	assert.NoError(t, err)
 	assert.Equal(t, "sparse_attention_v1", schema.Name)
+	mLLM.AssertExpectations(t)
+}
+
+func TestPaper2SkillCompiler_CompileArxivID_DegradedOnLLMCooldown(t *testing.T) {
+	mLLM := new(mockLLM)
+
+	sourcePDF := []byte("%PDF-1.4\ncooldown flow test\n%%EOF")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/pdf/2401.00002.pdf":
+			_, _ = w.Write(sourcePDF)
+		case "/ml/pdf":
+			json.NewEncoder(w).Encode(map[string]any{
+				"paper": map[string]any{
+					"title":    "Cooldown Paper",
+					"abstract": "This paper exercises cooldown fallback.",
+				},
+				"full_text": "Methodology: use a deterministic cooldown fallback.",
+			})
+		case "/skills/register":
+			t.Fatal("registry should not be called when LLM compilation degrades")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	compiler := &Paper2SkillCompiler{
+		LLM:              mLLM,
+		HTTPClient:       ts.Client(),
+		PDFSourceBaseURL: ts.URL + "/pdf/",
+		RegistryURL:      ts.URL + "/skills/register",
+		PDFWorkerURL:     ts.URL + "/ml/pdf",
+	}
+
+	mLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
+		return strings.Contains(req.Prompt, "methodology")
+	})).Return(nil, errors.New("vertex structured output provider cooldown active; retry after 45s")).Once()
+
+	schema, err := compiler.CompileArxivID(context.Background(), "2401.00002")
+
+	assert.NoError(t, err)
+	assert.Equal(t, "degraded_skill_2401.00002", schema.Name)
+	assert.Equal(t, "2401.00002", schema.SourcePaper.ArxivID)
 	mLLM.AssertExpectations(t)
 }
 
@@ -196,12 +252,24 @@ func TestPaper2SkillCompiler_CompileArxivID_AcceptsCamelCaseFullText(t *testing.
 	}
 
 	mLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
+		assertWisdevStructuredPromptHygiene(t, req.Prompt)
 		return strings.Contains(req.Prompt, "methodology") &&
-			strings.Contains(req.Prompt, "normalized fullText should be accepted")
+			strings.Contains(req.Prompt, "normalized fullText should be accepted") &&
+			req.GetThinkingBudget() == -1 &&
+			req.RequestClass == "structured_high_value" &&
+			req.RetryProfile == "standard" &&
+			req.ServiceTier == "priority" &&
+			req.LatencyBudgetMs > 0
 	})).Return(&llmv1.StructuredResponse{JsonResult: `{"methodology":"normalized worker text"}`}, nil).Once()
 
 	mLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
-		return strings.Contains(req.Prompt, "SkillSchema")
+		assertWisdevStructuredPromptHygiene(t, req.Prompt)
+		return strings.Contains(req.Prompt, "SkillSchema") &&
+			req.GetThinkingBudget() == -1 &&
+			req.RequestClass == "structured_high_value" &&
+			req.RetryProfile == "standard" &&
+			req.ServiceTier == "priority" &&
+			req.LatencyBudgetMs > 0
 	})).Return(&llmv1.StructuredResponse{JsonResult: `{"name":"camel_case_worker","description":"Uses normalized worker text","inputs":[],"outputs":[],"steps":["extract normalized text"],"code_template":"","source_paper":{"arxiv_id":"2401.00005"}}`}, nil).Once()
 
 	schema, err := compiler.CompileArxivID(context.Background(), "2401.00005")
@@ -238,6 +306,7 @@ func TestPaper2SkillCompiler_CompileArxivID_DegradedOnMethodologyLLMFail(t *test
 	}
 
 	mLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
+		assertWisdevStructuredPromptHygiene(t, req.Prompt)
 		return strings.Contains(req.Prompt, "methodology")
 	})).Return(nil, errors.New("LLM unavailable"))
 
@@ -273,10 +342,12 @@ func TestPaper2SkillCompiler_CompileArxivID_DegradedOnSkillSchemaLLMFail(t *test
 	}
 
 	mLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
+		assertWisdevStructuredPromptHygiene(t, req.Prompt)
 		return strings.Contains(req.Prompt, "methodology")
 	})).Return(&llmv1.StructuredResponse{JsonResult: `{"methodology":"sliding window attention"}`}, nil).Once()
 
 	mLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
+		assertWisdevStructuredPromptHygiene(t, req.Prompt)
 		return strings.Contains(req.Prompt, "SkillSchema")
 	})).Return(nil, errors.New("LLM timeout"))
 
@@ -312,10 +383,12 @@ func TestPaper2SkillCompiler_CompileArxivID_DegradedOnSkillSchemaBadJSON(t *test
 	}
 
 	mLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
+		assertWisdevStructuredPromptHygiene(t, req.Prompt)
 		return strings.Contains(req.Prompt, "methodology")
 	})).Return(&llmv1.StructuredResponse{JsonResult: `{"methodology":"sliding window attention"}`}, nil).Once()
 
 	mLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
+		assertWisdevStructuredPromptHygiene(t, req.Prompt)
 		return strings.Contains(req.Prompt, "SkillSchema")
 	})).Return(&llmv1.StructuredResponse{JsonResult: `{invalid json`}, nil)
 

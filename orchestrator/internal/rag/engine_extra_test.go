@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/llm"
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/search"
-	llmv1 "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/llm/v1"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -39,9 +39,6 @@ func (m *mockLLMService) EmbedBatch(ctx context.Context, in *llmv1.EmbedBatchReq
 }
 func (m *mockLLMService) Health(ctx context.Context, in *llmv1.HealthRequest, opts ...grpc.CallOption) (*llmv1.HealthResponse, error) {
 	return nil, nil
-}
-func (m *mockLLMService) GenerateImages(ctx context.Context, in *llmv1.GenerateImagesRequest, opts ...grpc.CallOption) (*llmv1.GenerateImagesResponse, error) {
-	return &llmv1.GenerateImagesResponse{}, nil
 }
 
 type mockSearchProvider struct {

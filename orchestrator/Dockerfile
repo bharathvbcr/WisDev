@@ -1,32 +1,40 @@
-FROM golang:1.26-alpine AS builder
+# Go build stage for the WisDev Agent OS orchestrator
+FROM golang:1.25-bookworm AS go-builder
 
-RUN apk add --no-cache git ca-certificates
+RUN apt-get update && apt-get install -y git ca-certificates && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /build
+WORKDIR /workspace/orchestrator
 
+# Copy module files first for layer caching
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY . .
+# Copy source code
+COPY . ./
 
-ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" \
-    -o /wisdev-server ./cmd/server
+# Build statically-linked binary with optimizations
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags="-s -w -X main.version=$(date +%Y%m%d-%H%M%S)" \
+    -o /wisdev-agent-orchestrator ./cmd/server
 
-FROM alpine:3.20
+# Runtime stage - debian-slim to allow for pandoc
+FROM debian:12-slim
 
-RUN apk add --no-cache ca-certificates tzdata
+# Install pandoc for Go-owned CSL/citation processing.
+RUN apt-get update && apt-get install -y \
+    pandoc \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /wisdev-server /usr/local/bin/wisdev-server
+COPY --from=go-builder /wisdev-agent-orchestrator /wisdev-agent-orchestrator
 
-RUN adduser -D -H appuser
-USER appuser
+# Cloud Run uses PORT env var
+ENV PORT=8081
 
-WORKDIR /app
+EXPOSE 8081 50053
 
-EXPOSE 8081 50052
+# Create non-root user
+RUN groupadd -r nonroot && useradd -r -g nonroot nonroot
+USER nonroot:nonroot
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD wget -qO- http://localhost:8081/healthz || exit 1
-
-ENTRYPOINT ["wisdev-server"]
+ENTRYPOINT ["/wisdev-agent-orchestrator"]

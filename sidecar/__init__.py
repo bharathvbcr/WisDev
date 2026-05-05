@@ -1,1 +1,1 @@
-"""Container Service service package for ScholarLM."""
+"""Python sidecar package for WisDev Agent OS."""

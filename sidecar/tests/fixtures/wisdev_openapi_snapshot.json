@@ -1,0 +1,512 @@
+{
+  "components": {
+    "BuildClaimEvidenceTableResponse": {
+      "properties": {
+        "claimEvidenceTable": {
+          "$ref": "#/components/schemas/ClaimEvidenceTableResponse"
+        }
+      },
+      "title": "BuildClaimEvidenceTableResponse",
+      "type": "object"
+    },
+    "CanonicalCitationResponse": {
+      "properties": {
+        "arxivId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Arxivid"
+        },
+        "authors": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Authors",
+          "type": "array"
+        },
+        "canonicalId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Canonicalid"
+        },
+        "doi": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Doi"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Id"
+        },
+        "resolved": {
+          "default": false,
+          "title": "Resolved",
+          "type": "boolean"
+        },
+        "title": {
+          "default": "",
+          "title": "Title",
+          "type": "string"
+        },
+        "verified": {
+          "default": false,
+          "title": "Verified",
+          "type": "boolean"
+        },
+        "year": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Year"
+        }
+      },
+      "title": "CanonicalCitationResponse",
+      "type": "object"
+    },
+    "ClaimEvidenceTableResponse": {
+      "properties": {
+        "rowCount": {
+          "default": 0,
+          "title": "Rowcount",
+          "type": "integer"
+        },
+        "table": {
+          "default": "",
+          "title": "Table",
+          "type": "string"
+        }
+      },
+      "title": "ClaimEvidenceTableResponse",
+      "type": "object"
+    },
+    "ProposeHypothesesResponse": {
+      "properties": {
+        "branches": {
+          "items": {
+            "$ref": "#/components/schemas/ReasoningBranchResponse"
+          },
+          "title": "Branches",
+          "type": "array"
+        }
+      },
+      "title": "ProposeHypothesesResponse",
+      "type": "object"
+    },
+    "ReasoningBranchResponse": {
+      "properties": {
+        "claim": {
+          "default": "",
+          "title": "Claim",
+          "type": "string"
+        },
+        "falsifiabilityCondition": {
+          "default": "",
+          "title": "Falsifiabilitycondition",
+          "type": "string"
+        },
+        "isTerminated": {
+          "default": false,
+          "title": "Isterminated",
+          "type": "boolean"
+        },
+        "supportScore": {
+          "default": 0.0,
+          "title": "Supportscore",
+          "type": "number"
+        }
+      },
+      "title": "ReasoningBranchResponse",
+      "type": "object"
+    },
+    "ReasoningVerificationResponse": {
+      "properties": {
+        "readyForSynthesis": {
+          "default": false,
+          "title": "Readyforsynthesis",
+          "type": "boolean"
+        },
+        "rejectedBranches": {
+          "default": 0,
+          "title": "Rejectedbranches",
+          "type": "integer"
+        },
+        "totalBranches": {
+          "default": 0,
+          "title": "Totalbranches",
+          "type": "integer"
+        },
+        "verifiedBranches": {
+          "default": 0,
+          "title": "Verifiedbranches",
+          "type": "integer"
+        }
+      },
+      "title": "ReasoningVerificationResponse",
+      "type": "object"
+    },
+    "ResolveCitationsResponse": {
+      "properties": {
+        "canonicalSources": {
+          "items": {
+            "$ref": "#/components/schemas/CanonicalCitationResponse"
+          },
+          "title": "Canonicalsources",
+          "type": "array"
+        },
+        "citations": {
+          "items": {
+            "$ref": "#/components/schemas/CanonicalCitationResponse"
+          },
+          "title": "Citations",
+          "type": "array"
+        },
+        "duplicateCount": {
+          "default": 0,
+          "title": "Duplicatecount",
+          "type": "integer"
+        },
+        "resolvedCount": {
+          "default": 0,
+          "title": "Resolvedcount",
+          "type": "integer"
+        }
+      },
+      "title": "ResolveCitationsResponse",
+      "type": "object"
+    },
+    "VerifyCitationsResponse": {
+      "properties": {
+        "citations": {
+          "items": {
+            "$ref": "#/components/schemas/CanonicalCitationResponse"
+          },
+          "title": "Citations",
+          "type": "array"
+        },
+        "duplicateCount": {
+          "default": 0,
+          "title": "Duplicatecount",
+          "type": "integer"
+        },
+        "invalidCount": {
+          "default": 0,
+          "title": "Invalidcount",
+          "type": "integer"
+        },
+        "validCount": {
+          "default": 0,
+          "title": "Validcount",
+          "type": "integer"
+        },
+        "verifiedRecords": {
+          "items": {
+            "$ref": "#/components/schemas/CanonicalCitationResponse"
+          },
+          "title": "Verifiedrecords",
+          "type": "array"
+        }
+      },
+      "title": "VerifyCitationsResponse",
+      "type": "object"
+    },
+    "VerifyReasoningPathsResponse": {
+      "properties": {
+        "branches": {
+          "items": {
+            "$ref": "#/components/schemas/ReasoningBranchResponse"
+          },
+          "title": "Branches",
+          "type": "array"
+        },
+        "reasoningVerification": {
+          "$ref": "#/components/schemas/ReasoningVerificationResponse"
+        }
+      },
+      "title": "VerifyReasoningPathsResponse",
+      "type": "object"
+    }
+  },
+  "paths": {
+    "/wisdev/action/research.buildClaimEvidenceTable": {
+      "post": {
+        "description": "Return emitter-backed claim/evidence table output.",
+        "operationId": "build_claim_evidence_table_wisdev_action_research_buildClaimEvidenceTable_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BuildClaimEvidenceTableRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuildClaimEvidenceTableResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Build Claim Evidence Table",
+        "tags": [
+          "wisdev"
+        ]
+      }
+    },
+    "/wisdev/action/research.generateHypotheses": {
+      "post": {
+        "description": "Return emitter-backed hypotheses output for both action aliases.",
+        "operationId": "propose_hypotheses_wisdev_action_research_generateHypotheses_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProposeHypothesesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposeHypothesesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Propose Hypotheses",
+        "tags": [
+          "wisdev"
+        ]
+      }
+    },
+    "/wisdev/action/research.proposeHypotheses": {
+      "post": {
+        "description": "Return emitter-backed hypotheses output for both action aliases.",
+        "operationId": "propose_hypotheses_wisdev_action_research_proposeHypotheses_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProposeHypothesesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposeHypothesesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Propose Hypotheses",
+        "tags": [
+          "wisdev"
+        ]
+      }
+    },
+    "/wisdev/action/research.resolveCanonicalCitations": {
+      "post": {
+        "description": "Resolve citations with emitter-backed legacy flattening for Go ingress.",
+        "operationId": "resolve_canonical_citations_wisdev_action_research_resolveCanonicalCitations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveCitationsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolveCitationsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resolve Canonical Citations",
+        "tags": [
+          "wisdev"
+        ]
+      }
+    },
+    "/wisdev/action/research.verifyCitations": {
+      "post": {
+        "description": "Verify citations with emitter-backed legacy flattening for Go ingress.",
+        "operationId": "verify_citations_wisdev_action_research_verifyCitations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyCitationsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerifyCitationsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Verify Citations",
+        "tags": [
+          "wisdev"
+        ]
+      }
+    },
+    "/wisdev/action/research.verifyReasoningPaths": {
+      "post": {
+        "description": "Return emitter-backed reasoning verification output.",
+        "operationId": "verify_reasoning_paths_wisdev_action_research_verifyReasoningPaths_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyReasoningPathsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerifyReasoningPathsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Verify Reasoning Paths",
+        "tags": [
+          "wisdev"
+        ]
+      }
+    }
+  }
+}

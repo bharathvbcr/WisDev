@@ -6,15 +6,15 @@ import (
 	"testing"
 	"time"
 
-	llmv1 "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/llm/v1"
+	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestClient_DialError(t *testing.T) {
 	// Set an address that will fail fast or timeout
-	os.Setenv("LLM_SIDECAR_ADDR", "localhost:1")
-	defer os.Unsetenv("LLM_SIDECAR_ADDR")
+	os.Setenv("PYTHON_SIDECAR_GRPC_ADDR", "localhost:1")
+	defer os.Unsetenv("PYTHON_SIDECAR_GRPC_ADDR")
 
 	c := NewClient()
 	// Use a very short timeout to avoid hanging the test

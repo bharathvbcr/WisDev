@@ -62,7 +62,25 @@ func NewAutonomousWorker(loop *AutonomousLoop) *AutonomousWorker {
 	}
 }
 
-func (w *AutonomousWorker) RunAsync(ctx context.Context, req LoopRequest, onComplete func(*LoopResult, error)) error {
+func (w *AutonomousWorker) RunAsync(ctx context.Context, req LoopRequest, callbacks ...any) error {
+	var onEvent func(PlanExecutionEvent)
+	var onComplete func(*LoopResult, error)
+	switch len(callbacks) {
+	case 1:
+		if cb, ok := callbacks[0].(func(*LoopResult, error)); ok {
+			onComplete = cb
+		}
+	case 2:
+		if cb, ok := callbacks[0].(func(PlanExecutionEvent)); ok {
+			onEvent = cb
+		}
+		if cb, ok := callbacks[1].(func(*LoopResult, error)); ok {
+			onComplete = cb
+		}
+	}
+	if onComplete == nil {
+		return fmt.Errorf("onComplete callback is required")
+	}
 	return w.queue.Submit(func() {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -75,7 +93,7 @@ func (w *AutonomousWorker) RunAsync(ctx context.Context, req LoopRequest, onComp
 			runCtx = context.Background()
 		}
 
-		result, err := w.loop.Run(runCtx, req)
+		result, err := w.loop.Run(runCtx, req, onEvent)
 		onComplete(result, err)
 	})
 }

@@ -18,7 +18,7 @@ import (
 type CrossrefProvider struct {
 	BaseProvider
 	baseURL    string
-	politePool string // "mailto:contact@wisdev.com" for polite pool
+	politePool string // "mailto:contact@example.org" for polite pool
 }
 
 var _ SearchProvider = (*CrossrefProvider)(nil)
@@ -26,7 +26,7 @@ var _ SearchProvider = (*CrossrefProvider)(nil)
 func NewCrossrefProvider() *CrossrefProvider {
 	email := os.Getenv("CROSSREF_POLITE_EMAIL")
 	if email == "" {
-		email = "api@wisdev.com"
+		email = "api@wisdev.local"
 	}
 	return &CrossrefProvider{
 		baseURL:    "https://api.crossref.org/works",
@@ -51,7 +51,7 @@ func (c *CrossrefProvider) Search(ctx context.Context, query string, opts Search
 	params := url.Values{}
 	params.Set("query", query)
 	params.Set("rows", fmt.Sprintf("%d", limit))
-	params.Set("select", "DOI,title,abstract,author,published,is-referenced-by-count,URL,type")
+	params.Set("select", "DOI,title,abstract,author,published,is-referenced-by-count,references-count,container-title,URL,type")
 	// Use polite pool for higher rate limits
 	params.Set("mailto", c.politePool)
 
@@ -65,7 +65,7 @@ func (c *CrossrefProvider) Search(ctx context.Context, query string, opts Search
 		c.RecordFailure()
 		return nil, providerError("crossref", "build request: %v", err)
 	}
-	req.Header.Set("User-Agent", "ScholarLM/1.0 (mailto:"+c.politePool+")")
+	req.Header.Set("User-Agent", "WisDev/1.0 (mailto:"+c.politePool+")")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := SharedHTTPClient.Do(req)
@@ -94,8 +94,10 @@ func (c *CrossrefProvider) Search(ctx context.Context, query string, opts Search
 				Published struct {
 					DateParts [][]int `json:"date-parts"`
 				} `json:"published"`
-				IsReferencedByCount int    `json:"is-referenced-by-count"`
-				Type                string `json:"type"`
+				ContainerTitle      []string `json:"container-title"`
+				IsReferencedByCount int      `json:"is-referenced-by-count"`
+				ReferencesCount     int      `json:"references-count"`
+				Type                string   `json:"type"`
 			} `json:"items"`
 		} `json:"message"`
 	}
@@ -126,23 +128,36 @@ func (c *CrossrefProvider) Search(ctx context.Context, query string, opts Search
 		}
 
 		year := 0
+		month := 0
 		if len(item.Published.DateParts) > 0 && len(item.Published.DateParts[0]) > 0 {
 			year = item.Published.DateParts[0][0]
+			if len(item.Published.DateParts[0]) > 1 {
+				month = item.Published.DateParts[0][1]
+			}
 		}
 
 		// Strip XML tags from abstract (Crossref sometimes returns JATS XML)
 		abstract := stripJATSTags(item.Abstract)
 
+		venue := ""
+		if len(item.ContainerTitle) > 0 {
+			venue = item.ContainerTitle[0]
+		}
+
 		papers = append(papers, Paper{
-			ID:            "crossref:" + item.DOI,
-			Title:         title,
-			Abstract:      abstract,
-			Link:          link,
-			DOI:           item.DOI,
-			Source:        "crossref",
-			Authors:       authors,
-			Year:          year,
-			CitationCount: item.IsReferencedByCount,
+			ID:             "crossref:" + item.DOI,
+			Title:          title,
+			Abstract:       abstract,
+			Link:           link,
+			DOI:            item.DOI,
+			Source:         "crossref",
+			SourceApis:     []string{"crossref"},
+			Venue:          venue,
+			Authors:        authors,
+			Year:           year,
+			Month:          month,
+			CitationCount:  item.IsReferencedByCount,
+			ReferenceCount: item.ReferencesCount,
 		})
 	}
 

@@ -11,12 +11,15 @@ import (
 // RePECProvider searches RePEc/IDEAS for economics papers.
 type RePECProvider struct {
 	BaseProvider
+	baseURL string
 }
 
 var _ SearchProvider = (*RePECProvider)(nil)
 
 func NewRePECProvider() *RePECProvider {
-	return &RePECProvider{}
+	return &RePECProvider{
+		baseURL: "https://ideas.repec.org/cgi-bin/htsearch",
+	}
 }
 
 func (p *RePECProvider) Name() string { return "repec" }
@@ -36,7 +39,7 @@ type repecDoc struct {
 }
 
 func (p *RePECProvider) Search(ctx context.Context, query string, opts SearchOpts) ([]Paper, error) {
-	u, _ := url.Parse("https://ideas.repec.org/cgi-bin/htsearch")
+	u, _ := url.Parse(p.baseURL)
 	q := u.Query()
 	q.Set("q", query)
 	q.Set("fmt", "json")
@@ -45,7 +48,7 @@ func (p *RePECProvider) Search(ctx context.Context, query string, opts SearchOpt
 	u.RawQuery = q.Encode()
 
 	req, _ := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
-	req.Header.Set("User-Agent", "ScholarLM/1.0 (mailto:scholar.focus.app@gmail.com)")
+	req.Header.Set("User-Agent", "WisDev/1.0 (mailto:api@wisdev.local)")
 
 	resp, err := SharedHTTPClient.Do(req)
 	if err != nil {
@@ -80,13 +83,15 @@ func (p *RePECProvider) Search(ctx context.Context, query string, opts SearchOpt
 		}
 
 		papers = append(papers, Paper{
-			ID:       "repec-" + doc.Handle,
-			Title:    doc.Title,
-			Abstract: doc.Abstract,
-			Authors:  authors,
-			Year:     year,
-			Link:     link,
-			Source:   "IDEAS/RePEc",
+			ID:         "repec-" + doc.Handle,
+			Title:      doc.Title,
+			Abstract:   doc.Abstract,
+			Authors:    authors,
+			Year:       year,
+			Link:       link,
+			Source:     "repec",
+			SourceApis: []string{"repec"},
+			Venue:      doc.Series,
 		})
 	}
 

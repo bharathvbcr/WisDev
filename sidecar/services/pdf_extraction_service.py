@@ -249,41 +249,102 @@ def _extract_pdf_text(file_bytes: bytes) -> tuple[str, str, int, list[dict[str, 
     return text_content, first_page_text, pages_count, blocks, used_pymupdf
 
 
+def _docling_extract(file_bytes: bytes, file_name: str) -> dict[str, Any] | None:
+    """
+    Attempts extraction using IBM's Docling for high-fidelity layout preservation.
+    Returns None if docling is not installed or fails.
+    """
+    try:
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+        from docling.datamodel.document import DocumentStream
+
+        # Configure for fast but layout-aware extraction
+        pipeline_options = PdfPipelineOptions()
+        pipeline_options.do_ocr = False  # Faster, skip OCR unless needed
+        pipeline_options.do_table_structure = True
+
+        converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            }
+        )
+
+        source = DocumentStream(name=file_name, stream=io.BytesIO(file_bytes))
+        result = converter.convert(source)
+        doc = result.document
+
+        # Export to markdown for the "full text" to preserve structure/tables
+        full_text = doc.export_to_markdown()
+        
+        # Build structure map from docling's hierarchy
+        structure_map = []
+        for element, level in doc.iterate_items():
+            if hasattr(element, "label") and element.label in ["heading", "title"]:
+                # Accessing text directly if it exists, or via some other attribute
+                text = getattr(element, "text", "")
+                if text:
+                    structure_map.append({
+                        "label": text[:50],
+                        "page": 0, # Simplified for now as Prov might be complex
+                        "bbox": None,
+                    })
+
+        return {
+            "full_text": full_text,
+            "structure_map": structure_map,
+            "docling_meta": {
+                "version": "2.3.0+",
+            }
+        }
+    except Exception as e:
+        # Fallback silently or log at debug level
+        return None
+
+
 def extract_pdf_content(file_bytes: bytes, file_name: str) -> dict[str, Any]:
     """
     Extract PDF content and return both normalized and legacy response keys.
-
-    The response keeps compatibility with existing callers by exposing:
-    - `full_text` for the old HTTP route contract
-    - `fullText` for newer consumers
-    - `pageCount` and `pages` for page counts
     """
+    # 1. Try Docling first (Modern High-Fidelity path)
+    docling_res = _docling_extract(file_bytes, file_name)
+    
     text_content, first_page_text, pages_count, blocks, used_pymupdf = _extract_pdf_text(file_bytes)
-    fast_meta = _fast_regex_extract(text_content or file_name, file_name)
-
+    
+    # Merge docling results if available
+    used_docling = False
     structure_map: list[dict[str, Any]] = []
-    section_patterns = [
-        (r"(?i)^abstract", "abstract"),
-        (r"(?i)^introduction", "introduction"),
-        (r"(?i)^methodology|^methods", "methodology"),
-        (r"(?i)^results", "results"),
-        (r"(?i)^discussion", "discussion"),
-        (r"(?i)^conclusion", "conclusion"),
-        (r"(?i)^references", "references"),
-    ]
-    for block in blocks:
-        text = block["text"].strip()
-        for pattern, label in section_patterns:
-            if re.match(pattern, text):
-                structure_map.append(
-                    {
-                        "label": label,
-                        "page": block["page"],
-                        "bbox": block["bbox"],
-                    }
-                )
-                break
+    
+    if docling_res:
+        text_content = docling_res["full_text"]
+        structure_map = docling_res["structure_map"]
+        used_docling = True
+    else:
+        # Fallback to legacy structure mapping
+        section_patterns = [
+            (r"(?i)^abstract", "abstract"),
+            (r"(?i)^introduction", "introduction"),
+            (r"(?i)^methodology|^methods", "methodology"),
+            (r"(?i)^results", "results"),
+            (r"(?i)^discussion", "discussion"),
+            (r"(?i)^conclusion", "conclusion"),
+            (r"(?i)^references", "references"),
+        ]
+        for block in blocks:
+            text = block["text"].strip()
+            for pattern, label in section_patterns:
+                if re.match(pattern, text):
+                    structure_map.append(
+                        {
+                            "label": label,
+                            "page": block["page"],
+                            "bbox": block.get("bbox"),
+                        }
+                    )
+                    break
 
+    fast_meta = _fast_regex_extract(text_content or file_name, file_name)
     needs_llm = not fast_meta.get("doi") or not fast_meta.get("year") or len(fast_meta.get("title", "")) < 5
     title = fast_meta.get("title") or _normalize_title(file_name)
     doi = fast_meta.get("doi")
@@ -325,5 +386,6 @@ def extract_pdf_content(file_bytes: bytes, file_name: str) -> dict[str, Any]:
             "fileName": file_name,
             "usedPyMuPDF": used_pymupdf,
             "usedLlmFallback": used_llm_fallback,
+            "usedDocling": used_docling,
         },
     }

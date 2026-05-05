@@ -8,9 +8,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/llm"
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/search"
-	llmv1 "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/llm/v1"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
 )
 
 const (
@@ -19,7 +19,9 @@ const (
 	// AIExtractionThreshold is the minimum synthesis text length (bytes) at which
 	// the gate switches from heuristic claim extraction to AI-assisted extraction.
 	// Exported so callers can report aiClaimExtractionUsed accurately.
-	AIExtractionThreshold = 500
+	// Lowered from 500 → 200 so AI extraction fires on even short synthesis texts,
+	// reducing reliance on regex heuristics for academic claims.
+	AIExtractionThreshold = 200
 )
 
 var (
@@ -43,6 +45,7 @@ type EvidenceGateResult struct {
 	UnlinkedClaims     []string             `json:"unlinked_claims"`
 	Contradictions     []ClaimContradiction `json:"contradictions"`
 	Verdict            string               `json:"verdict"` // "passed" | "provisional" | "failed"
+	Confidence         float64              `json:"confidence"`
 	WarningPrefix      string               `json:"warning_prefix"`
 	Message            string               `json:"message"`
 	Checked            int                  `json:"checked"`
@@ -114,6 +117,11 @@ func (g *EvidenceGate) Run(ctx context.Context, synthesisText string, papers []s
 	unlinkedCount := len(unlinkedClaims)
 	contradictionCount := len(contradictions)
 
+	var confidence float64
+	if total > 0 {
+		confidence = float64(linkedCount) / float64(total)
+	}
+
 	result := &EvidenceGateResult{
 		Claims:             claims,
 		LinkedClaims:       linkedClaims,
@@ -123,6 +131,7 @@ func (g *EvidenceGate) Run(ctx context.Context, synthesisText string, papers []s
 		PassedCount:        linkedCount,
 		UnlinkedCount:      unlinkedCount,
 		ContradictionCount: contradictionCount,
+		Confidence:         confidence,
 	}
 
 	if total == 0 {
@@ -145,8 +154,95 @@ func (g *EvidenceGate) Run(ctx context.Context, synthesisText string, papers []s
 	return result, nil
 }
 
+func (g *EvidenceGate) RunStructured(ctx context.Context, answer *StructuredAnswer, papers []search.Paper) (*EvidenceGateResult, error) {
+	if answer == nil {
+		return nil, fmt.Errorf("RunStructured: answer is nil")
+	}
+
+	var claims []string
+	evidenceMap := make(map[string]string)
+	for _, p := range papers {
+		evidenceMap[p.ID] = p.Abstract
+	}
+
+	linkedClaims := make([]LinkedClaim, 0)
+	unlinkedClaims := make([]string, 0)
+
+	for _, section := range answer.Sections {
+		for _, sent := range section.Sentences {
+			claims = append(claims, sent.Text)
+			
+			if len(sent.EvidenceIDs) == 0 {
+				unlinkedClaims = append(unlinkedClaims, sent.Text)
+				continue
+			}
+
+			// Validate provided links
+			supported := false
+			for _, evID := range sent.EvidenceIDs {
+				abstract, ok := evidenceMap[evID]
+				if !ok {
+					continue
+				}
+				
+				overlap := g.calculateOverlap(sent.Text, abstract)
+				if overlap >= minOverlapRatio {
+					supported = true
+					linkedClaims = append(linkedClaims, LinkedClaim{
+						Claim:        sent.Text,
+						SourceID:     evID,
+						OverlapRatio: overlap,
+					})
+					break
+				}
+			}
+
+			if !supported {
+				unlinkedClaims = append(unlinkedClaims, sent.Text)
+			}
+		}
+	}
+
+	total := len(claims)
+	result := &EvidenceGateResult{
+		Claims:         claims,
+		LinkedClaims:   linkedClaims,
+		UnlinkedClaims: unlinkedClaims,
+		Checked:        total,
+		PassedCount:    len(linkedClaims),
+		UnlinkedCount:  len(unlinkedClaims),
+	}
+
+	if total > 0 {
+		result.Confidence = float64(len(linkedClaims)) / float64(total)
+	}
+
+	return result, nil
+}
+
+func (g *EvidenceGate) calculateOverlap(text, context string) float64 {
+	t1 := g.tokenize(text)
+	t2 := g.tokenize(context)
+	if len(t1) == 0 {
+		return 0
+	}
+	m2 := make(map[string]bool)
+	for _, t := range t2 {
+		m2[t] = true
+	}
+	overlap := 0
+	for _, t := range t1 {
+		if m2[t] {
+			overlap++
+		}
+	}
+	return float64(overlap) / float64(len(t1))
+}
+
 func (g *EvidenceGate) extractHeuristicClaims(text string) []string {
-	sentences := strings.Split(text, ". ") // Simple split, could be improved with regex
+	// Extract sentences including punctuation
+	re := regexp.MustCompile(`[^.!?]*[.!?]`)
+	sentences := re.FindAllString(text, -1)
 	claims := make([]string, 0)
 	seen := make(map[string]bool)
 
@@ -178,7 +274,7 @@ func (g *EvidenceGate) extractHeuristicClaims(text string) []string {
 }
 
 func (g *EvidenceGate) extractClaimsWithAI(ctx context.Context, synthesisText string) ([]string, error) {
-	prompt := fmt.Sprintf(`Extract the key factual claims from this academic synthesis text.
+	prompt := appendRAGStructuredOutputInstruction(fmt.Sprintf(`Extract the key factual claims from this academic synthesis text.
 A factual claim is a specific assertion that can be verified against source papers.
 Include claims about statistics, findings, effects, comparisons, and conclusions.
 
@@ -186,15 +282,13 @@ Text:
 """
 %s
 """
+Return up to 12 complete-sentence claims.`, synthesisText))
 
-Return a JSON object with a "claims" array containing up to 12 claim strings.
-Each claim should be a complete sentence.`, synthesisText)
-
-	resp, err := g.llmClient.StructuredOutput(ctx, &llmv1.StructuredRequest{
+	resp, err := g.llmClient.StructuredOutput(ctx, applyRAGLightStructuredPolicy(&llmv1.StructuredRequest{
 		Prompt:     prompt,
 		Model:      llm.ResolveLightModel(),
 		JsonSchema: `{"type": "object", "properties": {"claims": {"type": "array", "items": {"type": "string"}}}, "required": ["claims"]}`,
-	})
+	}))
 	if err != nil {
 		return nil, err
 	}
@@ -220,7 +314,10 @@ func (g *EvidenceGate) findBestSourceForClaim(claim string, papers []search.Pape
 
 	for i := range papers {
 		paper := &papers[i]
-		content := paper.Title + " " + paper.Abstract
+		content := paperGroundingText(*paper, maxGroundingChars)
+		if strings.TrimSpace(content) == "" {
+			content = strings.TrimSpace(paper.Title)
+		}
 		paperTokens := g.tokenize(content)
 		if len(paperTokens) == 0 {
 			continue
@@ -266,11 +363,75 @@ func (g *EvidenceGate) tokenize(text string) []string {
 }
 
 func (g *EvidenceGate) detectContradiction(claim string, paper search.Paper) bool {
-	negationRe := regexp.MustCompile(`(?i)\b(?:no|not|none|failed|lack|absent|without|ineffective)\b`)
-	positiveRe := regexp.MustCompile(`(?i)\b(?:significant|positive|effective|beneficial|improved)\b`)
+	if claim == "" {
+		return false
+	}
+	groundingText := paperGroundingText(paper, maxGroundingChars)
+	if groundingText == "" {
+		return false
+	}
 
-	claimNegated := negationRe.MatchString(claim)
-	paperPositive := positiveRe.MatchString(paper.Abstract)
+	// Require topic overlap between the claim and the abstract before flagging
+	// a contradiction. This prevents false positives where a claim negating
+	// Topic A is matched against an abstract about Topic B that merely
+	// contains positive-sentiment words.
+	//
+	// Strategy: tokenize both texts and require at least 2 shared content
+	// tokens (after stop-word removal). This is robust against negation words
+	// appearing in the claim subject (e.g. "failed") — they are simply
+	// excluded from the overlap count because the abstract won't contain them.
+	claimTokens := g.tokenize(claim)
+	abstractTokens := g.tokenize(groundingText)
 
-	return claimNegated && paperPositive
+	abstractSet := make(map[string]bool, len(abstractTokens))
+	for _, t := range abstractTokens {
+		abstractSet[t] = true
+	}
+
+	const minOverlapForContradiction = 2
+	overlap := 0
+	for _, t := range claimTokens {
+		if abstractSet[t] {
+			overlap++
+			if overlap >= minOverlapForContradiction {
+				break
+			}
+		}
+	}
+	if overlap < minOverlapForContradiction {
+		return false
+	}
+
+	negationRe := regexp.MustCompile(`(?i)\b(?:no|not|none|failed|lack|absent|without|ineffective|does not|did not)\b`)
+	positiveRe := regexp.MustCompile(`(?i)\b(?:significant|positive|effective|beneficial|improved|superior|demonstrates)\b`)
+
+	return negationRe.MatchString(claim) && positiveRe.MatchString(groundingText)
+}
+
+// IsSafeSnippet checks a retrieved snippet for common prompt injection patterns.
+func IsSafeSnippet(snippet string) (bool, string) {
+	lower := strings.ToLower(snippet)
+	patterns := []struct {
+		pattern string
+		reason  string
+	}{
+		{"ignore previous instructions", "classic instruction override"},
+		{"disregard all prior", "instruction override"},
+		{"forget everything you have been told", "instruction override"},
+		{"you are now a", "persona shift"},
+		{"from now on", "rule change"},
+		{"assistant:", "jailbreak attempt"},
+		{"user:", "jailbreak attempt"},
+		{"system:", "jailbreak attempt"},
+		{"[system]", "jailbreak attempt"},
+		{"(system)", "jailbreak attempt"},
+		{"{system}", "jailbreak attempt"},
+	}
+
+	for _, p := range patterns {
+		if strings.Contains(lower, p.pattern) {
+			return false, p.reason
+		}
+	}
+	return true, ""
 }

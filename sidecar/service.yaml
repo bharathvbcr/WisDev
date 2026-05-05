@@ -1,21 +1,26 @@
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
-  name: wisdev-api
+  name: wisdev-sidecar
 spec:
   template:
     metadata:
       annotations:
-        # Keep 1 instance warm to eliminate cold starts (~$7/month)
+        # Keep one warm instance for the Gemini sidecar so cold-start retries do
+        # not dominate the first browser-facing request.
+        run.googleapis.com/startup-cpu-boost: "true"
         autoscaling.knative.dev/minScale: "1"
-        # Cap at 10 instances to bound costs during scaling
         autoscaling.knative.dev/maxScale: "10"
     spec:
-      # 80 concurrent requests per instance — uvicorn handles I/O-bound workloads well
+      # Match the app-owned retry and budget policy before reducing concurrency.
+      # Raise or lower this only with evidence of queueing inside a warm pod.
       containerConcurrency: 80
+      # Cloud Run's ceiling should sit comfortably above app-owned latency
+      # budgets, not act as the first timeout surface. The Go orchestrator owns
+      # the 55s outer deadline; the sidecar keeps a 60s transport ceiling.
       timeoutSeconds: 60
       containers:
-        - image: ghcr.io/wisdev-agent/wisdev-sidecar:latest
+        - image: ghcr.io/wisdev/wisdev-sidecar:latest
           ports:
             - containerPort: 8080
           resources:

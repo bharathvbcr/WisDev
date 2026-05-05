@@ -5,7 +5,7 @@ import grpc
 import pytest
 
 from grpc_server import LLMServiceServicer
-from proto import llm_v1_pb2 as llm_pb2
+from proto import llm_pb2
 
 
 class AbortCalled(RuntimeError):
@@ -86,3 +86,24 @@ async def test_structured_output_rejects_invalid_schema():
     payload = json.loads(exc_info.value.details)
     assert payload['ok'] is False
     assert payload['error']['code'] == 'INVALID_JSON_SCHEMA'
+
+
+@pytest.mark.asyncio
+async def test_health_reports_runtime_diagnostics_when_gemini_is_unavailable():
+    servicer = LLMServiceServicer()
+    request = llm_pb2.HealthRequest()
+    context = DummyContext()
+
+    with patch("grpc_server.get_gemini_runtime_diagnostics", return_value={
+        "status": "degraded",
+        "source": "vertex_project",
+        "mode": "auto",
+        "projectConfigured": True,
+        "proxyConfigured": False,
+        "ready": False,
+        "detail": "Vertex project is configured but the native Gemini client is unavailable.",
+    }):
+        response = await servicer.Health(request, context)
+
+    assert response.ok is False
+    assert "native Gemini client is unavailable" in response.error

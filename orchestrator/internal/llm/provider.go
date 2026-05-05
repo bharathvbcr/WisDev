@@ -2,7 +2,7 @@ package llm
 
 import (
 	"context"
-	llmv1 "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/llm/v1"
+	llmpb "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
 )
 
 // ModelProvider simplifies model calls using tier aliases.
@@ -29,7 +29,7 @@ func (p *ModelProvider) Call(ctx context.Context, tier string, prompt string) (s
 		model = ResolveStandardModel()
 	}
 
-	resp, err := p.client.Generate(ctx, &llmv1.GenerateRequest{
+	resp, err := p.client.Generate(ctx, &llmpb.GenerateRequest{
 		Prompt: prompt,
 		Model:  model,
 	})

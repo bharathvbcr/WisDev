@@ -20,7 +20,7 @@ type DOAJProvider struct {
 var _ SearchProvider = (*DOAJProvider)(nil)
 
 func NewDOAJProvider() *DOAJProvider {
-	return &DOAJProvider{baseURL: "https://doaj.org/api/search/articles/"}
+	return &DOAJProvider{baseURL: "https://doaj.org/api/v4/search/articles/"}
 }
 
 func (d *DOAJProvider) Name() string { return "doaj" }
@@ -64,9 +64,12 @@ func (d *DOAJProvider) Search(ctx context.Context, query string, opts SearchOpts
 		Results []struct {
 			ID      string `json:"id"`
 			Bibjson struct {
-				Title      string `json:"title"`
-				Abstract   string `json:"abstract"`
-				Year       string `json:"year"`
+				Title    string `json:"title"`
+				Abstract string `json:"abstract"`
+				Year     string `json:"year"`
+				Journal  struct {
+					Title string `json:"title"`
+				} `json:"journal"`
 				Identifier []struct {
 					Type string `json:"type"`
 					ID   string `json:"id"`
@@ -105,14 +108,35 @@ func (d *DOAJProvider) Search(ctx context.Context, query string, opts SearchOpts
 		}
 
 		var link string
+		var openAccessUrl string
+		var pdfUrl string
 		for _, l := range bib.Link {
-			if l.Type == "fulltext" || strings.Contains(strings.ToLower(l.ContentType), "pdf") {
-				link = l.URL
-				break
+			url := strings.TrimSpace(l.URL)
+			if url == "" {
+				continue
+			}
+			linkType := strings.ToLower(strings.TrimSpace(l.Type))
+			contentType := strings.ToLower(strings.TrimSpace(l.ContentType))
+			isPDF := strings.Contains(contentType, "pdf")
+			isFullText := linkType == "fulltext"
+
+			if link == "" && (isFullText || isPDF) {
+				link = url
+			}
+			if openAccessUrl == "" && isFullText {
+				openAccessUrl = url
+			}
+			if isPDF {
+				if pdfUrl == "" {
+					pdfUrl = url
+				}
+				if openAccessUrl == "" {
+					openAccessUrl = url
+				}
 			}
 		}
 		if link == "" && len(bib.Link) > 0 {
-			link = bib.Link[0].URL
+			link = strings.TrimSpace(bib.Link[0].URL)
 		}
 
 		authors := make([]string, 0, len(bib.Author))
@@ -126,14 +150,18 @@ func (d *DOAJProvider) Search(ctx context.Context, query string, opts SearchOpts
 		fmt.Sscanf(bib.Year, "%d", &year)
 
 		papers = append(papers, Paper{
-			ID:       "doaj:" + item.ID,
-			Title:    title,
-			Abstract: strings.TrimSpace(bib.Abstract),
-			Link:     link,
-			DOI:      doi,
-			Source:   "doaj",
-			Authors:  authors,
-			Year:     year,
+			ID:            "doaj:" + item.ID,
+			Title:         title,
+			Abstract:      strings.TrimSpace(bib.Abstract),
+			Link:          link,
+			DOI:           doi,
+			Source:        "doaj",
+			SourceApis:    []string{"doaj"},
+			Authors:       authors,
+			Year:          year,
+			Venue:         strings.TrimSpace(bib.Journal.Title),
+			OpenAccessUrl: openAccessUrl,
+			PdfUrl:        pdfUrl,
 		})
 	}
 

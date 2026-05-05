@@ -75,12 +75,8 @@ func TestEvaluateGuardrailHeuristic(t *testing.T) {
 	}
 }
 
-// TestEvaluateGuardrailDispatch covers the EvaluateGuardrail dispatcher:
-// with Rust bridge disabled AND not required, it falls through to the heuristic.
+// TestEvaluateGuardrailDispatch covers the EvaluateGuardrail dispatcher.
 func TestEvaluateGuardrailDispatch(t *testing.T) {
-	t.Setenv("WISDEV_RUST_REQUIRED", "false")
-	t.Setenv("WISDEV_RUST_BRIDGE_BIN", "") // empty path disables bridge
-
 	cfg := DefaultPolicyConfig()
 	budget := NewBudgetState(cfg)
 

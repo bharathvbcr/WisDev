@@ -3,7 +3,7 @@ package wisdev
 import (
 	"context"
 
-	llmv1 "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/llm/v1"
+	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
 
 	"github.com/stretchr/testify/mock"
 )

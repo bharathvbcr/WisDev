@@ -2,14 +2,13 @@ package wisdev
 
 import (
 	"context"
-	"log"
 	"log/slog"
 	"net"
 	"os"
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	wisdevpb "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/v2"
+	wisdevpb "github.com/wisdev/wisdev-agent-os/orchestrator/proto/wisdev"
 
 	"google.golang.org/grpc"
 )
@@ -85,19 +84,9 @@ func (s *searchGatewayServer) IterativeSearch(ctx context.Context, req *wisdevpb
 		})
 	}
 
-	var iterations []*wisdevpb.IterationLog
-	for _, iter := range result.Iterations {
-		iterations = append(iterations, &wisdevpb.IterationLog{
-			Iteration:     int32(iter.Iteration),
-			QueriesAdded:  iter.QueriesAdded,
-			CoverageScore: float32(iter.CoverageScore),
-			PrmReward:     float32(iter.PRMReward),
-		})
-	}
-
 	return &wisdevpb.IterativeSearchResponse{
 		Papers:        papers,
-		Iterations:    iterations,
+		Iterations:    toProtoIterationLogs(result.Iterations),
 		FinalCoverage: float32(result.FinalCoverage),
 		FinalReward:   float32(result.FinalReward),
 	}, nil
@@ -145,7 +134,7 @@ func (s *searchGatewayServer) ReRankResults(ctx context.Context, req *wisdevpb.R
 	return &wisdevpb.ReRankResponse{
 		Papers:       out,
 		RerankTimeMs: int32(time.Since(started).Milliseconds()),
-		RerankMethod: "go-stage2-cross-encoder-deprecated",
+		RerankMethod: "go-stage2-bm25-crossfield",
 	}, nil
 }
 
@@ -169,6 +158,22 @@ func (s *searchGatewayServer) StreamSearch(req *wisdevpb.SearchRequest, stream w
 	return nil
 }
 
+// toProtoIterationLogs converts domain IterationLog values to proto transport messages.
+// The int→int32 and float64→float32 narrowing is intentional: the wire format uses
+// smaller types and the precision is sufficient for coverage / PRM reward signals.
+func toProtoIterationLogs(logs []IterationLog) []*wisdevpb.IterationLog {
+	out := make([]*wisdevpb.IterationLog, 0, len(logs))
+	for _, l := range logs {
+		out = append(out, &wisdevpb.IterationLog{
+			Iteration:     int32(l.Iteration),
+			QueriesAdded:  l.QueriesAdded,
+			CoverageScore: float32(l.CoverageScore),
+			PrmReward:     float32(l.PRMReward),
+		})
+	}
+	return out
+}
+
 func StartGRPCServer(port string, gw *AgentGateway, rdb redis.UniversalClient) error {
 	lis, err := net.Listen("tcp", port)
 	if err != nil {
@@ -180,7 +185,7 @@ func StartGRPCServer(port string, gw *AgentGateway, rdb redis.UniversalClient) e
 		gateway: gw,
 	})
 
-	log.Printf("Starting gRPC Search Gateway Server on %v", lis.Addr())
+	slog.Info("Starting gRPC Search Gateway Server", "addr", lis.Addr())
 	if err := s.Serve(lis); err != nil {
 		return err
 	}

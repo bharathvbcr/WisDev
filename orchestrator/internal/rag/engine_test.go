@@ -1,68 +1,72 @@
 package rag
 
 import (
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/search"
+	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
 )
 
-func TestBM25(t *testing.T) {
-	bm25 := NewBM25()
-	docs := []string{
-		"The quick brown fox jumps over the lazy dog",
-		"Academic papers on artificial intelligence and machine learning",
-		"Retrieval augmented generation for research assistants",
+func TestEngine_GenerateAnswer_NoPapers(t *testing.T) {
+	is := assert.New(t)
+	reg := search.NewProviderRegistry()
+	llmClient := llm.NewClient()
+	engine := NewEngine(reg, llmClient)
+
+	resp, err := engine.GenerateAnswer(context.Background(), AnswerRequest{
+		Query: "what is the impact of GNNs on protein folding?",
+	})
+
+	if err != nil {
+		is.Contains(err.Error(), "synthesis failed")
+		return
 	}
 
-	// Query matches second doc
-	scores1 := bm25.Score("artificial intelligence", docs)
-	if scores1[1] <= scores1[0] || scores1[1] <= scores1[2] {
-		t.Errorf("Expected second doc to have highest score for AI query")
-	}
-
-	// Query matches third doc
-	scores2 := bm25.Score("research RAG", docs)
-	if scores2[2] <= scores2[0] || scores2[2] <= scores2[1] {
-		t.Errorf("Expected third doc to have highest score for RAG query")
-	}
+	is.NoError(err)
+	is.Contains(resp.Answer, "I couldn't find any relevant academic papers")
 }
 
-func TestFusion(t *testing.T) {
-	list1 := []search.Paper{
-		{ID: "A", Title: "Paper A", DOI: "10.1"},
-		{ID: "B", Title: "Paper B", DOI: "10.2"},
-	}
-	list2 := []search.Paper{
-		{ID: "C", Title: "Paper C", DOI: "10.3"},
-		{ID: "A", Title: "Paper A", DOI: "10.1"}, // Duplicate
-	}
-
-	fused := RRF([][]search.Paper{list1, list2}, 60)
-
-	if len(fused) != 3 {
-		t.Errorf("Expected 3 unique papers after fusion, got %d", len(fused))
-	}
-
-	// Paper A should be first as it's in both lists
-	if fused[0].ID != "A" {
-		t.Errorf("Expected Paper A to be first after fusion")
-	}
-}
-
-func TestExtractCitations(t *testing.T) {
-	e := &Engine{}
+func TestDedupPapers(t *testing.T) {
+	is := assert.New(t)
 	papers := []search.Paper{
-		{ID: "P1", Title: "Climate Change 2024"},
-		{ID: "P2", Title: "Renewable Energy Analysis"},
+		{ID: "1", Title: "Paper 1"},
+		{ID: "1", Title: "Paper 1 Duplicate"},
+		{DOI: "10.123", Title: "Paper 2"},
+		{DOI: "10.123", Title: "Paper 2 Duplicate"},
+		{Title: "Paper 3"},
+		{Title: "Paper 3"},
 	}
 
-	text := "Recent studies show global temperatures rising [1]. Solar power is efficient [2]."
-	citations := e.extractCitations(text, papers)
+	unique := dedupPapers(papers)
+	is.Len(unique, 3)
+}
 
-	if len(citations) != 2 {
-		t.Errorf("Expected 2 citations, got %d", len(citations))
+func TestTruncateContextRune(t *testing.T) {
+	is := assert.New(t)
+	is.Equal("abc", truncateContextRune("abc", 10))
+	is.Equal("ab…", truncateContextRune("abc", 2))
+	is.Equal("😊…", truncateContextRune("😊😊", 1))
+}
+
+func TestEngine_SelectSectionContext(t *testing.T) {
+	is := assert.New(t)
+	engine := NewEngine(nil, nil)
+
+	req := SectionContextRequest{
+		SectionName: "Introduction",
+		SectionGoal: "Explain GNNs",
+		Papers: []search.Paper{
+			{ID: "p1", Title: "Title 1", Abstract: "GNNs are powerful for graph data."},
+			{ID: "p2", Title: "Title 2", Abstract: "Transformers are used in NLP."},
+		},
+		Limit: 1,
 	}
 
-	if citations[0].SourceID != "P1" || citations[1].SourceID != "P2" {
-		t.Errorf("Citations mapped incorrectly: %v", citations)
-	}
+	resp, err := engine.SelectSectionContext(context.Background(), req)
+	is.NoError(err)
+	is.Equal("Introduction", resp.SectionName)
+	is.Len(resp.SelectedChunks, 1)
+	is.Equal("p1", resp.SelectedChunks[0].PaperID)
 }

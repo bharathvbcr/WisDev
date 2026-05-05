@@ -38,5 +38,6 @@ func BuildRegistry(requestedProviders ...string) *ProviderRegistry {
 	addProvider("philpapers", NewPhilPapersProvider())
 
 	ApplyDomainRoutes(reg)
+	reg.SetDB(nil)
 	return reg
 }

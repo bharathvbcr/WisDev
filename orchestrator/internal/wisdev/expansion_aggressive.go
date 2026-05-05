@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
 	"regexp"
 	"sort"
 	"strings"
@@ -160,7 +161,7 @@ type QueryVariation struct {
 	Description string `json:"description,omitempty"`
 }
 
-// AggressiveExpansionRequest is the request body for POST /v2/expand/aggressive.
+// AggressiveExpansionRequest is the request body for POST /expand/aggressive.
 type AggressiveExpansionRequest struct {
 	Query                string   `json:"query"`
 	MaxVariations        int      `json:"max_variations"`
@@ -170,7 +171,7 @@ type AggressiveExpansionRequest struct {
 	TargetAPIs           []string `json:"target_apis"`
 }
 
-// AggressiveExpansionResponse is the response for POST /v2/expand/aggressive.
+// AggressiveExpansionResponse is the response for POST /expand/aggressive.
 type AggressiveExpansionResponse struct {
 	Original   string            `json:"original"`
 	Variations []QueryVariation  `json:"variations"`
@@ -185,7 +186,7 @@ type expansionMetadata struct {
 	PrimaryKeywords   []string `json:"primary_keywords"`
 }
 
-// SPLADEExpansionRequest is the request body for POST /v2/expand/splade.
+// SPLADEExpansionRequest is the request body for POST /expand/splade.
 type SPLADEExpansionRequest struct {
 	Query string `json:"query"`
 }
@@ -604,6 +605,56 @@ func limitVariations(vs []QueryVariation, n int) []QueryVariation {
 	return vs
 }
 
+func normalizeAdaptiveQuery(query string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(query))), " ")
+}
+
+// GenerateAdaptiveExpansion ranks aggressive query variations using learned
+// historical performance for both strategies and specific expanded queries.
+func GenerateAdaptiveExpansion(ctx context.Context, si *search.SearchIntelligence, rdb redis.UniversalClient, query string, maxVariations int, includeMeSH, includeAbbrev, includeTemporal bool, targetAPIs []string) AggressiveExpansionResponse {
+	resp := GenerateAggressiveExpansion(rdb, query, maxVariations*2, includeMeSH, includeAbbrev, includeTemporal, targetAPIs)
+	if si == nil {
+		return resp
+	}
+
+	strategyScores, _ := si.GetStrategyScores(ctx)
+	expansionScores, _ := si.GetExpandedQueryScores(ctx, query, maxVariations*3)
+	byExpandedQuery := make(map[string]search.ExpandedQueryScore, len(expansionScores))
+	for _, item := range expansionScores {
+		normalized := normalizeAdaptiveQuery(item.Query)
+		if normalized == "" {
+			continue
+		}
+		if current, exists := byExpandedQuery[normalized]; !exists || item.Score > current.Score {
+			byExpandedQuery[normalized] = item
+		}
+	}
+
+	for i := range resp.Variations {
+		boost := 0
+		if score, ok := strategyScores[resp.Variations[i].Strategy]; ok && score > 0 {
+			boost += min2(4, int(score/4.0)+1)
+		}
+		if historical, ok := byExpandedQuery[normalizeAdaptiveQuery(resp.Variations[i].Query)]; ok && historical.Score > 0 {
+			boost += min2(8, int(historical.Score/3.0)+2)
+			if resp.Variations[i].Strategy == "" && historical.Strategy != "" {
+				resp.Variations[i].Strategy = historical.Strategy
+			}
+		}
+		resp.Variations[i].Priority += boost
+	}
+
+	sort.Slice(resp.Variations, func(i, j int) bool {
+		if resp.Variations[i].Priority == resp.Variations[j].Priority {
+			return resp.Variations[i].Query < resp.Variations[j].Query
+		}
+		return resp.Variations[i].Priority > resp.Variations[j].Priority
+	})
+	resp.Variations = limitVariations(resp.Variations, maxVariations)
+	resp.Metadata.TotalVariations = len(resp.Variations)
+	return resp
+}
+
 // ==========================================
 // CORE EXPANSION FUNCTION
 // ==========================================
@@ -746,13 +797,13 @@ func GenerateAggressiveExpansion(rdb redis.UniversalClient, query string, maxVar
 // HANDLERS
 // ==========================================
 
-// handleAggressiveExpansion handles POST /v2/expand/aggressive.
+// handleAggressiveExpansion handles POST /expand/aggressive.
 //
 // Applies all 14 dictionary-based expansion strategies and returns
 // deduplicated, priority-sorted query variations. Results are cached
 // in Redis for 1 hour keyed by SHA-256(query+maxVariations).
 
-// handleSPLADEExpansion handles POST /v2/expand/splade.
+// handleSPLADEExpansion handles POST /expand/splade.
 //
 // Thin wrapper around the existing expandQuery function in query_expansion.go,
 // returning per-term weights and the expanded query string in a typed response.

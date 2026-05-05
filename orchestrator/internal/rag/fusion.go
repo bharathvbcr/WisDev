@@ -1,59 +1,32 @@
 package rag
 
 import (
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/search"
-	"sort"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
 )
 
 // RRF performs Reciprocal Rank Fusion on multiple result sets.
+// It delegates to search.RRFFuse which includes full metadata merging:
+// best citation count, abstract, link, DOI, year, venue, and source-API deduplication.
 func RRF(results [][]search.Paper, k int) []search.Paper {
-	if len(results) == 0 {
-		return nil
+	return search.RRFFuse(results, k)
+}
+
+// RRFWithIntelligence fuses result lists and then boosts scores with provider intelligence
+// scores learned from historical search interactions.
+func RRFWithIntelligence(results [][]search.Paper, k int, providerScores map[string]float64) []search.Paper {
+	fused := search.RRFFuse(results, k)
+	if len(providerScores) == 0 {
+		return fused
 	}
-	if k <= 0 {
-		k = 60
+	return search.BoostByIntelligence(fused, providerScores)
+}
+
+// RRFWithClicks fuses result lists and then re-ranks using user click history.
+// clicks maps paper ID → click count.
+func RRFWithClicks(results [][]search.Paper, k int, clicks map[string]int) []search.Paper {
+	fused := search.RRFFuse(results, k)
+	if len(clicks) == 0 {
+		return fused
 	}
-
-	scores := make(map[string]float64)
-	papers := make(map[string]search.Paper)
-
-	for _, resultSet := range results {
-		for rank, paper := range resultSet {
-			id := paper.ID
-			if id == "" {
-				id = paper.DOI
-			}
-			if id == "" {
-				id = paper.Title
-			}
-
-			scores[id] += 1.0 / float64(k+rank+1)
-			if _, ok := papers[id]; !ok {
-				papers[id] = paper
-			}
-		}
-	}
-
-	type scoredPaper struct {
-		id    string
-		score float64
-	}
-
-	var sorted []scoredPaper
-	for id, score := range scores {
-		sorted = append(sorted, scoredPaper{id, score})
-	}
-
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].score > sorted[j].score
-	})
-
-	var out []search.Paper
-	for _, sp := range sorted {
-		p := papers[sp.id]
-		p.Score = sp.score
-		out = append(out, p)
-	}
-
-	return out
+	return search.BoostByClicks(fused, clicks)
 }

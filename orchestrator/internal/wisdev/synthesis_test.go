@@ -8,7 +8,7 @@ import (
 
 func TestSynthesis_ScorePlanCandidate(t *testing.T) {
 	steps := []PlanStep{{Action: "research.verifyCitations"}, {Action: "research.buildClaimEvidenceTable"}}
-	
+
 	t.Run("General", func(t *testing.T) {
 		s := scorePlanCandidate("query", "general", steps)
 		assert.Greater(t, s, 0.5)
@@ -53,9 +53,9 @@ func TestSynthesis_SynthesizePlanCandidates(t *testing.T) {
 
 	t.Run("With Priors", func(t *testing.T) {
 		RecordPlanOutcome(wisdevOutcomeSummary{
-			Query:      "ai",
-			Success:    true,
-			Hypothesis: "balanced_evidence_first",
+			Query:       "ai",
+			Success:     true,
+			Hypothesis:  "balanced_evidence_first",
 			FinalReward: 1.0,
 		})
 		res := SynthesizePlanCandidates(session, "ai research")
@@ -69,7 +69,7 @@ func TestSynthesis_Helpers(t *testing.T) {
 
 	step := CreatePlanStep("id", "act", "res", RiskLevelHigh, ExecutionTargetGoNative, true)
 	assert.Equal(t, ModelTierHeavy, step.ModelTier)
-	
+
 	ps := newPlanState("pid", nil)
 	assert.Equal(t, "pid", ps.PlanID)
 }

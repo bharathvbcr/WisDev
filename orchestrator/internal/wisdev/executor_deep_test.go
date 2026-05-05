@@ -7,32 +7,24 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/llm"
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/policy"
-	llmv1 "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/llm/v1"
-	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/policy"
+	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
 )
 
 func TestExecutor_Execute_Full(t *testing.T) {
 	os.Setenv("LLM_HEAVY_MODEL", "pro")
 	os.Setenv("LLM_BALANCED_MODEL", "balanced")
 	os.Setenv("LLM_LIGHT_MODEL", "flash")
-	os.Setenv("WISDEV_RUST_REQUIRED", "false")
+	os.Setenv(allowGoCitationFallbackEnv, "true")
 	defer func() {
 		os.Unsetenv("LLM_HEAVY_MODEL")
 		os.Unsetenv("LLM_BALANCED_MODEL")
 		os.Unsetenv("LLM_LIGHT_MODEL")
-		os.Unsetenv("WISDEV_RUST_REQUIRED")
+		os.Unsetenv(allowGoCitationFallbackEnv)
 	}()
-
-	// Mock FastParallelSearch
-	origSearch := FastParallelSearch
-	defer func() { FastParallelSearch = origSearch }()
-	FastParallelSearch = func(ctx context.Context, _ redis.UniversalClient, query string, limit int) ([]Source, error) {
-		return []Source{{ID: "p1", Title: "Paper 1"}}, nil
-	}
 
 	// Mock LLM
 	msc := &mockLLMServiceClient{}
@@ -50,14 +42,30 @@ func TestExecutor_Execute_Full(t *testing.T) {
 	e.maxParallelLanes = 1
 
 	t.Run("Linear Success Path", func(t *testing.T) {
+		e.pythonExecute = func(ctx context.Context, action string, payload map[string]any, sess *AgentSession) (map[string]any, error) {
+			return map[string]any{"success": true, "confidence": 0.95}, nil
+		}
+
 		session := &AgentSession{
-			SessionID: "linear_success",
-			Status:    SessionGeneratingTree,
+			SessionID:     "linear_success",
+			OriginalQuery: "sleep and memory",
+			Status:        SessionGeneratingTree,
 			Plan: &PlanState{
 				PlanID: "p1",
 				Steps: []PlanStep{
-					{ID: "s1", Action: "search", ExecutionTarget: ExecutionTargetGoNative, Risk: RiskLevelLow},
-					{ID: "s2", Action: "retrieve", ExecutionTarget: ExecutionTargetGoNative, DependsOnStepIDs: []string{"s1"}, Risk: RiskLevelLow},
+					{
+						ID:              "s1",
+						Action:          "search",
+						ExecutionTarget: ExecutionTargetPythonCapability,
+						Risk:            RiskLevelLow,
+					},
+					{
+						ID:               "s2",
+						Action:           "retrieve",
+						ExecutionTarget:  ExecutionTargetPythonCapability,
+						DependsOnStepIDs: []string{"s1"},
+						Risk:             RiskLevelLow,
+					},
 				},
 				CompletedStepIDs: make(map[string]bool),
 				FailedStepIDs:    make(map[string]string),
@@ -71,8 +79,9 @@ func TestExecutor_Execute_Full(t *testing.T) {
 		out := make(chan PlanExecutionEvent, 100)
 		e.Execute(context.Background(), session, out)
 
-		for range out {} // consume all
-		
+		for range out {
+		} // consume all
+
 		assert.True(t, session.Plan.CompletedStepIDs["s1"])
 		assert.True(t, session.Plan.CompletedStepIDs["s2"])
 		assert.Equal(t, SessionComplete, session.Status)
@@ -80,8 +89,9 @@ func TestExecutor_Execute_Full(t *testing.T) {
 
 	t.Run("Deadlock and Replan", func(t *testing.T) {
 		session := &AgentSession{
-			SessionID: "deadlock_replan",
-			Status:    SessionGeneratingTree,
+			SessionID:     "deadlock_replan",
+			OriginalQuery: "sleep and memory",
+			Status:        SessionGeneratingTree,
 			Plan: &PlanState{
 				PlanID: "p_deadlock",
 				Steps: []PlanStep{
@@ -100,7 +110,7 @@ func TestExecutor_Execute_Full(t *testing.T) {
 
 		// Replan step will also have no ready steps if we don't fix the plan.
 		// But let's just see it trigger.
-		
+
 		// Wait, Execute loop for "no ready steps" will add a step then CONTINUE the loop.
 		// We need to limit this or it will loop forever in test.
 		e.maxReplans = 1
@@ -109,9 +119,10 @@ func TestExecutor_Execute_Full(t *testing.T) {
 		// Use a context with timeout to be safe
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()
-		
+
 		e.Execute(ctx, session, out)
-		for range out {}
+		for range out {
+		}
 
 		assert.Equal(t, 1, session.Plan.ReplanCount)
 		assert.True(t, len(session.Plan.Steps) > 1)

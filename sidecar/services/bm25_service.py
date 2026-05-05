@@ -6,12 +6,61 @@ BM25 complements vector search by catching exact terms that
 semantic similarity may miss (paper IDs, gene names, formulas).
 """
 
-from rank_bm25 import BM25Okapi
 from typing import List, Tuple, Optional
 import logging
 import re
+import math
+
+try:
+    from rank_bm25 import BM25Okapi  # type: ignore
+except ModuleNotFoundError:
+    BM25Okapi = None
 
 logger = logging.getLogger(__name__)
+
+
+class _FallbackScores(list):
+    def argsort(self):
+        return sorted(range(len(self)), key=lambda idx: self[idx])
+
+
+class _FallbackBM25Okapi:
+    """Minimal lexical fallback when rank_bm25 is unavailable."""
+
+    def __init__(self, tokenized_corpus: List[List[str]]):
+        self.corpus = tokenized_corpus
+        self.doc_freqs: dict[str, int] = {}
+        self.doc_lengths = [len(doc) for doc in tokenized_corpus]
+        self.avgdl = sum(self.doc_lengths) / max(1, len(self.doc_lengths))
+        for doc in tokenized_corpus:
+            seen = set(doc)
+            for token in seen:
+                self.doc_freqs[token] = self.doc_freqs.get(token, 0) + 1
+
+    def get_scores(self, tokenized_query: List[str]):
+        k1 = 1.5
+        b = 0.75
+        scores: List[float] = []
+        doc_count = max(1, len(self.corpus))
+        for doc, doc_len in zip(self.corpus, self.doc_lengths):
+            score = 0.0
+            for token in tokenized_query:
+                tf = doc.count(token)
+                if tf == 0:
+                    continue
+                df = self.doc_freqs.get(token, 0)
+                idf = math.log(1 + ((doc_count - df + 0.5) / (df + 0.5)))
+                denom = tf + k1 * (1 - b + b * (doc_len / max(1.0, self.avgdl)))
+                score += idf * ((tf * (k1 + 1)) / max(1e-9, denom))
+            scores.append(score)
+        return _FallbackScores(scores)
+
+
+def _create_bm25(tokenized: List[List[str]]):
+    if BM25Okapi is not None:
+        return BM25Okapi(tokenized)
+    logger.warning("rank_bm25 not installed; using fallback lexical scorer")
+    return _FallbackBM25Okapi(tokenized)
 
 
 def tokenize(text: str) -> List[str]:
@@ -59,7 +108,7 @@ class BM25Index:
         tokenized = [tokenize(doc) for doc in docs]
 
         # Build BM25 index
-        self.index = BM25Okapi(tokenized)
+        self.index = _create_bm25(tokenized)
 
         logger.info(f"BM25 indexed {len(docs)} documents")
         return len(docs)

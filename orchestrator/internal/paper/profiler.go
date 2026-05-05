@@ -4,10 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/llm"
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/search"
-	llmv1 "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/llm/v1"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
+	"strings"
 )
+
+const profilerStructuredOutputSchemaInstruction = "Use the supplied structured output schema exactly."
+
+func appendProfilerStructuredOutputInstruction(prompt string) string {
+	trimmed := strings.TrimSpace(prompt)
+	if trimmed == "" {
+		return profilerStructuredOutputSchemaInstruction
+	}
+	return trimmed + "\n\n" + profilerStructuredOutputSchemaInstruction
+}
 
 // Profile represents a deep analysis of an academic paper.
 type Profile struct {
@@ -34,20 +45,12 @@ func NewProfiler(llm *llm.Client) *Profiler {
 
 // ExtractProfile generates a deep profile for a given paper.
 func (p *Profiler) ExtractProfile(ctx context.Context, paper search.Paper) (*Profile, error) {
-	prompt := fmt.Sprintf(`Extract a deep research profile for the following paper:
+	prompt := appendProfilerStructuredOutputInstruction(fmt.Sprintf(`Extract a deep research profile for the following paper:
 Title: %s
 Abstract: %s
 
-Return a JSON object with:
-- summary (detailed 2-3 sentence summary)
-- keyFindings (list of 3-5 main results)
-- methodology (description of techniques used)
-- methodologicalRigor (one of: "high", "medium", "low")
-- sampleSize (if mentioned, otherwise "not specified")
-- limitations (potential biases or weaknesses)
-- impactScore (float 0-1 based on citation potential and novelty)
-- noveltyScore (float 0-1 based on how new the approach is)
-`, paper.Title, paper.Abstract)
+Provide summary, keyFindings, methodology, methodologicalRigor, sampleSize, limitations, impactScore, and noveltyScore.
+`, paper.Title, paper.Abstract))
 
 	schema := `{
 		"type": "object",
@@ -64,11 +67,15 @@ Return a JSON object with:
 		"required": ["summary", "keyFindings", "methodology", "methodologicalRigor", "sampleSize", "limitations", "impactScore", "noveltyScore"]
 	}`
 
-	resp, err := p.llmClient.StructuredOutput(ctx, &llmv1.StructuredRequest{
+	resp, err := p.llmClient.StructuredOutput(ctx, llm.ApplyStructuredPolicy(&llmv1.StructuredRequest{
 		Prompt:     prompt,
 		JsonSchema: schema,
 		Model:      llm.ResolveStandardModel(),
-	})
+	}, llm.ResolveRequestPolicy(llm.RequestPolicyInput{
+		RequestedTier: "standard",
+		Structured:    true,
+		HighValue:     true,
+	})))
 	if err != nil {
 		return nil, fmt.Errorf("llm structured output failed: %w", err)
 	}

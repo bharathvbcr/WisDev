@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/policy"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/policy"
 )
 
 type DecisionCandidate struct {
@@ -50,7 +50,7 @@ func ActionImpact(action string) float64 {
 		return 0.88
 	case strings.Contains(a, "retrieve"), strings.Contains(a, "search"):
 		return 0.82
-	case strings.Contains(a, "decompose"), strings.Contains(a, "Plan"):
+	case strings.Contains(a, "decompose"), strings.Contains(a, "plan"):
 		return 0.74
 	case strings.Contains(a, "draft"), strings.Contains(a, "synth"):
 		return 0.65
@@ -82,6 +82,9 @@ func BuildDecisionCandidates(Plan *PlanState, budget policy.BudgetState, cfg pol
 			continue
 		}
 		if !dependenciesSatisfied(step, Plan.CompletedStepIDs) {
+			continue
+		}
+		if decisionCandidateExceedsBudget(step, budget) {
 			continue
 		}
 
@@ -128,6 +131,19 @@ func BuildDecisionCandidates(Plan *PlanState, budget policy.BudgetState, cfg pol
 		return out[i].Score > out[j].Score
 	})
 	return out
+}
+
+func decisionCandidateExceedsBudget(step PlanStep, budget policy.BudgetState) bool {
+	if budget.MaxToolCalls > 0 && budget.ToolCallsUsed >= budget.MaxToolCalls {
+		return true
+	}
+	if step.ExecutionTarget == ExecutionTargetPythonSandbox && budget.MaxScriptRuns > 0 && budget.ScriptRunsUsed >= budget.MaxScriptRuns {
+		return true
+	}
+	if step.EstimatedCostCents > 0 && budget.MaxCostCents > 0 && budget.CostCentsUsed+step.EstimatedCostCents > budget.MaxCostCents {
+		return true
+	}
+	return false
 }
 
 func SelectParallelCandidates(Plan *PlanState, candidates []DecisionCandidate, limit int) []string {

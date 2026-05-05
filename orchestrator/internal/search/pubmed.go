@@ -3,7 +3,9 @@ package search
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,6 +16,7 @@ type PubMedProvider struct {
 	BaseProvider
 	searchURL  string
 	summaryURL string
+	fetchURL   string
 }
 
 var _ SearchProvider = (*PubMedProvider)(nil)
@@ -22,6 +25,7 @@ func NewPubMedProvider() *PubMedProvider {
 	return &PubMedProvider{
 		searchURL:  "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
 		summaryURL: "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
+		fetchURL:   "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
 	}
 }
 
@@ -39,13 +43,36 @@ type PubMedSearchResponse struct {
 
 type PubMedSummaryResponse struct {
 	Result map[string]struct {
-		Title      string `json:"title"`
+		Title           string `json:"title"`
+		Source          string `json:"source"`
+		FullJournalName string `json:"fulljournalname"`
+		Authors         []struct {
+			Name string `json:"name"`
+		} `json:"authors"`
 		ArticleIds []struct {
 			IdType string `json:"idtype"`
 			Value  string `json:"value"`
 		} `json:"articleids"`
 		PubDate string `json:"pubdate"`
 	} `json:"result"`
+}
+
+type pubMedFetchResponse struct {
+	Articles []struct {
+		MedlineCitation struct {
+			PMID struct {
+				Text string `xml:",chardata"`
+			} `xml:"PMID"`
+			Article struct {
+				Abstract struct {
+					Texts []struct {
+						Label string `xml:"Label,attr"`
+						Text  string `xml:",chardata"`
+					} `xml:"AbstractText"`
+				} `xml:"Abstract"`
+			} `xml:"Article"`
+		} `xml:"MedlineCitation"`
+	} `xml:"PubmedArticle"`
 }
 
 func (p *PubMedProvider) Search(ctx context.Context, query string, opts SearchOpts) ([]Paper, error) {
@@ -123,6 +150,22 @@ func (p *PubMedProvider) Search(ctx context.Context, query string, opts SearchOp
 		return nil, providerError("pubmed", "decode summary: %v", err)
 	}
 
+	abstracts, err := p.fetchAbstracts(ctx, ids)
+	if err != nil {
+		slog.Warn("pubmed abstract fetch failed; continuing with summary metadata",
+			"service", "go_orchestrator",
+			"runtime", "go",
+			"component", "search_pubmed",
+			"operation", "fetch_abstracts",
+			"stage", "pubmed_efetch_failed",
+			"provider", "pubmed",
+			"result", "degraded",
+			"error_code", "PUBMED_ABSTRACT_FETCH_FAILED",
+			"error", err,
+		)
+		abstracts = map[string]string{}
+	}
+
 	var papers []Paper
 	for _, id := range ids {
 		if data, ok := summaryRes.Result[id]; ok {
@@ -134,19 +177,90 @@ func (p *PubMedProvider) Search(ctx context.Context, query string, opts SearchOp
 				}
 			}
 
-			// PubDate parsing could be added if needed, kept simple for now
+			authors := make([]string, 0, len(data.Authors))
+			seenAuthors := make(map[string]struct{}, len(data.Authors))
+			for _, author := range data.Authors {
+				authors = appendUniqueAuthor(authors, seenAuthors, author.Name)
+			}
+
+			year := 0
+			if data.PubDate != "" {
+				fmt.Sscanf(data.PubDate, "%d", &year)
+			}
+
+			venue := strings.TrimSpace(data.FullJournalName)
+			if venue == "" {
+				venue = strings.TrimSpace(data.Source)
+			}
 
 			papers = append(papers, Paper{
-				ID:       "pubmed:" + id,
-				Title:    data.Title,
-				Abstract: "", // esummary doesn't return full abstract, need efetch
-				Link:     fmt.Sprintf("https://pubmed.ncbi.nlm.nih.gov/%s/", id),
-				DOI:      doi,
-				Source:   "pubmed",
+				ID:         "pubmed:" + id,
+				Title:      data.Title,
+				Abstract:   abstracts[id],
+				Link:       fmt.Sprintf("https://pubmed.ncbi.nlm.nih.gov/%s/", id),
+				DOI:        doi,
+				Source:     "pubmed",
+				SourceApis: []string{"pubmed"},
+				Authors:    authors,
+				Year:       year,
+				Venue:      venue,
 			})
 		}
 	}
 
 	p.RecordSuccess()
 	return papers, nil
+}
+
+func (p *PubMedProvider) fetchAbstracts(ctx context.Context, ids []string) (map[string]string, error) {
+	abstracts := make(map[string]string, len(ids))
+	if len(ids) == 0 {
+		return abstracts, nil
+	}
+
+	idString := strings.Join(ids, ",")
+	fetchURL := fmt.Sprintf("%s?db=pubmed&id=%s&retmode=xml", p.fetchURL, url.QueryEscape(idString))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fetchURL, nil)
+	if err != nil {
+		return abstracts, providerError("pubmed", "build abstract fetch request: %v", err)
+	}
+
+	resp, err := SharedHTTPClient.Do(req)
+	if err != nil {
+		return abstracts, providerError("pubmed", "abstract fetch request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return abstracts, providerError("pubmed", "abstract fetch HTTP %d", resp.StatusCode)
+	}
+
+	var fetchRes pubMedFetchResponse
+	if err := xml.NewDecoder(resp.Body).Decode(&fetchRes); err != nil {
+		return abstracts, providerError("pubmed", "decode abstract fetch: %v", err)
+	}
+
+	for _, article := range fetchRes.Articles {
+		id := strings.TrimSpace(article.MedlineCitation.PMID.Text)
+		if id == "" {
+			continue
+		}
+		parts := make([]string, 0, len(article.MedlineCitation.Article.Abstract.Texts))
+		for _, abstractText := range article.MedlineCitation.Article.Abstract.Texts {
+			text := strings.Join(strings.Fields(abstractText.Text), " ")
+			if text == "" {
+				continue
+			}
+			label := strings.TrimSpace(abstractText.Label)
+			if label != "" {
+				text = label + ": " + text
+			}
+			parts = append(parts, text)
+		}
+		if len(parts) > 0 {
+			abstracts[id] = strings.Join(parts, " ")
+		}
+	}
+
+	return abstracts, nil
 }

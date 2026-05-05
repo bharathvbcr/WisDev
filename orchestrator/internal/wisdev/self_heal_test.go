@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	llmv1 "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/llm/v1"
+	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -54,7 +54,13 @@ func TestSelfHealer_Execute_SelfHeal(t *testing.T) {
 	mExec.On("RunStepWithRecovery", mock.Anything, mock.Anything, step, 1).
 		Return(StepResult{Err: retryErr}).Once()
 	mLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
-		return strings.Contains(req.Prompt, "rate limit exceeded")
+		assertWisdevStructuredPromptHygiene(t, req.Prompt)
+		return strings.Contains(req.Prompt, "rate limit exceeded") &&
+			req.GetThinkingBudget() == 1024 &&
+			req.RequestClass == "standard" &&
+			req.RetryProfile == "standard" &&
+			req.ServiceTier == "standard" &&
+			req.LatencyBudgetMs > 0
 	})).Return(&llmv1.StructuredResponse{JsonResult: revisedJSON}, nil)
 	mExec.On("RunStepWithRecovery", mock.Anything, mock.Anything, revisedStep, 1).
 		Return(StepResult{Sources: []Source{{ID: "src2"}}})
@@ -97,13 +103,42 @@ func TestSelfHealer_ReplanStep_CallsLLM(t *testing.T) {
 		Return(StepResult{Err: retryErr}).Once()
 
 	mLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
-		return strings.Contains(req.Prompt, "rate limit exceeded")
+		assertWisdevStructuredPromptHygiene(t, req.Prompt)
+		return strings.Contains(req.Prompt, "rate limit exceeded") &&
+			req.GetThinkingBudget() == 1024 &&
+			req.RequestClass == "standard" &&
+			req.RetryProfile == "standard" &&
+			req.ServiceTier == "standard" &&
+			req.LatencyBudgetMs > 0
 	})).Return(&llmv1.StructuredResponse{JsonResult: revisedJSON}, nil)
 
 	var revisedStep PlanStep
 	json.Unmarshal([]byte(revisedJSON), &revisedStep)
 	mExec.On("RunStepWithRecovery", mock.Anything, mock.Anything, revisedStep, 1).
 		Return(StepResult{Sources: []Source{{ID: "s1"}}})
+
+	result, err := sh.Execute(context.Background(), "sess", step)
+
+	assert.NoError(t, err)
+	assert.Len(t, result["sources"], 1)
+	mLLM.AssertExpectations(t)
+}
+
+func TestSelfHealer_ReplanStep_CooldownKeepsOriginalStep(t *testing.T) {
+	mLLM := new(mockLLM)
+	mExec := new(mockExecutor)
+	sh := NewSelfHealer(mLLM, mExec)
+
+	step := PlanStep{ID: "step_retry", Action: "search.arxiv", Params: map[string]any{"q": "original"}}
+	retryErr := errors.New("rate limit exceeded")
+	cooldownErr := errors.New("vertex structured output provider cooldown active; retry after 45s")
+
+	mExec.On("RunStepWithRecovery", mock.Anything, mock.Anything, step, 1).
+		Return(StepResult{Err: retryErr}).Once()
+	mLLM.On("StructuredOutput", mock.Anything, mock.Anything).
+		Return(nil, cooldownErr).Once()
+	mExec.On("RunStepWithRecovery", mock.Anything, mock.Anything, step, 1).
+		Return(StepResult{Sources: []Source{{ID: "s-original"}}}).Once()
 
 	result, err := sh.Execute(context.Background(), "sess", step)
 

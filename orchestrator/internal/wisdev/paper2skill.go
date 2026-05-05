@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/llm"
-	llmv1 "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/llm/v1"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
 )
 
 // Paper2SkillCompiler compiles an arXiv paper into a SkillSchema via PDF extraction + LLM.
@@ -26,9 +26,8 @@ type Paper2SkillCompiler struct {
 	PDFWorkerURL     string // URL of the Python /ml/pdf endpoint
 }
 
-// NewPaper2SkillCompiler creates a Paper2SkillCompiler with default HTTP timeouts and sidecar URLs.
-// Sidecar base URL is resolved via ResolvePythonBase() so that the PYTHON_SIDECAR_URL
-// environment variable is respected in all deployment environments.
+// NewPaper2SkillCompiler creates a Paper2SkillCompiler with default HTTP timeouts and
+// canonical sidecar URLs owned by the Go stack manifest.
 func NewPaper2SkillCompiler(llm LLMRequester) *Paper2SkillCompiler {
 	base := ResolvePythonBase()
 	return &Paper2SkillCompiler{
@@ -63,21 +62,39 @@ func (c *Paper2SkillCompiler) CompileArxivID(ctx context.Context, arxivID string
 		slog.Warn("paper2skill: extracted paper text was empty, using degraded schema", "arxiv_id", arxivID)
 		return degraded, nil
 	}
+	if remaining := wisdevLLMCooldownRemaining(c.LLM); remaining > 0 {
+		slog.Warn("paper2skill: LLM compilation skipped during provider cooldown, using degraded schema",
+			"component", "wisdev.paper2skill",
+			"operation", "compile_arxiv",
+			"arxiv_id", arxivID,
+			"retry_after_ms", remaining.Milliseconds(),
+		)
+		return degraded, nil
+	}
 
 	// Step 2: Extract methodology section
-	methResp, err := c.LLM.StructuredOutput(ctx, &llmv1.StructuredRequest{
-		Prompt: fmt.Sprintf(`Extract the methodology section from this academic paper.
-Return JSON: {"methodology": "<description, max 500 words>"}
+	methResp, err := c.LLM.StructuredOutput(ctx, applyWisdevHeavyStructuredPolicy(&llmv1.StructuredRequest{
+		Prompt: appendWisdevStructuredOutputInstruction(fmt.Sprintf(`Extract the methodology section from this academic paper.
+Provide methodology as a concise description capped at 500 words.
 
 Title: %s
 Abstract: %s
 
 Paper text (first 4000 chars):
-%s`, extracted.TitleOrFilename(arxivID), extracted.Paper.Abstract, truncate(paperText, 4000)),
+%s`, extracted.TitleOrFilename(arxivID), extracted.Paper.Abstract, truncate(paperText, 4000))),
 		JsonSchema: `{"type":"object","properties":{"methodology":{"type":"string"}},"required":["methodology"]}`,
 		Model:      llm.ResolveHeavyModel(),
-	})
+	}))
 	if err != nil {
+		if wisdevLLMCallIsCoolingDown(err) {
+			slog.Warn("paper2skill: methodology extraction skipped during provider cooldown, using degraded schema",
+				"component", "wisdev.paper2skill",
+				"operation", "extract_methodology",
+				"arxiv_id", arxivID,
+				"error", err.Error(),
+			)
+			return degraded, nil
+		}
 		slog.Warn("paper2skill: methodology extraction failed", "error", err)
 		return degraded, nil
 	}
@@ -90,18 +107,28 @@ Paper text (first 4000 chars):
 	}
 
 	// Step 3: Compile to SkillSchema
-	skillResp, err := c.LLM.StructuredOutput(ctx, &llmv1.StructuredRequest{
-		Prompt: fmt.Sprintf(`Compile a research methodology into a reusable agent SkillSchema.
+	skillResp, err := c.LLM.StructuredOutput(ctx, applyWisdevHeavyStructuredPolicy(&llmv1.StructuredRequest{
+		Prompt: appendWisdevStructuredOutputInstruction(fmt.Sprintf(`Compile a research methodology into a reusable agent SkillSchema.
 Paper title: %s
 Methodology: %s
 ArXiv ID: %s
 
-Return JSON matching SkillSchema: {"name":"<snake_case>","description":"<one sentence>","inputs":[],"outputs":[],"steps":["..."],"code_template":"","source_paper":{"arxiv_id":"%s"}}`,
-			extracted.TitleOrFilename(arxivID), methResult.Methodology, arxivID, arxivID),
+Populate the SkillSchema fields name, description, inputs, outputs, steps, code_template, and source_paper.
+Ensure source_paper.arxiv_id is %s.`,
+			extracted.TitleOrFilename(arxivID), methResult.Methodology, arxivID, arxivID)),
 		JsonSchema: `{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"inputs":{"type":"array"},"outputs":{"type":"array"},"steps":{"type":"array","items":{"type":"string"}},"code_template":{"type":"string"},"source_paper":{"type":"object"}},"required":["name","description","steps"]}`,
 		Model:      llm.ResolveHeavyModel(),
-	})
+	}))
 	if err != nil {
+		if wisdevLLMCallIsCoolingDown(err) {
+			slog.Warn("paper2skill: skill compilation skipped during provider cooldown, using degraded schema",
+				"component", "wisdev.paper2skill",
+				"operation", "compile_skill_schema",
+				"arxiv_id", arxivID,
+				"error", err.Error(),
+			)
+			return degraded, nil
+		}
 		slog.Warn("paper2skill: skill compilation failed", "error", err)
 		return degraded, nil
 	}
@@ -198,7 +225,7 @@ func (c *Paper2SkillCompiler) fetchPDFExtraction(ctx context.Context, arxivID st
 
 	workerURL := c.PDFWorkerURL
 	if workerURL == "" {
-		workerURL = "http://python-sidecar:8080/ml/pdf"
+		workerURL = ResolvePythonBase() + "/ml/pdf"
 	}
 
 	payload, err := json.Marshal(map[string]string{
@@ -266,7 +293,7 @@ func (c *Paper2SkillCompiler) resolvePDFSourceURL(arxivID string) (string, error
 func (c *Paper2SkillCompiler) RegisterSkill(ctx context.Context, schema SkillSchema) error {
 	registryURL := c.RegistryURL
 	if registryURL == "" {
-		registryURL = "http://python-sidecar:8080/skills/register"
+		registryURL = ResolvePythonBase() + "/skills/register"
 	}
 	payload, err := json.Marshal(schema)
 	if err != nil {

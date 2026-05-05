@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,6 +32,12 @@ type RuntimeJournalEntry struct {
 	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
+const (
+	EventPolicyFeedbackSave   = "feedback_save"
+	EventProfileLearn         = "profile_learn"
+	EventWisDevSteeringSignal = "wisdev_steering_signal"
+)
+
 type RuntimeJournal struct {
 	path      string
 	indexPath string
@@ -44,7 +51,7 @@ type RuntimeJournal struct {
 func NewRuntimeJournal(db DBProvider) *RuntimeJournal {
 	path := os.Getenv("WISDEV_JOURNAL_PATH")
 	if path == "" {
-		path = "wisdev_journal.jsonl"
+		path = defaultRuntimeJournalPath()
 	}
 	indexPath := path + ".index"
 	j := &RuntimeJournal{
@@ -54,6 +61,14 @@ func NewRuntimeJournal(db DBProvider) *RuntimeJournal {
 	}
 	j.loadIndex()
 	return j
+}
+
+func defaultRuntimeJournalPath() string {
+	baseDir := strings.TrimSpace(os.Getenv("WISDEV_STATE_DIR"))
+	if baseDir == "" {
+		baseDir = filepath.Join(os.TempDir(), "wisdev_state")
+	}
+	return filepath.Join(baseDir, "wisdev_journal.jsonl")
 }
 
 func (j *RuntimeJournal) Path() string      { return j.path }
@@ -157,11 +172,11 @@ func (j *RuntimeJournal) AppendIndexLocked(offset int64, entry RuntimeJournalEnt
 	if eventType := strings.TrimSpace(entry.EventType); eventType != "" {
 		j.index.TypeOffsets[eventType] = append(j.index.TypeOffsets[eventType], offset)
 	}
-	if entry.EventType == "feedback_save" {
+	if entry.EventType == EventPolicyFeedbackSave {
 		key := entry.UserID + "::" + entry.SessionID
 		j.index.LatestFeedback[key] = offset
 	}
-	if entry.EventType == "profile_learn" && strings.TrimSpace(entry.UserID) != "" {
+	if entry.EventType == EventProfileLearn && strings.TrimSpace(entry.UserID) != "" {
 		j.index.LatestProfile[entry.UserID] = offset
 	}
 }
@@ -209,8 +224,9 @@ func (j *RuntimeJournal) ensureDBStorage() bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	renameLegacyRuntimeJournalSchema(ctx, j.db)
 	_, err := j.db.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS wisdev_runtime_journal_v2 (
+CREATE TABLE IF NOT EXISTS wisdev_runtime_journal (
 	event_id TEXT PRIMARY KEY,
 	trace_id TEXT NOT NULL,
 	session_id TEXT NOT NULL DEFAULT '',
@@ -225,11 +241,14 @@ CREATE TABLE IF NOT EXISTS wisdev_runtime_journal_v2 (
 	payload_json JSONB NOT NULL,
 	metadata_json JSONB NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_wisdev_runtime_journal_v2_session_id ON wisdev_runtime_journal_v2(session_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_wisdev_runtime_journal_v2_user_id ON wisdev_runtime_journal_v2(user_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_wisdev_runtime_journal_v2_event_type ON wisdev_runtime_journal_v2(event_type, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_wisdev_runtime_journal_v2_path ON wisdev_runtime_journal_v2(path, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_wisdev_runtime_journal_v2_status ON wisdev_runtime_journal_v2(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wisdev_runtime_journal_session_id ON wisdev_runtime_journal(session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wisdev_runtime_journal_user_id ON wisdev_runtime_journal(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wisdev_runtime_journal_event_type ON wisdev_runtime_journal(event_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wisdev_runtime_journal_path ON wisdev_runtime_journal(path, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wisdev_runtime_journal_status ON wisdev_runtime_journal(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wisdev_runtime_journal_metadata_job_id ON wisdev_runtime_journal((metadata_json->>'jobId'), created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wisdev_runtime_journal_payload_job_id ON wisdev_runtime_journal((payload_json->>'job_id'), created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wisdev_runtime_journal_payload_job_id_alt ON wisdev_runtime_journal((payload_json->>'jobId'), created_at DESC);
 `)
 	if err != nil {
 		return false
@@ -247,7 +266,7 @@ func (j *RuntimeJournal) persistEntryToDB(entry RuntimeJournalEntry) {
 	payload, _ := json.Marshal(entry.Payload)
 	metadata, _ := json.Marshal(entry.Metadata)
 	_, _ = j.db.Exec(ctx, `
-INSERT INTO wisdev_runtime_journal_v2 (
+INSERT INTO wisdev_runtime_journal (
 	event_id, trace_id, session_id, user_id, plan_id, step_id, event_type, path, status, created_at, summary, payload_json, metadata_json
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 ON CONFLICT (event_id) DO NOTHING
@@ -326,7 +345,7 @@ func (j *RuntimeJournal) DeleteSession(sessionID string, userID string, hardDele
 	if j.ensureDBStorage() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		command := `DELETE FROM wisdev_runtime_journal_v2 WHERE session_id = $1`
+		command := `DELETE FROM wisdev_runtime_journal WHERE session_id = $1`
 		args := []any{sessionID}
 		if userID != "" && !hardDelete {
 			command += ` AND user_id = $2`
@@ -360,7 +379,7 @@ func (j *RuntimeJournal) EnforceRetention(retentionDays int) int {
 	if j.ensureDBStorage() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if tag, err := j.db.Exec(ctx, `DELETE FROM wisdev_runtime_journal_v2 WHERE created_at < $1`, cutoff); err == nil {
+		if tag, err := j.db.Exec(ctx, `DELETE FROM wisdev_runtime_journal WHERE created_at < $1`, cutoff); err == nil {
 			removed = int(tag.RowsAffected())
 		}
 	}
@@ -384,7 +403,7 @@ func (j *RuntimeJournal) queryEntries(limit int, userID string, sessionID string
 	defer cancel()
 	query := `
 SELECT event_id, trace_id, session_id, user_id, plan_id, step_id, event_type, path, status, created_at, summary, payload_json, metadata_json
-FROM wisdev_runtime_journal_v2
+FROM wisdev_runtime_journal
 WHERE 1=1`
 	args := []any{}
 	if strings.TrimSpace(userID) != "" {
@@ -553,6 +572,93 @@ func (j *RuntimeJournal) ReadSession(sessionID string, limit int) []RuntimeJourn
 	return filtered
 }
 
+func runtimeJournalEntryJobID(entry RuntimeJournalEntry) string {
+	if metadataJobID := strings.TrimSpace(AsOptionalString(entry.Metadata["jobId"])); metadataJobID != "" {
+		return metadataJobID
+	}
+	if payloadJobID := strings.TrimSpace(AsOptionalString(entry.Payload["job_id"])); payloadJobID != "" {
+		return payloadJobID
+	}
+	return strings.TrimSpace(AsOptionalString(entry.Payload["jobId"]))
+}
+
+func (j *RuntimeJournal) ReadJob(jobID string, limit int) []RuntimeJournalEntry {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if j.ensureDBStorage() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		rows, err := j.db.Query(ctx, `
+SELECT event_id, trace_id, session_id, user_id, plan_id, step_id, event_type, path, status, created_at, summary, payload_json, metadata_json
+FROM wisdev_runtime_journal
+WHERE metadata_json->>'jobId' = $1
+   OR payload_json->>'job_id' = $1
+   OR payload_json->>'jobId' = $1
+ORDER BY created_at DESC
+LIMIT $2
+`, jobID, limit)
+		if err == nil {
+			defer rows.Close()
+			entries := make([]RuntimeJournalEntry, 0, limit)
+			for rows.Next() {
+				var entry RuntimeJournalEntry
+				var payloadRaw []byte
+				var metadataRaw []byte
+				if err := rows.Scan(
+					&entry.EventID,
+					&entry.TraceID,
+					&entry.SessionID,
+					&entry.UserID,
+					&entry.PlanID,
+					&entry.StepID,
+					&entry.EventType,
+					&entry.Path,
+					&entry.Status,
+					&entry.CreatedAt,
+					&entry.Summary,
+					&payloadRaw,
+					&metadataRaw,
+				); err != nil {
+					continue
+				}
+				entry.Payload = map[string]any{}
+				entry.Metadata = map[string]any{}
+				_ = json.Unmarshal(payloadRaw, &entry.Payload)
+				_ = json.Unmarshal(metadataRaw, &entry.Metadata)
+				entries = append(entries, entry)
+			}
+			for i, k := 0, len(entries)-1; i < k; i, k = i+1, k-1 {
+				entries[i], entries[k] = entries[k], entries[i]
+			}
+			if len(entries) > 0 {
+				return entries
+			}
+		}
+	}
+
+	entries := j.readAll()
+	filtered := make([]RuntimeJournalEntry, 0, MinInt(limit, len(entries)))
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		if runtimeJournalEntryJobID(entry) != jobID {
+			continue
+		}
+		filtered = append(filtered, entry)
+		if limit > 0 && len(filtered) >= limit {
+			break
+		}
+	}
+	for i, k := 0, len(filtered)-1; i < k; i, k = i+1, k-1 {
+		filtered[i], filtered[k] = filtered[k], filtered[i]
+	}
+	return filtered
+}
+
 func (j *RuntimeJournal) SummarizeReplay(userID string, policyVersion string) map[string]any {
 	entries := j.queryEntries(5000, userID, "")
 	if len(entries) == 0 {
@@ -691,8 +797,8 @@ func (j *RuntimeJournal) SaveFeedback(feedback map[string]any) map[string]any {
 		TraceID:   NewTraceID(),
 		UserID:    userID,
 		SessionID: sessionID,
-		EventType: "feedback_save",
-		Path:      "/v2/feedback/save",
+		EventType: EventPolicyFeedbackSave,
+		Path:      "/feedback/save",
 		Status:    "saved",
 		CreatedAt: NowMillis(),
 		Summary:   "User feedback saved",
@@ -706,7 +812,7 @@ func (j *RuntimeJournal) SaveFeedback(feedback map[string]any) map[string]any {
 }
 
 func (j *RuntimeJournal) GetLatestFeedback(userID string, sessionID string) map[string]any {
-	if entries := j.queryEntries(1, userID, sessionID, "feedback_save"); len(entries) > 0 {
+	if entries := j.queryEntries(1, userID, sessionID, EventPolicyFeedbackSave); len(entries) > 0 {
 		return map[string]any{
 			"found":    true,
 			"feedback": entries[len(entries)-1].Payload,
@@ -731,7 +837,7 @@ func (j *RuntimeJournal) GetLatestFeedback(userID string, sessionID string) map[
 }
 
 func (j *RuntimeJournal) SummarizeFeedbackAnalytics(userID string, limit int) map[string]any {
-	entries := j.queryEntries(MaxInt(limit, 100), userID, "", "feedback_save")
+	entries := j.queryEntries(MaxInt(limit, 100), userID, "", EventPolicyFeedbackSave)
 	if len(entries) == 0 {
 		j.mu.Lock()
 		offsets := append([]int64(nil), j.index.UserOffsets[userID]...)
@@ -753,7 +859,7 @@ func (j *RuntimeJournal) SummarizeFeedbackAnalytics(userID string, limit int) ma
 
 	for i := len(entries) - 1; i >= 0; i-- {
 		entry := entries[i]
-		if entry.EventType != "feedback_save" {
+		if entry.EventType != EventPolicyFeedbackSave {
 			continue
 		}
 		if userID != "" && entry.UserID != userID {
@@ -799,7 +905,7 @@ func (j *RuntimeJournal) SummarizeFeedbackAnalytics(userID string, limit int) ma
 }
 
 func (j *RuntimeJournal) SummarizeResearchProfile(userID string) map[string]any {
-	if entries := j.queryEntries(1, userID, "", "profile_learn"); len(entries) > 0 {
+	if entries := j.queryEntries(1, userID, "", EventProfileLearn); len(entries) > 0 {
 		return map[string]any{
 			"found":   true,
 			"profile": entries[len(entries)-1].Payload,
@@ -817,9 +923,14 @@ func (j *RuntimeJournal) SummarizeResearchProfile(userID string) map[string]any 
 			}
 		}
 	}
-	entries := j.queryEntries(5000, userID, "", "feedback_save")
+	entries := j.queryEntries(5000, userID, "", EventPolicyFeedbackSave)
 	if len(entries) == 0 {
 		entries = j.readOffsets(offsets)
+	}
+	if len(entries) == 0 {
+		return map[string]any{
+			"found": false,
+		}
 	}
 	profile := map[string]any{
 		"userId":              userID,
@@ -839,7 +950,7 @@ func (j *RuntimeJournal) SummarizeResearchProfile(userID string) map[string]any 
 		if userID != "" && entry.UserID != userID {
 			continue
 		}
-		if entry.EventType == "feedback_save" {
+		if entry.EventType == EventPolicyFeedbackSave {
 			totalSessions++
 			if domain := AsOptionalString(entry.Payload["domain"]); domain != "" {
 				domainCounts[domain]++
@@ -852,6 +963,11 @@ func (j *RuntimeJournal) SummarizeResearchProfile(userID string) map[string]any 
 	profile["preferredDomains"] = topKeys(domainCounts, 5)
 	profile["successfulSubtopics"] = topKeys(subtopicCounts, 5)
 	profile["totalSessions"] = totalSessions
+	if totalSessions == 0 {
+		return map[string]any{
+			"found": false,
+		}
+	}
 	return map[string]any{
 		"found":   true,
 		"profile": profile,
@@ -907,6 +1023,10 @@ func AsOptionalString(value any) string {
 	case int:
 		return fmt.Sprintf("%d", typed)
 	default:
+		rv := reflect.ValueOf(value)
+		if rv.IsValid() && rv.Kind() == reflect.String {
+			return strings.TrimSpace(rv.String())
+		}
 		return strings.TrimSpace("")
 	}
 }
@@ -921,4 +1041,3 @@ func cloneAnyMap(input map[string]any) map[string]any {
 	}
 	return cloned
 }
-

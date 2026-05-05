@@ -3,6 +3,7 @@ package wisdev
 import (
 	"encoding/json"
 	"log/slog"
+	"strings"
 )
 
 // StreamEventType enumerates all possible thinking-stream event types.
@@ -21,7 +22,7 @@ const (
 // and the iterative research pipeline. All fields are optional; omitempty keeps payloads small.
 type StreamEvent struct {
 	Type            StreamEventType `json:"type"`
-	TraceID         string          `json:"trace_id,omitempty"`
+	TraceID         string          `json:"traceId,omitempty"`
 	Iteration       int             `json:"iteration,omitempty"`
 	NodeID          int             `json:"node_id,omitempty"`
 	Depth           int             `json:"depth,omitempty"`
@@ -53,6 +54,10 @@ func emitEvent(streamFn func(map[string]any), evt StreamEvent) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		slog.Warn("emitEvent: failed to unmarshal event to map", "error", err)
 		return
+	}
+	if traceID := strings.TrimSpace(evt.TraceID); traceID != "" {
+		m["traceId"] = traceID
+		m["trace_id"] = traceID
 	}
 	streamFn(m)
 }

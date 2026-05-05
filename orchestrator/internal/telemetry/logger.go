@@ -1,13 +1,13 @@
-// Package telemetry — structured logging with GCP Structured Logging trace correlation.
+// Package telemetry — structured logging with GCP Cloud Logging trace correlation.
 //
 // Every log record produced via FromCtx() or the global slog default will have
 // these extra fields when an active OTel span is present in the context:
 //
-//	"trace.id"        → "traces/<traceID>"
-//	"trace.span_id"       → hex span ID
-//	"trace.idSampled" → true/false
+//	"logging.googleapis.com/trace"        → "projects/<project>/traces/<traceID>"
+//	"logging.googleapis.com/spanId"       → hex span ID
+//	"logging.googleapis.com/traceSampled" → true/false
 //
-// These are the canonical field names Structured Logging uses to surface the
+// These are the canonical field names Cloud Logging uses to surface the
 // "View in Trace" button in Log Explorer.
 package telemetry
 
@@ -49,8 +49,8 @@ func (h *gcpHandler) WithGroup(name string) slog.Handler {
 	return &gcpHandler{inner: h.inner.WithGroup(name), project: h.project}
 }
 
-// Handle injects OTel span context as GCP Structured Logging trace fields so that
-// every log line in Structured Logging can be correlated with a OpenTelemetry span.
+// Handle injects OTel span context as GCP Cloud Logging trace fields so that
+// every log line in Cloud Logging can be correlated with a Cloud Trace span.
 func (h *gcpHandler) Handle(ctx context.Context, r slog.Record) error {
 	span := trace.SpanFromContext(ctx)
 	if span != nil && span.SpanContext().IsValid() {
@@ -63,9 +63,9 @@ func (h *gcpHandler) Handle(ctx context.Context, r slog.Record) error {
 		})
 		traceField := fmt.Sprintf("projects/%s/traces/%s", h.project, sc.TraceID().String())
 		r2.AddAttrs(
-			slog.String("trace.id", traceField),
-			slog.String("trace.span_id", sc.SpanID().String()),
-			slog.Bool("trace.idSampled", sc.IsSampled()),
+			slog.String("logging.googleapis.com/trace", traceField),
+			slog.String("logging.googleapis.com/spanId", sc.SpanID().String()),
+			slog.Bool("logging.googleapis.com/traceSampled", sc.IsSampled()),
 		)
 		return h.inner.Handle(ctx, r2)
 	}
@@ -79,12 +79,16 @@ func (h *gcpHandler) Handle(ctx context.Context, r slog.Record) error {
 var logger *slog.Logger
 
 func init() {
+	initLogger()
+}
+
+func initLogger() {
 	level := slog.LevelInfo
 	if os.Getenv("LOG_LEVEL") == "debug" {
 		level = slog.LevelDebug
 	}
 
-	projectID := os.Getenv("VERTEX_PROJECT")
+	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
 
 	jsonHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level:     level,
@@ -117,6 +121,27 @@ func FromCtx(ctx context.Context) *slog.Logger {
 	return logger
 }
 
+func requestLogAttrs(r *http.Request, status int64, latencyMs int64) []any {
+	attrs := []any{
+		"method", r.Method,
+		"path", r.URL.Path,
+		"status", status,
+		"latency_ms", latencyMs,
+		"user_agent", r.UserAgent(),
+	}
+
+	if r.URL.Path == "/api/proxy/external" {
+		query := r.URL.Query()
+		attrs = append(attrs,
+			"proxy_has_url", query.Get("url") != "",
+			"proxy_has_provider", query.Get("provider") != "",
+			"proxy_readiness", query.Get("readiness") == "1",
+		)
+	}
+
+	return attrs
+}
+
 // ============================================================
 // Request logging middleware
 // ============================================================
@@ -127,19 +152,20 @@ func FromCtx(ctx context.Context) *slog.Logger {
 func RequestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+		base := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+		writer := http.ResponseWriter(base)
+		if flusher, ok := w.(http.Flusher); ok {
+			writer = &flushResponseWriter{
+				responseWriter: base,
+				flusher:        flusher,
+			}
+		}
 
-		next.ServeHTTP(rw, r)
+		next.ServeHTTP(writer, r)
 
 		ctx := r.Context()
 		log := FromCtx(ctx)
-		log.InfoContext(ctx, "request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", rw.status,
-			"latency_ms", time.Since(start).Milliseconds(),
-			"user_agent", r.UserAgent(),
-		)
+		log.InfoContext(ctx, "request", requestLogAttrs(r, int64(base.status), time.Since(start).Milliseconds())...)
 	})
 }
 
@@ -153,6 +179,15 @@ func (rw *responseWriter) WriteHeader(code int) {
 	rw.ResponseWriter.WriteHeader(code)
 }
 
+type flushResponseWriter struct {
+	*responseWriter
+	flusher http.Flusher
+}
+
+func (rw *flushResponseWriter) Flush() {
+	rw.flusher.Flush()
+}
+
 // ============================================================
 // Structured error taxonomy
 // ============================================================
@@ -164,6 +199,9 @@ const (
 	ErrProviderTimeout  ErrorCode = "PROVIDER_TIMEOUT"
 	ErrLLMRateLimit     ErrorCode = "LLM_RATE_LIMIT"
 	ErrLLMUnavailable   ErrorCode = "LLM_UNAVAILABLE"
+	ErrLLMBudgetExhaust ErrorCode = "LLM_BUDGET_EXHAUSTED"
+	ErrLLMColdStart     ErrorCode = "LLM_COLD_START_TIMEOUT"
+	ErrLLMThinkingLimit ErrorCode = "LLM_THINKING_LIMIT"
 	ErrCacheMiss        ErrorCode = "CACHE_MISS"
 	ErrCacheUnavailable ErrorCode = "CACHE_UNAVAILABLE"
 	ErrInvalidRequest   ErrorCode = "INVALID_REQUEST"
@@ -179,4 +217,11 @@ func LogError(ctx context.Context, code ErrorCode, err error, extra ...any) {
 		"error", err.Error(),
 	}, extra...)
 	FromCtx(ctx).ErrorContext(ctx, "request_error", args...)
+}
+
+// LogLLMBudgetEvent logs a structured LLM budget event with context propagation.
+// Use this at every significant stage of an LLM call (start, attempt, success, failure)
+// to provide full observability into budget utilization and timeout causes.
+func LogLLMBudgetEvent(ctx context.Context, event string, extra ...any) {
+	FromCtx(ctx).InfoContext(ctx, event, extra...)
 }

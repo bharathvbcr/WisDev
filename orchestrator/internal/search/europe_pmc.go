@@ -122,6 +122,8 @@ func (e *EuropePMCProvider) Search(ctx context.Context, query string, opts Searc
 			Link:          link,
 			DOI:           item.DOI,
 			Source:        "europe_pmc",
+			SourceApis:    []string{"europe_pmc"},
+			Authors:       parseDelimitedAuthors(item.AuthorString),
 			Year:          year,
 			CitationCount: item.CitedByCount,
 		})

@@ -136,12 +136,13 @@ func (c *ClinicalTrialsProvider) Search(ctx context.Context, query string, opts 
 		}
 
 		papers = append(papers, Paper{
-			ID:       "ct:" + id.NCTID,
-			Title:    title,
-			Abstract: strings.Join(absParts, "\n\n"),
-			Link:     link,
-			Source:   "clinical_trials",
-			Year:     year,
+			ID:         "ct:" + id.NCTID,
+			Title:      title,
+			Abstract:   strings.Join(absParts, "\n\n"),
+			Link:       link,
+			Source:     "clinical_trials",
+			SourceApis: []string{"clinical_trials"},
+			Year:       year,
 		})
 	}
 

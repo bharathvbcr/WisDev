@@ -60,14 +60,16 @@ func (d *DBLPProvider) Search(ctx context.Context, query string, opts SearchOpts
 			Hits struct {
 				Hit []struct {
 					Info struct {
+						Key     string `json:"key"`
 						Title   string `json:"title"`
 						Authors struct {
-							Author any `json:"author"` // can be string or []string
+							Author any `json:"author"` // can be object, string, or array
 						} `json:"authors"`
 						Year  string `json:"year"`
 						DOI   string `json:"doi"`
 						URL   string `json:"url"`
 						EE    string `json:"ee"`
+						Venue string `json:"venue"`
 						Pages string `json:"pages"`
 					} `json:"info"`
 				} `json:"hit"`
@@ -87,22 +89,40 @@ func (d *DBLPProvider) Search(ctx context.Context, query string, opts SearchOpts
 		if title == "" {
 			continue
 		}
+
+		authors := parseDBLPAuthors(info.Authors.Author)
 		link := info.URL
 		if link == "" {
 			link = info.EE
 		}
+
+		id := strings.TrimSpace(info.DOI)
+		switch {
+		case id != "":
+			id = "dblp:" + id
+		case strings.TrimSpace(info.Key) != "":
+			id = "dblp:" + strings.TrimSpace(info.Key)
+		case link != "":
+			id = "dblp:" + link
+		default:
+			id = "dblp:" + title
+		}
+
 		year := 0
 		if info.Year != "" {
 			fmt.Sscanf(info.Year, "%d", &year)
 		}
 
 		papers = append(papers, Paper{
-			ID:     "dblp:" + info.DOI,
-			Title:  title,
-			Link:   link,
-			DOI:    info.DOI,
-			Source: "dblp",
-			Year:   year,
+			ID:         id,
+			Title:      title,
+			Link:       link,
+			DOI:        info.DOI,
+			Source:     "dblp",
+			SourceApis: []string{"dblp"},
+			Authors:    authors,
+			Year:       year,
+			Venue:      strings.TrimSpace(info.Venue),
 		})
 	}
 

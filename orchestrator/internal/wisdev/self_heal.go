@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/llm"
-	llmv1 "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/llm/v1"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
 )
 
 // PlanStepRunner is the interface SelfHealer uses to execute plan steps.
@@ -92,27 +92,47 @@ func (sh *SelfHealer) isRetryable(err error) bool {
 }
 
 func (sh *SelfHealer) replanStep(ctx context.Context, step PlanStep, err error, attempt int) (*PlanStep, error) {
+	if remaining := wisdevLLMCooldownRemaining(sh.LLM); remaining > 0 {
+		slog.Warn("self-heal replan skipped during provider cooldown; keeping original step",
+			"component", "wisdev.self_heal",
+			"operation", "replan_step",
+			"step_id", step.ID,
+			"retry_after_ms", remaining.Milliseconds(),
+		)
+		return &step, nil
+	}
 	stepJSON, marshalErr := json.Marshal(step)
 	if marshalErr != nil {
 		return nil, fmt.Errorf("replan: could not serialize step: %w", marshalErr)
 	}
 
-	prompt := fmt.Sprintf(`You are an autonomous AI Scientist. A research step failed and needs to be revised.
+	prompt := appendWisdevStructuredOutputInstruction(fmt.Sprintf(`You are an autonomous AI Scientist. A research step failed and needs to be revised.
 
 Current step (JSON): %s
 Error: %s
 Attempt: %d
 
-Revise the step to avoid this error. Return a valid JSON object with the same schema.
-Do NOT change the step ID. Only adjust params or strategy.`,
-		string(stepJSON), err.Error(), attempt)
+Revise the step to avoid this error.
+Do NOT change the step ID. Only adjust params or strategy while preserving the step schema.`,
+		string(stepJSON), err.Error(), attempt))
 
-	resp, llmErr := sh.LLM.StructuredOutput(ctx, &llmv1.StructuredRequest{
+	replanCtx, cancel := wisdevRecoverableStructuredContext(ctx)
+	defer cancel()
+	resp, llmErr := sh.LLM.StructuredOutput(replanCtx, applyWisdevRecoverableStructuredPolicy(&llmv1.StructuredRequest{
 		Prompt:     prompt,
 		JsonSchema: `{"type":"object","properties":{"id":{"type":"string"},"action":{"type":"string"},"params":{"type":"object"},"risk":{"type":"string"},"dependsOnStepIds":{"type":"array","items":{"type":"string"}}},"required":["id","action"]}`,
-		Model:      llm.ResolveHeavyModel(),
-	})
+		Model:      llm.ResolveStandardModel(),
+	}))
 	if llmErr != nil {
+		if wisdevLLMCallIsCoolingDown(llmErr) {
+			slog.Warn("self-heal replan fell back during provider cooldown; keeping original step",
+				"component", "wisdev.self_heal",
+				"operation", "replan_step",
+				"step_id", step.ID,
+				"error", llmErr.Error(),
+			)
+			return &step, nil
+		}
 		return nil, fmt.Errorf("replan LLM call failed: %w", llmErr)
 	}
 

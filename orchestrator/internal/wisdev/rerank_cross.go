@@ -1,18 +1,16 @@
 package wisdev
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
 )
 
 var (
@@ -32,6 +30,36 @@ type rerankModelResponse struct {
 type scoredPaper struct {
 	Paper Source
 	Score float64
+}
+
+type rerankStructuredGenerator interface {
+	GenerateStructured(ctx context.Context, modelID, prompt, systemPrompt string, jsonSchemaStr string, temperature float32, maxTokens int32) (string, error)
+}
+
+var rerankResponseSchema = map[string]any{
+	"type":                 "object",
+	"additionalProperties": false,
+	"properties": map[string]any{
+		"scores": map[string]any{
+			"type": "array",
+			"items": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]any{
+					"index": map[string]any{"type": "integer", "minimum": 0},
+					"score": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+				},
+				"required": []string{"index", "score"},
+			},
+		},
+	},
+	"required": []string{"scores"},
+}
+
+var newCrossRerankStructuredGenerator = func(ctx context.Context) (rerankStructuredGenerator, error) {
+	location := strings.TrimSpace(os.Getenv("GOOGLE_CLOUD_LOCATION"))
+	projectID := resilience.ResolveGoogleCloudProjectID()
+	return llm.NewVertexClient(ctx, projectID, location)
 }
 
 func shouldRunStage2Rerank(requested bool) bool {
@@ -89,8 +117,12 @@ func rerankPapersStage2(ctx context.Context, query string, papers []Source, doma
 
 func fetchGeminiRerankScores(ctx context.Context, query string, papers []Source) ([]float64, bool) {
 	scores := make([]float64, len(papers))
-	apiKey := strings.TrimSpace(os.Getenv("GOOGLE_API_KEY"))
-	if apiKey == "" {
+	schemaBytes, err := json.Marshal(rerankResponseSchema)
+	if err != nil {
+		return scores, false
+	}
+	client, err := newCrossRerankStructuredGenerator(ctx)
+	if err != nil {
 		return scores, false
 	}
 
@@ -100,52 +132,16 @@ func fetchGeminiRerankScores(ctx context.Context, query string, papers []Source)
 	}
 
 	prompt := buildRerankPrompt(query, papers)
-	requestBody := map[string]any{
-		"contents": []map[string]any{
-			{
-				"parts": []map[string]any{
-					{"text": prompt},
-				},
-			},
-		},
-		"generationConfig": map[string]any{
-			"temperature":      0.1,
-			"responseMimeType": "application/json",
-		},
-	}
-	bodyBytes, err := json.Marshal(requestBody)
-	if err != nil {
-		return scores, false
-	}
-
-	endpoint := fmt.Sprintf(
-		"https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
+	text, err := client.GenerateStructured(
+		ctx,
 		model,
-		apiKey,
+		prompt,
+		"",
+		string(schemaBytes),
+		0.1,
+		512,
 	)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return scores, false
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 8 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return scores, false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return scores, false
-	}
-
-	var payload map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return scores, false
-	}
-	text := extractGenerateContentText(payload)
-	if text == "" {
+	if err != nil || strings.TrimSpace(text) == "" {
 		return scores, false
 	}
 
@@ -168,9 +164,9 @@ func fetchGeminiRerankScores(ctx context.Context, query string, papers []Source)
 func buildRerankPrompt(query string, papers []Source) string {
 	var b strings.Builder
 	b.WriteString("You are an academic cross-encoder reranker.\n")
-	b.WriteString("Return strict JSON: {\"scores\":[{\"index\":0,\"score\":0.0}]}\n")
 	b.WriteString("Score each paper 0.0 to 1.0 by relevance to the query.\n")
 	b.WriteString("Account for exact topic match, method alignment, and contradiction/negation language.\n")
+	b.WriteString("Return a score for every candidate using the supplied schema.\n")
 	b.WriteString("Query: ")
 	b.WriteString(query)
 	b.WriteString("\nPapers:\n")
@@ -184,31 +180,6 @@ func buildRerankPrompt(query string, papers []Source) string {
 		))
 	}
 	return b.String()
-}
-
-func extractGenerateContentText(payload map[string]any) string {
-	candidates, ok := payload["candidates"].([]any)
-	if !ok || len(candidates) == 0 {
-		return ""
-	}
-	first, ok := candidates[0].(map[string]any)
-	if !ok {
-		return ""
-	}
-	content, ok := first["content"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	parts, ok := content["parts"].([]any)
-	if !ok || len(parts) == 0 {
-		return ""
-	}
-	part, ok := parts[0].(map[string]any)
-	if !ok {
-		return ""
-	}
-	text, _ := part["text"].(string)
-	return strings.TrimSpace(text)
 }
 
 func lexicalRelevance(query string, paper Source) float64 {

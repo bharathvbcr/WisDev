@@ -1,7 +1,7 @@
 import random
 from locust import HttpUser, task, between
 
-class ScholarLMUser(HttpUser):
+class WisDevUser(HttpUser):
     wait_time = between(1, 5)  # Simulate user think time (1-5 seconds)
 
     @task(3)

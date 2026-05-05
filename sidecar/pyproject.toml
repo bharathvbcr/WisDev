@@ -1,8 +1,27 @@
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+addopts = [
+    "--verbose",
+    "--cov=.",
+    "--cov-report=xml",
+    "--cov-report=term-missing"
+]
 
-[tool.ruff]
-exclude = [
-    "proto/*_pb2.py",
-    "proto/*_pb2_grpc.py",
+[tool.coverage.run]
+omit = [
+    "tests/*",
+    "load-testing/*",
+    "proto/*",
+    "sidecar_proto/*",
+    "grpc_server.py",
+    "telemetry.py",
+    "main.py",
+    "services/dynamic_skill_registry.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
 ]

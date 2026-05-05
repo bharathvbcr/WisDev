@@ -7,23 +7,59 @@ import (
 
 // MockProvider for testing
 type MockProvider struct {
-	name   string
-	papers []Paper
-	err    error
+	name     string
+	papers   []Paper
+	err      error
+	domains  []string
+	healthy  *bool
+	searchFn func(context.Context, string, SearchOpts) ([]Paper, error)
 }
 
-func (m *MockProvider) Name() string      { return m.name }
-func (m *MockProvider) Domains() []string { return []string{"general"} }
-func (m *MockProvider) Healthy() bool     { return true }
-func (m *MockProvider) Tools() []string   { return nil }
+func (m *MockProvider) Name() string { return m.name }
+func (m *MockProvider) Domains() []string {
+	if len(m.domains) == 0 {
+		return []string{"general"}
+	}
+	return m.domains
+}
+func (m *MockProvider) Healthy() bool {
+	if m.healthy == nil {
+		return true
+	}
+	return *m.healthy
+}
+func (m *MockProvider) Tools() []string { return nil }
 func (m *MockProvider) Search(ctx context.Context, query string, opts SearchOpts) ([]Paper, error) {
+	if m.searchFn != nil {
+		return m.searchFn(ctx, query, opts)
+	}
 	return m.papers, m.err
 }
 
 func TestDeduplicate(t *testing.T) {
 	papers := []Paper{
-		{ID: "p1", Title: "Paper A", DOI: "10.1111/a", Score: 0.9, Source: "semantic_scholar", SourceApis: []string{"semantic_scholar"}},
-		{ID: "p2", Title: "Paper A", DOI: "10.1111/a", Score: 0.8, Source: "openalex", SourceApis: []string{"openalex"}}, // Duplicate by DOI
+		{
+			ID:         "p1",
+			Title:      "Paper A",
+			DOI:        "10.1111/a",
+			Score:      0.9,
+			Source:     "semantic_scholar",
+			SourceApis: []string{"semantic_scholar"},
+		},
+		{
+			ID:                       "p2",
+			Title:                    "Paper A",
+			DOI:                      "10.1111/a",
+			Score:                    0.8,
+			Source:                   "openalex",
+			SourceApis:               []string{"openalex"},
+			Authors:                  []string{"Ada Lovelace", "Grace Hopper"},
+			Venue:                    "Nature",
+			CitationCount:            12,
+			ReferenceCount:           8,
+			InfluentialCitationCount: 2,
+			OpenAccessUrl:            "https://example.com/oa",
+		}, // Duplicate by DOI
 		{ID: "p3", Title: "Paper B", Abstract: "Test", Score: 0.7},
 		{ID: "p4", Title: "Paper B", Score: 0.6}, // Duplicate by Title (and length > 5)
 		{ID: "p5", Title: "Paper C", DOI: "10.2222/b", Score: 0.5},
@@ -36,6 +72,34 @@ func TestDeduplicate(t *testing.T) {
 	}
 	if len(deduped[0].SourceApis) != 2 {
 		t.Errorf("Expected provider provenance to merge, got %+v", deduped[0].SourceApis)
+	}
+	if len(deduped[0].Authors) != 2 {
+		t.Errorf("Expected author metadata to merge, got %+v", deduped[0].Authors)
+	}
+	if deduped[0].Venue != "Nature" || deduped[0].CitationCount != 12 || deduped[0].ReferenceCount != 8 {
+		t.Errorf("Expected richer duplicate metadata to be preserved, got %+v", deduped[0])
+	}
+	if deduped[0].OpenAccessUrl != "https://example.com/oa" {
+		t.Errorf("Expected open access URL to be preserved, got %+v", deduped[0])
+	}
+}
+
+func TestDeduplicate_SourceFallback(t *testing.T) {
+	papers := []Paper{
+		{ID: "p1", Title: "Paper D", Source: "openalex"},
+		{ID: "p2", Title: "Paper D", Source: "semantic_scholar"},
+	}
+
+	deduped := Deduplicate(papers)
+
+	if len(deduped) != 1 {
+		t.Fatalf("expected 1 unique paper, got %d", len(deduped))
+	}
+	if len(deduped[0].SourceApis) == 0 {
+		t.Fatalf("expected source fallback to populate SourceApis, got %+v", deduped[0].SourceApis)
+	}
+	if deduped[0].SourceApis[0] != "openalex" && deduped[0].SourceApis[0] != "semantic_scholar" {
+		t.Fatalf("unexpected source provenance: %+v", deduped[0].SourceApis)
 	}
 }
 
@@ -99,5 +163,15 @@ func TestInferEvidenceLevel(t *testing.T) {
 		if got != c.expected {
 			t.Errorf("For %q, expected %q, got %q", c.title, c.expected, got)
 		}
+	}
+}
+
+func TestInferEvidenceLevel_CaseControl(t *testing.T) {
+	got := InferEvidenceLevel(Paper{
+		Title:    "Case-control study of disease risk",
+		Abstract: "We evaluated matched case-control cohorts over time.",
+	})
+	if got != "case-control" {
+		t.Fatalf("expected case-control evidence level, got %q", got)
 	}
 }

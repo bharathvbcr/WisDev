@@ -1,4 +1,4 @@
-"""Shared RAG API models for Container Service routes."""
+"""Shared RAG API models for Cloud Run routes."""
 
 from __future__ import annotations
 

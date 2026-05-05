@@ -15,14 +15,16 @@ import (
 // Requires NASA_ADS_API_KEY.
 type NASAADSProvider struct {
 	BaseProvider
-	apiKey string
+	apiKey  string
+	baseURL string
 }
 
 var _ SearchProvider = (*NASAADSProvider)(nil)
 
 func NewNASAADSProvider() *NASAADSProvider {
 	return &NASAADSProvider{
-		apiKey: os.Getenv("NASA_ADS_API_KEY"),
+		apiKey:  os.Getenv("NASA_ADS_API_KEY"),
+		baseURL: "https://api.adsabs.harvard.edu/v1/search/query",
 	}
 }
 
@@ -59,7 +61,7 @@ func (p *NASAADSProvider) Search(ctx context.Context, query string, opts SearchO
 		return nil, providerError(p.Name(), "API key not configured")
 	}
 
-	u, _ := url.Parse("https://api.adsabs.harvard.edu/v1/search/query")
+	u, _ := url.Parse(p.baseURL)
 	q := u.Query()
 
 	adsQuery := query
@@ -131,7 +133,9 @@ func (p *NASAADSProvider) Search(ctx context.Context, query string, opts SearchO
 			DOI:           doi,
 			Link:          link,
 			CitationCount: doc.CitationCount,
-			Source:        "NASA ADS",
+			Source:        "nasa_ads",
+			SourceApis:    []string{"nasa_ads"},
+			Venue:         strings.TrimSpace(doc.Pub),
 		})
 	}
 

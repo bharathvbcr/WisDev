@@ -35,9 +35,13 @@ type OpenSearchHybridResponse struct {
 
 // ── Transport ─────────────────────────────────────────────────────────────────
 
+type HTTPClient interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
 // osClient is a package-level HTTP client for OpenSearch; reusing it across
 // requests takes advantage of keep-alive TCP connections.
-var osClient = &http.Client{Timeout: 12 * time.Second}
+var osClient HTTPClient = &http.Client{Timeout: 12 * time.Second}
 
 // resolveOpenSearchConfig reads connection parameters from environment
 // variables. Returns ok=false when OPENSEARCH_URL is not set, signalling that
@@ -60,6 +64,35 @@ func applyOSAuth(req *http.Request, user, password string) {
 	if user != "" {
 		req.SetBasicAuth(user, password)
 	}
+}
+
+func buildOSFilterClauses(filters map[string]any) []map[string]any {
+	if len(filters) == 0 {
+		return nil
+	}
+
+	clauses := make([]map[string]any, 0, len(filters))
+	for field, value := range filters {
+		switch typed := value.(type) {
+		case map[string]any:
+			clauses = append(clauses, map[string]any{
+				"range": map[string]any{field: typed},
+			})
+		case []string:
+			clauses = append(clauses, map[string]any{
+				"terms": map[string]any{field: typed},
+			})
+		case []any:
+			clauses = append(clauses, map[string]any{
+				"terms": map[string]any{field: typed},
+			})
+		default:
+			clauses = append(clauses, map[string]any{
+				"term": map[string]any{field: value},
+			})
+		}
+	}
+	return clauses
 }
 
 // ── Main entry point ──────────────────────────────────────────────────────────
@@ -154,12 +187,7 @@ func osHybridSearch(
 
 	// Apply user-supplied filters as term queries wrapping the main query.
 	if len(req.Filters) > 0 {
-		filters := make([]map[string]any, 0, len(req.Filters))
-		for field, value := range req.Filters {
-			filters = append(filters, map[string]any{
-				"term": map[string]any{field: value},
-			})
-		}
+		filters := buildOSFilterClauses(req.Filters)
 		queryBody["query"] = map[string]any{
 			"bool": map[string]any{
 				"must":   queryBody["query"],
@@ -242,9 +270,9 @@ func parseOSResponse(body io.Reader, start time.Time, limit int) (OpenSearchHybr
 	}
 
 	return OpenSearchHybridResponse{
-		Papers:     papers,
-		TotalFound: osResp.Hits.Total.Value,
-		LatencyMs:  int(time.Since(start).Milliseconds()),
+		Papers:      papers,
+		TotalFound:  osResp.Hits.Total.Value,
+		LatencyMs:   int(time.Since(start).Milliseconds()),
 		BackendUsed: "opensearch_hybrid",
 		QualitySignals: map[string]float64{
 			"avg_bm25_score": avgScore,

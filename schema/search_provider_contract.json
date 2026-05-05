@@ -1,0 +1,52 @@
+{
+  "canonicalProviders": [
+    "semantic_scholar",
+    "openalex",
+    "pubmed",
+    "core",
+    "arxiv",
+    "crossref",
+    "dblp",
+    "europe_pmc",
+    "biorxiv",
+    "medrxiv",
+    "clinical_trials",
+    "papers_with_code",
+    "google_scholar",
+    "ssrn",
+    "doaj",
+    "repec",
+    "nasa_ads",
+    "philpapers",
+    "ieee"
+  ],
+  "aliases": {
+    "semanticscholar": "semantic_scholar",
+    "open_alex": "openalex",
+    "europepmc": "europe_pmc",
+    "clinicaltrials": "clinical_trials",
+    "paperswithcode": "papers_with_code",
+    "googlescholar": "google_scholar",
+    "nasaads": "nasa_ads"
+  },
+  "analyticsProviders": {
+    "semantic_scholar": "semanticscholar",
+    "openalex": "openalex",
+    "pubmed": "pubmed",
+    "core": "core",
+    "arxiv": "arxiv",
+    "crossref": "crossref",
+    "dblp": "dblp",
+    "europe_pmc": "europepmc",
+    "biorxiv": "biorxiv",
+    "medrxiv": "biorxiv",
+    "clinical_trials": "clinicalTrials",
+    "papers_with_code": "paperswithcode",
+    "ssrn": "ssrn",
+    "doaj": "doaj",
+    "repec": "repec",
+    "nasa_ads": "nasaads",
+    "philpapers": "philpapers",
+    "ieee": "ieee"
+  }
+}

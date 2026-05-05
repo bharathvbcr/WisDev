@@ -61,10 +61,16 @@ func (a *ArXivProvider) Search(ctx context.Context, query string, opts SearchOpt
 	}
 
 	searchQuery := query
-	// arXiv doesn't have a strict year filter in its simple syntax, but we can do a hacky exact string or just skip filtering here and rely on the query text if needed. For now, we will add it to the search query if specified.
+	// arXiv supports date-range filtering via submittedDate Lucene field.
+	// Format: submittedDate:[YYYYMMDDHHMMSS TO YYYYMMDDHHMMSS]
+	// We pass it as part of the search_query parameter (will be URL-encoded).
 	if opts.YearFrom > 0 {
-		// A rudimentary way to search for years in arXiv is to append the year to the query if it's a specific year,
-		// but since it's a range, it's better handled client side or using advanced querying which is out of scope for a basic implementation.
+		yearTo := opts.YearTo
+		if yearTo <= 0 {
+			yearTo = time.Now().Year()
+		}
+		searchQuery = fmt.Sprintf("(%s) AND submittedDate:[%d0101000000 TO %d1231235959]",
+			searchQuery, opts.YearFrom, yearTo)
 	}
 
 	reqURL := fmt.Sprintf("%s?search_query=all:%s&start=0&max_results=%d", a.baseURL, url.QueryEscape(searchQuery), limit)
@@ -84,13 +90,13 @@ func (a *ArXivProvider) Search(ctx context.Context, query string, opts SearchOpt
 
 	if resp.StatusCode != http.StatusOK {
 		a.RecordFailure()
-		return nil, providerError("arxiv", "HTTP %d", resp.StatusCode)
+		return nil, providerHTTPStatusError("arxiv", resp)
 	}
 
 	var feed arxivFeed
 	if err := xml.NewDecoder(resp.Body).Decode(&feed); err != nil {
 		a.RecordFailure()
-		return nil, providerError("arxiv", "decode: %v", err)
+		return nil, providerError("arxiv", "failed to parse response: %v", err)
 	}
 
 	var papers []Paper
@@ -107,8 +113,12 @@ func (a *ArXivProvider) Search(ctx context.Context, query string, opts SearchOpt
 		}
 
 		year := 0
+		month := 0
 		if len(entry.Published) >= 4 {
 			fmt.Sscanf(entry.Published[:4], "%d", &year)
+		}
+		if len(entry.Published) >= 7 {
+			fmt.Sscanf(entry.Published[5:7], "%d", &month)
 		}
 
 		authors := make([]string, 0, len(entry.Authors))
@@ -119,17 +129,38 @@ func (a *ArXivProvider) Search(ctx context.Context, query string, opts SearchOpt
 		arxivID := extractArXivID(entry.ID)
 
 		papers = append(papers, Paper{
-			ID:       "arxiv:" + arxivID,
-			Title:    collapseWhitespace(entry.Title),
-			Abstract: collapseWhitespace(entry.Summary),
-			Link:     pdfLink,
-			Source:   "arxiv",
-			Authors:  authors,
-			Year:     year,
+			ID:            "arxiv:" + arxivID,
+			Title:         collapseWhitespace(entry.Title),
+			Abstract:      collapseWhitespace(entry.Summary),
+			Link:          pdfLink,
+			Source:        "arxiv",
+			SourceApis:    []string{"arxiv"},
+			Authors:       authors,
+			Year:          year,
+			Month:         month,
+			OpenAccessUrl: pdfLink,
+			PdfUrl:        pdfLink,
 		})
 	}
 
 	a.RecordSuccess()
+
+	// Client-side post-filter: drop any papers outside the requested year range.
+	// This catches cases where the API date filter is inexact or returns stale results.
+	if opts.YearFrom > 0 || opts.YearTo > 0 {
+		filtered := papers[:0]
+		for _, p := range papers {
+			if opts.YearFrom > 0 && p.Year > 0 && p.Year < opts.YearFrom {
+				continue
+			}
+			if opts.YearTo > 0 && p.Year > 0 && p.Year > opts.YearTo {
+				continue
+			}
+			filtered = append(filtered, p)
+		}
+		papers = filtered
+	}
+
 	return papers, nil
 }
 

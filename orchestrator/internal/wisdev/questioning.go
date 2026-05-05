@@ -1,6 +1,7 @@
 package wisdev
 
 import (
+	"math"
 	"sort"
 	"strings"
 )
@@ -69,14 +70,48 @@ func DefaultQuestionFlow() []Question {
 			Type:          TypeStudyTypes,
 			Question:      "What study types should be included?",
 			IsMultiSelect: true,
-			IsRequired:    false,
+			IsRequired:    true,
 		},
 		{
 			ID:            "q6_exclusions",
 			Type:          TypeExclusions,
 			Question:      "Are there any specific exclusions?",
 			IsMultiSelect: true,
-			IsRequired:    false,
+			IsRequired:    true,
+			Options: []QuestionOption{
+				{Value: "none", Label: "No exclusions"},
+				{Value: "preprints", Label: "Exclude preprints"},
+				{Value: "non_english", Label: "Exclude non-English studies"},
+				{Value: "low_sample_size", Label: "Exclude small or underpowered studies"},
+				{Value: "non_peer_reviewed", Label: "Exclude non-peer-reviewed sources"},
+				{Value: "animal_studies", Label: "Exclude animal studies"},
+			},
+		},
+		{
+			ID:            "q7_evidence_quality",
+			Type:          TypeClarification,
+			Question:      "What evidence quality bar should WisDev apply?",
+			IsMultiSelect: true,
+			IsRequired:    true,
+			Options: []QuestionOption{
+				{Value: "peer_reviewed", Label: "Peer-reviewed only"},
+				{Value: "high_citation_signal", Label: "High citation signal"},
+				{Value: "recent_replication", Label: "Replication or validation evidence"},
+				{Value: "methods_transparency", Label: "Transparent methods and data"},
+			},
+		},
+		{
+			ID:            "q8_output_focus",
+			Type:          TypeClarification,
+			Question:      "What should the final research pass optimize for?",
+			IsMultiSelect: false,
+			IsRequired:    true,
+			Options: []QuestionOption{
+				{Value: "best_papers", Label: "Best papers first"},
+				{Value: "coverage_map", Label: "Broad coverage map"},
+				{Value: "evidence_gaps", Label: "Evidence gaps and limitations"},
+				{Value: "method_comparison", Label: "Method comparison"},
+			},
 		},
 	}
 }
@@ -105,6 +140,7 @@ func EstimateComplexityScore(query string) float64 {
 	if strings.Contains(text, "reproducibility") || strings.Contains(text, "causal") || strings.Contains(text, "longitudinal") {
 		score += 0.1
 	}
+	score = math.Round(score*100) / 100
 	if score > 1.0 {
 		return 1.0
 	}
@@ -112,23 +148,22 @@ func EstimateComplexityScore(query string) float64 {
 }
 
 func BuildAdaptiveQuestionSequence(complexity float64, domainHint string) ([]string, int, int) {
-	base := []string{"q1_domain", "q2_scope", "q3_timeframe"}
+	base := []string{"q1_domain", "q2_scope", "q3_timeframe", "q4_subtopics", "q5_study_types", "q6_exclusions"}
 	sequence := append([]string{}, base...)
 
-	if complexity >= 0.45 {
-		sequence = append(sequence, "q4_subtopics")
+	includeEvidenceQuality := complexity >= 0.65 ||
+		strings.EqualFold(domainHint, "medicine") ||
+		strings.EqualFold(domainHint, "biology")
+	includeOutputFocus := complexity >= 0.8
+
+	if includeEvidenceQuality {
+		sequence = append(sequence, "q7_evidence_quality")
 	}
-	if complexity >= 0.65 || strings.EqualFold(domainHint, "medicine") {
-		sequence = append(sequence, "q5_study_types")
-	}
-	if complexity >= 0.8 {
-		sequence = append(sequence, "q6_exclusions")
+	if includeOutputFocus {
+		sequence = append(sequence, "q8_output_focus")
 	}
 
-	minQuestions := 3
-	if complexity >= 0.45 {
-		minQuestions = 4
-	}
+	minQuestions := len(sequence)
 	maxQuestions := len(sequence)
 	return sequence, minQuestions, maxQuestions
 }
@@ -138,10 +173,7 @@ func EnsureAdaptiveQuestionState(session *AgentSession) {
 		return
 	}
 	if session.ComplexityScore <= 0 {
-		query := session.CorrectedQuery
-		if strings.TrimSpace(query) == "" {
-			query = session.OriginalQuery
-		}
+		query := ResolveSessionSearchQuery(session.Query, session.CorrectedQuery, session.OriginalQuery)
 		session.ComplexityScore = EstimateComplexityScore(query)
 	}
 	if len(session.QuestionSequence) == 0 || session.MinQuestions <= 0 || session.MaxQuestions <= 0 {
@@ -159,7 +191,40 @@ func AnsweredQuestionCount(session *AgentSession) int {
 	if session == nil {
 		return 0
 	}
-	return len(session.Answers)
+	if len(session.Answers) == 0 {
+		return 0
+	}
+	if len(session.QuestionSequence) == 0 {
+		count := 0
+		for _, answer := range session.Answers {
+			if hasAnswerValues(answer) {
+				count++
+			}
+		}
+		return count
+	}
+	planned := make(map[string]struct{}, len(session.QuestionSequence))
+	for _, questionID := range session.QuestionSequence {
+		if trimmed := strings.TrimSpace(questionID); trimmed != "" {
+			planned[trimmed] = struct{}{}
+		}
+	}
+	count := 0
+	for questionID, answer := range session.Answers {
+		if _, ok := planned[strings.TrimSpace(questionID)]; ok && hasAnswerValues(answer) {
+			count++
+		}
+	}
+	return count
+}
+
+func hasAnswerValues(answer Answer) bool {
+	for _, value := range answer.Values {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func FindNextQuestionID(session *AgentSession) string {
@@ -168,8 +233,10 @@ func FindNextQuestionID(session *AgentSession) string {
 	}
 	EnsureAdaptiveQuestionState(session)
 	answered := make(map[string]bool, len(session.Answers))
-	for questionID := range session.Answers {
-		answered[questionID] = true
+	for questionID, answer := range session.Answers {
+		if hasAnswerValues(answer) {
+			answered[questionID] = true
+		}
 	}
 	for _, questionID := range session.QuestionSequence {
 		if !answered[questionID] {
@@ -208,8 +275,10 @@ func BuildQuestionStateSummary(session *AgentSession) map[string]any {
 	}
 	remaining := []string{}
 	answered := make(map[string]bool, len(session.Answers))
-	for questionID := range session.Answers {
-		answered[questionID] = true
+	for questionID, answer := range session.Answers {
+		if hasAnswerValues(answer) {
+			answered[questionID] = true
+		}
 	}
 	for _, questionID := range session.QuestionSequence {
 		if !answered[questionID] {

@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/llm"
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/search"
-	llmv1 "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/llm/v1"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -40,9 +40,6 @@ func (m *mockLLMService) EmbedBatch(ctx context.Context, in *llmv1.EmbedBatchReq
 func (m *mockLLMService) Health(ctx context.Context, in *llmv1.HealthRequest, opts ...grpc.CallOption) (*llmv1.HealthResponse, error) {
 	return nil, nil
 }
-func (m *mockLLMService) GenerateImages(ctx context.Context, in *llmv1.GenerateImagesRequest, opts ...grpc.CallOption) (*llmv1.GenerateImagesResponse, error) {
-	return &llmv1.GenerateImagesResponse{}, nil
-}
 
 func TestProfiler_ExtractProfile(t *testing.T) {
 	lc := llm.NewClient()
@@ -53,7 +50,15 @@ func TestProfiler_ExtractProfile(t *testing.T) {
 	paper := search.Paper{ID: "p1", Title: "Title", Abstract: "Abs", DOI: "10.1/1"}
 
 	t.Run("Success", func(t *testing.T) {
-		msc.On("StructuredOutput", mock.Anything, mock.Anything).Return(&llmv1.StructuredResponse{
+		msc.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
+			assert.Contains(t, req.GetPrompt(), profilerStructuredOutputSchemaInstruction)
+			assert.NotContains(t, req.GetPrompt(), "Return a JSON object")
+			return req != nil &&
+				req.RequestClass == "structured_high_value" &&
+				req.RetryProfile == "standard" &&
+				req.ServiceTier == "priority" &&
+				req.LatencyBudgetMs > 0
+		})).Return(&llmv1.StructuredResponse{
 			JsonResult: `{"summary":"sum","keyFindings":["f1"],"methodology":"meth","methodologicalRigor":"high","sampleSize":"100","limitations":["l1"],"impactScore":0.9,"noveltyScore":0.8}`,
 		}, nil).Once()
 

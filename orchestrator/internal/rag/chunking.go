@@ -8,7 +8,7 @@ import (
 
 // Section represents a detected section in a paper.
 type Section struct {
-	Type    string `json:"type"`
+	Type    string `json:"type"` // abstract, introduction, methods, results, discussion, conclusion, references, table, figure, code
 	Content string `json:"content"`
 }
 
@@ -22,18 +22,30 @@ var sectionHeaders = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)^(references?|bibliography)[:.]?\s*`),
 }
 
+var structuredMarkers = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)^(table|tab\.)\s+\d+[:.]?\s*`),
+	regexp.MustCompile(`(?i)^(figure|fig\.)\s+\d+[:.]?\s*`),
+}
+
 func detectSectionType(line string) string {
-	if sectionHeaders[0].MatchString(line) { return "abstract" }
-	if sectionHeaders[1].MatchString(line) { return "introduction" }
-	if sectionHeaders[2].MatchString(line) { return "methods" }
-	if sectionHeaders[3].MatchString(line) { return "results" }
-	if sectionHeaders[4].MatchString(line) { return "discussion" }
-	if sectionHeaders[5].MatchString(line) { return "conclusion" }
-	if sectionHeaders[6].MatchString(line) { return "references" }
+	for i, re := range sectionHeaders {
+		if re.MatchString(line) {
+			types := []string{"abstract", "introduction", "methods", "results", "discussion", "conclusion", "references"}
+			return types[i]
+		}
+	}
+	
+	for i, re := range structuredMarkers {
+		if re.MatchString(line) {
+			types := []string{"table", "figure"}
+			return types[i]
+		}
+	}
+
 	return ""
 }
 
-// DetectSections splits text into sections based on common academic headers.
+// DetectSections splits text into sections based on common academic headers and structured elements.
 func DetectSections(text string) []Section {
 	var sections []Section
 	lines := strings.Split(text, "\n")
@@ -43,8 +55,39 @@ func DetectSections(text string) []Section {
 		Content: "",
 	}
 	
+	inCodeBlock := false
+	
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
+		
+		// Check for code block boundaries
+		if strings.HasPrefix(trimmed, "```") {
+			if !inCodeBlock {
+				if strings.TrimSpace(currentSection.Content) != "" {
+					sections = append(sections, currentSection)
+				}
+				currentSection = Section{
+					Type:    "code",
+					Content: line + "\n",
+				}
+				inCodeBlock = true
+			} else {
+				currentSection.Content += line + "\n"
+				sections = append(sections, currentSection)
+				currentSection = Section{
+					Type:    "unknown",
+					Content: "",
+				}
+				inCodeBlock = false
+			}
+			continue
+		}
+		
+		if inCodeBlock {
+			currentSection.Content += line + "\n"
+			continue
+		}
+
 		secType := detectSectionType(trimmed)
 		
 		if secType != "" {

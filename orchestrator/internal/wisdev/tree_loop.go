@@ -7,9 +7,13 @@ import (
 	"log/slog"
 	"math"
 	"math/rand"
+	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
 )
 
 const (
@@ -25,9 +29,17 @@ const (
 )
 
 const (
-	llmExpandTimeout    = 8 * time.Second
-	llmExpandMaxRetries = 2
+	defaultLLMExpandTimeout     = 45 * time.Second
+	defaultBatchVerifierTimeout = 12 * time.Second
+	llmExpandMaxRetries         = 2
 )
+
+const mctsBatchVerifierRateLimitCooldown = 60 * time.Second
+
+var mctsBatchVerifierCooldown = struct {
+	sync.Mutex
+	until time.Time
+}{}
 
 type treeLoopIteration struct {
 	Iteration  int            `json:"iteration"`
@@ -42,11 +54,12 @@ type treeLoopIteration struct {
 }
 
 type treeLoopResult struct {
-	Iterations     []treeLoopIteration `json:"iterations"`
-	Final          map[string]any      `json:"final"`
-	BestConfidence float64             `json:"bestConfidence"`
-	Completed      bool                `json:"completed"`
-	VoteSummary    map[string]int      `json:"voteSummary,omitempty"`
+	Iterations      []treeLoopIteration `json:"iterations"`
+	Final           map[string]any      `json:"final"`
+	BestConfidence  float64             `json:"bestConfidence"`
+	Completed       bool                `json:"completed"`
+	VoteSummary     map[string]int      `json:"voteSummary,omitempty"`
+	BranchArtifacts []MemoryEntry       `json:"branchArtifacts,omitempty"`
 }
 
 type branchState struct {
@@ -73,6 +86,33 @@ type mctsNode struct {
 	Visits   int
 	Value    float64
 	Expanded bool
+}
+
+func resolveExpandTimeout(depth int) time.Duration {
+	base := resolveLLMExpandTimeout()
+	if depth >= 2 {
+		extra := time.Duration(depth-1) * 15 * time.Second
+		return base + extra
+	}
+	return base
+}
+
+func resolveLLMExpandTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("WISDEV_TREE_LLM_EXPAND_TIMEOUT"))
+	if raw == "" {
+		return defaultLLMExpandTimeout
+	}
+	if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+		return parsed
+	}
+	if parsed, err := time.ParseDuration(raw + "s"); err == nil && parsed > 0 {
+		return parsed
+	}
+	slog.Warn("invalid WISDEV_TREE_LLM_EXPAND_TIMEOUT; using default",
+		"value", raw,
+		"default", defaultLLMExpandTimeout.String(),
+	)
+	return defaultLLMExpandTimeout
 }
 
 func cloneMap(input map[string]any) map[string]any {
@@ -179,6 +219,15 @@ func deriveBranchVariants(payload map[string]any, branchID int) []map[string]any
 func extractVariantsFromThoughts(result map[string]any, basePayload map[string]any) []map[string]any {
 	branches, ok := result["branches"].([]any)
 	if !ok || len(branches) == 0 {
+		if thoughts, tok := result["thoughts"].(string); tok && thoughts != "" {
+			variant := cloneMap(basePayload)
+			variant["label"] = thoughts
+			variant["reasoning"] = thoughts
+			if conf, cok := result["confidence"].(float64); cok {
+				variant["search_weight"] = conf
+			}
+			return []map[string]any{variant}
+		}
 		return nil
 	}
 	var out []map[string]any
@@ -221,7 +270,7 @@ func expandNodeWithLLM(
 	basePayload map[string]any,
 	siblingLabels []string,
 ) ([]map[string]any, error) {
-	callCtx, cancel := context.WithTimeout(ctx, llmExpandTimeout)
+	callCtx, cancel := context.WithTimeout(ctx, resolveExpandTimeout(node.Depth))
 	defer cancel()
 
 	expandPayload := map[string]any{
@@ -266,12 +315,204 @@ func expandNodeWithLLM(
 		slog.Warn("expandNodeWithLLM attempt failed",
 			"attempt", attempt+1, "error", err,
 			"nodeID", node.ID, "depth", node.Depth)
+		if llm.IsProviderRateLimitError(err) {
+			break
+		}
 	}
 
 fallback:
 	slog.Info("expandNodeWithLLM falling back to deriveBranchVariants",
 		"nodeID", node.ID, "cause", lastErr)
 	return deriveBranchVariants(basePayload, node.ID), nil
+}
+
+type branchVerifierScore struct {
+	Index int
+	Score float64
+}
+
+func mctsBatchVerifierCooldownRemaining(now time.Time) time.Duration {
+	mctsBatchVerifierCooldown.Lock()
+	defer mctsBatchVerifierCooldown.Unlock()
+	if now.Before(mctsBatchVerifierCooldown.until) {
+		return mctsBatchVerifierCooldown.until.Sub(now)
+	}
+	return 0
+}
+
+func openMCTSBatchVerifierCooldown(now time.Time) time.Duration {
+	mctsBatchVerifierCooldown.Lock()
+	defer mctsBatchVerifierCooldown.Unlock()
+	next := now.Add(mctsBatchVerifierRateLimitCooldown)
+	if next.After(mctsBatchVerifierCooldown.until) {
+		mctsBatchVerifierCooldown.until = next
+	}
+	return mctsBatchVerifierCooldown.until.Sub(now)
+}
+
+func resetMCTSBatchVerifierCooldownForTests() {
+	mctsBatchVerifierCooldown.Lock()
+	defer mctsBatchVerifierCooldown.Unlock()
+	mctsBatchVerifierCooldown.until = time.Time{}
+}
+
+func isMCTSBatchVerifierRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	raw := strings.ToLower(err.Error())
+	return strings.Contains(raw, "429") ||
+		strings.Contains(raw, "resource exhausted") ||
+		strings.Contains(raw, "rate limit") ||
+		strings.Contains(raw, "rate_limit") ||
+		strings.Contains(raw, "too many requests") ||
+		strings.Contains(raw, "quota")
+}
+
+func batchVerifierScoresFromResult(result map[string]any, count int) []branchVerifierScore {
+	if count <= 0 || result == nil {
+		return nil
+	}
+	parseScore := func(value any) (float64, bool) {
+		switch typed := value.(type) {
+		case float64:
+			return ClampFloat(typed, 0, 1), true
+		case map[string]any:
+			for _, key := range []string{"score", "confidence", "verifier_score"} {
+				if raw, ok := typed[key].(float64); ok {
+					return ClampFloat(raw, 0, 1), true
+				}
+			}
+			if report, ok := typed["confidence_report"].(map[string]any); ok {
+				if raw, ok := report["calibrated_score"].(float64); ok {
+					return ClampFloat(raw, 0, 1), true
+				}
+			}
+		}
+		return 0, false
+	}
+	readArray := func(raw any) []branchVerifierScore {
+		items, ok := raw.([]any)
+		if !ok {
+			return nil
+		}
+		scores := make([]branchVerifierScore, 0, minInt(len(items), count))
+		for i, item := range items {
+			if i >= count {
+				break
+			}
+			if score, ok := parseScore(item); ok {
+				scores = append(scores, branchVerifierScore{Index: i, Score: score})
+			}
+		}
+		return scores
+	}
+	for _, key := range []string{"scores", "results", "ranked"} {
+		if scores := readArray(result[key]); len(scores) > 0 {
+			return scores
+		}
+	}
+	return nil
+}
+
+func rankVariantsWithBatchVerifier(
+	ctx context.Context,
+	exec func(context.Context, string, map[string]any, *AgentSession) (map[string]any, error),
+	session *AgentSession,
+	variants []map[string]any,
+	basePayload map[string]any,
+) []map[string]any {
+	if len(variants) <= 1 || exec == nil {
+		return variants
+	}
+	if remaining := mctsBatchVerifierCooldownRemaining(time.Now()); remaining > 0 {
+		slog.Warn("MCTS batch verifier skipped during provider cooldown; keeping unranked variants",
+			"cooldown_ms", remaining.Milliseconds(),
+			"variantCount", len(variants),
+		)
+		return variants
+	}
+	verifyAction := ActionResearchVerifyClaimsBatch
+	if raw, ok := basePayload["batchVerifierAction"].(string); ok && strings.TrimSpace(raw) != "" {
+		verifyAction = strings.TrimSpace(raw)
+	}
+	verifyPayload := map[string]any{
+		"candidateOutputs": variants,
+		"outputs":          variants,
+		"mode":             "mcts_branch_prune",
+		"query":            basePayload["query"],
+	}
+	if papers := verifierSourceMapsFromPayload(basePayload); len(papers) > 0 {
+		verifyPayload["papers"] = mapsToAny(papers)
+	}
+	verifyCtx, cancel := context.WithTimeout(ctx, defaultBatchVerifierTimeout)
+	defer cancel()
+	result, err := exec(verifyCtx, verifyAction, verifyPayload, session)
+	if err != nil {
+		if isMCTSBatchVerifierRateLimitError(err) {
+			cooldown := openMCTSBatchVerifierCooldown(time.Now())
+			slog.Warn("MCTS batch verifier provider cooldown opened; keeping unranked variants",
+				"action", verifyAction,
+				"error", err,
+				"cooldown_ms", cooldown.Milliseconds(),
+				"variantCount", len(variants),
+			)
+			return variants
+		}
+		slog.Warn("MCTS batch verifier unavailable; keeping unranked variants",
+			"action", verifyAction,
+			"error", err,
+			"variantCount", len(variants),
+		)
+		return variants
+	}
+	scores := batchVerifierScoresFromResult(result, len(variants))
+	if len(scores) == 0 {
+		return variants
+	}
+	for _, item := range scores {
+		if item.Index >= 0 && item.Index < len(variants) {
+			variants[item.Index]["verifier_score"] = item.Score
+		}
+	}
+	scoreForVariant := func(index int) (float64, bool) {
+		if index < 0 || index >= len(variants) {
+			return 0, false
+		}
+		score, ok := variants[index]["verifier_score"].(float64)
+		return score, ok
+	}
+	sort.SliceStable(variants, func(i, j int) bool {
+		left, leftOK := scoreForVariant(i)
+		right, rightOK := scoreForVariant(j)
+		if leftOK != rightOK {
+			return leftOK
+		}
+		if left != right {
+			return left > right
+		}
+		return i < j
+	})
+	return variants
+}
+
+func verifierSourceMapsFromPayload(basePayload map[string]any) []map[string]any {
+	if len(basePayload) == 0 {
+		return nil
+	}
+	raw := firstArtifactValue(
+		basePayload["papers"],
+		basePayload["sources"],
+		basePayload["evidence"],
+		basePayload["canonicalSources"],
+		basePayload["canonical_sources"],
+	)
+	switch typed := raw.(type) {
+	case []Source:
+		return sourcesToArtifactMaps(typed)
+	default:
+		return firstArtifactMaps(typed)
+	}
 }
 
 func maybeVerifierScore(
@@ -281,6 +522,9 @@ func maybeVerifierScore(
 	output map[string]any,
 	basePayload map[string]any,
 ) float64 {
+	if v, ok := basePayload["verifier_score"].(float64); ok {
+		return ClampFloat(v, 0, 1)
+	}
 	verifyAction := "research.verifyClaims"
 	if raw, ok := basePayload["verifierAction"].(string); ok && strings.TrimSpace(raw) != "" {
 		verifyAction = strings.TrimSpace(raw)
@@ -468,7 +712,7 @@ func RunProgrammaticTreeLoop(
 		}
 
 		score, confidence := scoreBranchResult(out)
-		verifier := maybeVerifierScore(ctx, exec, session, out, basePayload)
+		verifier := maybeVerifierScore(ctx, exec, session, out, payload)
 		emitEvent(streamFn, StreamEvent{
 			Type:          EventVerifierScored,
 			NodeID:        selectedNode.ID,
@@ -515,11 +759,13 @@ func RunProgrammaticTreeLoop(
 			PRMReward:     finalReward,
 		})
 		if finalReward < 0.45 {
-			streamFn(map[string]any{
-				"type":      "escalation_triggered",
-				"iteration": iteration,
-				"reason":    "low_reward_branch",
-			})
+			if streamFn != nil {
+				streamFn(map[string]any{
+					"type":      "escalation_triggered",
+					"iteration": iteration,
+					"reason":    "low_reward_branch",
+				})
+			}
 		}
 
 		topScore := finalReward
@@ -598,6 +844,7 @@ func RunProgrammaticTreeLoop(
 					variants = postPrune
 				}
 			}
+			variants = rankVariantsWithBatchVerifier(ctx, exec, session, variants, basePayload)
 
 			for _, variant := range variants {
 				if len(active) >= branchWidth {
@@ -734,13 +981,51 @@ func RunProgrammaticTreeLoop(
 		"depthSpan":          maxDepth - minDepth,
 		"missingPriorities":  missingPriorities,
 	}
+	branchArtifacts := buildTreeLoopBranchArtifacts(session, completedBranches)
 
 	return treeLoopResult{
-		Iterations:     events,
-		Final:          bestOutput,
-		BestConfidence: bestConfidence,
-		Completed:      completed,
-		VoteSummary:    voteSummary,
+		Iterations:      events,
+		Final:           bestOutput,
+		BestConfidence:  bestConfidence,
+		Completed:       completed,
+		VoteSummary:     voteSummary,
+		BranchArtifacts: branchArtifacts,
+	}
+}
+
+func buildTreeLoopBranchArtifacts(session *AgentSession, branches []completedBranch) []MemoryEntry {
+	if len(branches) == 0 {
+		return nil
+	}
+	artifacts := make([]MemoryEntry, 0, len(branches))
+	for _, branch := range branches {
+		entry := branchArtifactEntry(branch)
+		artifacts = append(artifacts, entry)
+		if session != nil {
+			if session.MemoryTiers == nil {
+				session.MemoryTiers = &MemoryTierState{}
+			}
+			session.MemoryTiers.ArtifactMemory = appendUniqueMemoryEntry(session.MemoryTiers.ArtifactMemory, entry)
+		}
+	}
+	return artifacts
+}
+
+func branchArtifactEntry(branch completedBranch) MemoryEntry {
+	payload := map[string]any{
+		"branchId":   branch.BranchID,
+		"score":      branch.Score,
+		"confidence": branch.Confidence,
+		"verifier":   branch.Verifier,
+		"output":     branch.Output,
+	}
+	raw, _ := json.Marshal(payload)
+	return MemoryEntry{
+		ID:              stableWisDevID("tree-branch-artifact", fmt.Sprintf("%d", branch.BranchID), branch.ConsensusKey),
+		Type:            "branch_summary",
+		Content:         string(raw),
+		CreatedAt:       NowMillis(),
+		EvaluationScore: branch.Score,
 	}
 }
 
@@ -761,6 +1046,9 @@ func TreeLoopIterationsToHTTP(events []treeLoopIteration) []map[string]any {
 		}
 		if strings.TrimSpace(event.Reason) != "" {
 			entry["reason"] = event.Reason
+		}
+		if event.Output != nil {
+			entry["output"] = event.Output
 		}
 		out = append(out, entry)
 	}

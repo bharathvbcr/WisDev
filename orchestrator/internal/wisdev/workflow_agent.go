@@ -37,6 +37,11 @@ func NewWisDevWorkflowAgent(gateway *AgentGateway, executor *PlanExecutor, subAg
 // Run implements the agent.Agent interface.
 func (wa *WisDevWorkflowAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		if wa == nil || wa.gateway == nil || wa.executor == nil {
+			yield(nil, fmt.Errorf("workflow agent runtime is not fully initialized"))
+			return
+		}
+
 		sessionID := ctx.Session().ID()
 		userID := ctx.Session().UserID()
 
@@ -53,7 +58,7 @@ func (wa *WisDevWorkflowAgent) Run(ctx agent.InvocationContext) iter.Seq2[*sessi
 			if ctx.UserContent() != nil && len(ctx.UserContent().Parts) > 0 {
 				query = ctx.UserContent().Parts[0].Text
 			}
-			wisdevSession = wa.gateway.ensureADKSession(sessionID, query, "")
+			wisdevSession = wa.gateway.ensureADKSessionWithContext(ctx, sessionID, query, "")
 		}
 
 		if wisdevSession.Plan == nil {
@@ -86,7 +91,10 @@ func (wa *WisDevWorkflowAgent) Run(ctx agent.InvocationContext) iter.Seq2[*sessi
 func (wa *WisDevWorkflowAgent) mapToADKEvent(ctx agent.InvocationContext, event PlanExecutionEvent) *session.Event {
 	adkEvent := session.NewEvent(ctx.InvocationID())
 	adkEvent.Author = "wisdev-workflow"
-	adkEvent.Timestamp = time.UnixMilli(event.CreatedAt)
+	adkEvent.Timestamp = workflowEventTimestamp(event.CreatedAt)
+	if metadata := workflowEventMetadata(event); len(metadata) > 0 {
+		adkEvent.CustomMetadata = metadata
+	}
 
 	switch event.Type {
 	case EventStepStarted:
@@ -101,7 +109,7 @@ func (wa *WisDevWorkflowAgent) mapToADKEvent(ctx agent.InvocationContext, event 
 				{Text: fmt.Sprintf("Step completed: %s", event.StepID)},
 			},
 		}
-		adkEvent.Actions.StateDelta = event.Payload
+		adkEvent.Actions.StateDelta = cloneAnyMap(event.Payload)
 	case EventStepFailed:
 		adkEvent.Content = &genai.Content{
 			Parts: []*genai.Part{
@@ -120,7 +128,6 @@ func (wa *WisDevWorkflowAgent) mapToADKEvent(ctx agent.InvocationContext, event 
 				{Text: fmt.Sprintf("Evidence found: %s", title)},
 			},
 		}
-		adkEvent.CustomMetadata = event.Payload
 	case EventConfirmationNeed:
 		adkEvent.Content = &genai.Content{
 			Parts: []*genai.Part{
@@ -129,7 +136,6 @@ func (wa *WisDevWorkflowAgent) mapToADKEvent(ctx agent.InvocationContext, event 
 		}
 		// In a real ADK implementation, we would use RequestedToolConfirmations
 		// but for now we maintain compatibility with the WisDev UI via CustomMetadata.
-		adkEvent.CustomMetadata = event.Payload
 	case EventPlanRevised:
 		adkEvent.Content = &genai.Content{
 			Parts: []*genai.Part{
@@ -151,4 +157,65 @@ func (wa *WisDevWorkflowAgent) mapToADKEvent(ctx agent.InvocationContext, event 
 	}
 
 	return adkEvent
+}
+
+func workflowEventTimestamp(createdAt int64) time.Time {
+	if createdAt <= 0 {
+		createdAt = NowMillis()
+	}
+	return time.UnixMilli(createdAt)
+}
+
+func workflowEventMetadata(event PlanExecutionEvent) map[string]any {
+	metadata := cloneAnyMap(event.Payload)
+	if metadata == nil {
+		metadata = make(map[string]any, 6)
+	}
+	if _, exists := metadata["eventType"]; !exists {
+		metadata["eventType"] = string(event.Type)
+	}
+	if event.TraceID != "" {
+		if _, exists := metadata["traceId"]; !exists {
+			metadata["traceId"] = event.TraceID
+		}
+	}
+	if event.SessionID != "" {
+		if _, exists := metadata["sessionId"]; !exists {
+			metadata["sessionId"] = event.SessionID
+		}
+	}
+	if event.PlanID != "" {
+		if _, exists := metadata["planId"]; !exists {
+			metadata["planId"] = event.PlanID
+		}
+	}
+	if event.StepID != "" {
+		if _, exists := metadata["stepId"]; !exists {
+			metadata["stepId"] = event.StepID
+		}
+	}
+	if event.Message != "" {
+		if _, exists := metadata["message"]; !exists {
+			metadata["message"] = event.Message
+		}
+	}
+	if event.Owner != "" {
+		metadata["owner"] = event.Owner
+	}
+	if event.SubAgent != "" {
+		metadata["subAgent"] = event.SubAgent
+	}
+	if event.OwningComponent != "" {
+		metadata["owningComponent"] = event.OwningComponent
+	}
+	if event.ResultOrigin != "" {
+		metadata["resultOrigin"] = event.ResultOrigin
+	}
+	if _, exists := metadata["resultConfidence"]; !exists && event.ResultConfidence != 0 {
+		metadata["resultConfidence"] = event.ResultConfidence
+	}
+	if event.ResultFusionIntent != "" {
+		metadata["resultFusionIntent"] = event.ResultFusionIntent
+	}
+	return metadata
 }

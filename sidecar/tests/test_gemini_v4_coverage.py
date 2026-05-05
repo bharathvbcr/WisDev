@@ -1,8 +1,12 @@
 import pytest
+import json
 import os
+import httpx
 from unittest.mock import AsyncMock, patch, MagicMock
 from services.ai_generation_service import (
-    AiGenerationService, ModelSelectionStrategy
+    AiGenerationService, ModelSelectionStrategy, AiGenerationRetryableError,
+    AiGenerationRateLimitError, AiGenerationServiceError, AiGenerationParsingError,
+    AiGenerationStructuredOutputRequiresNativeRuntimeError,
 )
 from pydantic import BaseModel
 
@@ -56,20 +60,29 @@ async def test_generate_json_native_path(service):
 @pytest.mark.asyncio
 async def test_generate_json_proxy_fallback(service):
     service.native_structured_enabled = False
-    from pydantic import BaseModel
-    class MockModel(BaseModel):
-        answer: str
-    with patch.object(service, "_generate_via_vertex_proxy", new_callable=AsyncMock) as mock_gen:
-        mock_gen.return_value = '{"answer": "proxy-42"}'
-        res = await service.generate_json("Q", MockModel)
-        assert res.answer == "proxy-42"
+    with patch.object(service, "_generate_via_vertex_proxy", new_callable=AsyncMock) as mock_proxy:
+        mock_proxy.return_value = '{"answer":"proxy-42"}'
+        result = await service.generate_json("Q", MockModel)
+        assert result.answer == "proxy-42"
+        assert mock_proxy.await_count >= 1
 
 @pytest.mark.asyncio
-async def test_generate_json_proxy_with_markdown(service):
-    with patch.object(service, "_generate_via_vertex_proxy", new_callable=AsyncMock) as mock_gen:
-        mock_gen.return_value = "```json\n{\"answer\": \"md-42\"}\n```"
-        res = await service.generate_json("Q", MockModel)
-        assert res.answer == "md-42"
+async def test_generate_json_demotes_across_native_models(service):
+    service.native_structured_enabled = True
+    with patch.object(service, "_generate_native_structured", new_callable=AsyncMock) as mock_gen:
+        mock_gen.side_effect = [
+            AiGenerationRateLimitError("retry"),
+            MockModel(answer="md-42"),
+        ]
+        with patch.object(service, "_generate_via_vertex_proxy", new_callable=AsyncMock) as mock_proxy:
+            mock_proxy.return_value = '{"answer":"md-42"}'
+            res = await service.generate_json(
+                "Q",
+                MockModel,
+                strategy=ModelSelectionStrategy.ALWAYS_HEAVY,
+            )
+            assert res.answer == "md-42"
+            assert mock_proxy.await_count >= 1
 
 @pytest.mark.asyncio
 async def test_generate_native_structured_details(service):
@@ -79,7 +92,7 @@ async def test_generate_native_structured_details(service):
     mock_client.aio.models.generate_content = AsyncMock(return_value=mock_resp)
     with patch('google.genai.Client', return_value=mock_client):
         with patch('google.genai.types.GenerateContentConfig', side_effect=lambda **kwargs: kwargs):
-            with patch.dict(os.environ, {"VERTEX_PROJECT": "p1", "AI_MODEL_HEAVY_ID": "heavy-v1"}):
+            with patch.dict(os.environ, {"GOOGLE_CLOUD_PROJECT": "p1", "AI_MODEL_HEAVY_ID": "heavy-v1"}):
                 res = await service._generate_native_structured("Q", MockModel, 0.7, 100, model_tier="heavy")
                 assert res.answer == "42"
 
@@ -92,27 +105,24 @@ async def test_generate_with_thinking_details(service):
     with patch('google.genai.Client', return_value=mock_client):
         with patch('google.genai.types.GenerateContentConfig', side_effect=lambda **kwargs: kwargs):
             with patch('google.genai.types.ThinkingConfig', side_effect=lambda **kwargs: kwargs):
-                with patch.dict(os.environ, {"VERTEX_PROJECT": "p1", "AI_MODEL_THINKING_ID": "thought-v1"}):
+                with patch.dict(os.environ, {"GOOGLE_CLOUD_PROJECT": "p1", "AI_MODEL_THINKING_ID": "thought-v1"}):
                     res = await service.generate_with_thinking("Q", MockModel)
                     assert res.answer == "thought"
-
-def test_extract_balanced_json_thorough(service):
-    text = r'{"a": "b\\c\"d"}'
-    assert service._extract_balanced_json(text, 0, "{") == text
-
-def test_recover_truncated_json_thorough(service):
-    assert service._recover_truncated_json('{"a": 1, "b": "v", ') == {"a": 1, "b": "v"}
-    assert service._recover_truncated_json('{"a": 1, "b": {') == {"a": 1}
-    assert service._recover_truncated_json('[1, 2, [') == [1, 2]
 
 def test_estimate_complexity(service):
     query = "systematic review meta-analysis randomized controlled longitudinal cohort qualitative quantitative statistically significant confidence interval"
     assert service.estimate_complexity(query) > 0.5
 
 @pytest.mark.asyncio
-async def test_generate_json_truncation_recovery(service):
-    service.native_structured_enabled = False
-    with patch.object(service, "_generate_via_vertex_proxy", new_callable=AsyncMock) as mock_proxy:
-        mock_proxy.return_value = '{"answer": "trunc", "b": 1'
-        res = await service.generate_json("p", MockModel)
-        assert res.answer == "trunc"
+async def test_generate_json_rejects_truncated_proxy_payload(service):
+    service.native_structured_enabled = True
+    with patch.object(service, "_generate_native_structured", new_callable=AsyncMock) as mock_native:
+        mock_native.side_effect = [AiGenerationServiceError("first")]
+        with patch.object(service, "_generate_via_vertex_proxy", new_callable=AsyncMock) as mock_proxy:
+            mock_proxy.return_value = '{"answer":"trunc"'
+            with pytest.raises(AiGenerationParsingError):
+                await service.generate_json(
+                    "p",
+                    MockModel,
+                    strategy=ModelSelectionStrategy.ALWAYS_BALANCED,
+                )

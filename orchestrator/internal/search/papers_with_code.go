@@ -18,6 +18,19 @@ type PapersWithCodeProvider struct {
 	baseURL string
 }
 
+const papersWithCodeRedirectError = "public api/v1 redirected away from paperswithcode.com"
+
+func isAcceptedPapersWithCodeHost(host string) bool {
+	host = strings.ToLower(host)
+	return host == "paperswithcode.com" ||
+		strings.HasPrefix(host, "paperswithcode.com:") ||
+		host == "www.paperswithcode.com" ||
+		strings.HasPrefix(host, "www.paperswithcode.com:") ||
+		strings.HasPrefix(host, "127.0.0.1:") ||
+		strings.HasPrefix(host, "localhost:") ||
+		strings.HasPrefix(host, "[::1]:")
+}
+
 var _ SearchProvider = (*PapersWithCodeProvider)(nil)
 
 func NewPapersWithCodeProvider() *PapersWithCodeProvider {
@@ -49,7 +62,7 @@ func (pwc *PapersWithCodeProvider) Search(ctx context.Context, query string, opt
 		return nil, providerError("papers_with_code", "build request: %v", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "ScholarLM/1.0")
+	req.Header.Set("User-Agent", "WisDev/1.0")
 
 	resp, err := SharedHTTPClient.Do(req)
 	if err != nil {
@@ -61,6 +74,17 @@ func (pwc *PapersWithCodeProvider) Search(ctx context.Context, query string, opt
 	if resp.StatusCode != http.StatusOK {
 		pwc.RecordFailure()
 		return nil, providerError("papers_with_code", "HTTP %d", resp.StatusCode)
+	}
+
+	if resp.Request != nil && resp.Request.URL != nil && !isAcceptedPapersWithCodeHost(resp.Request.URL.Host) {
+		pwc.RecordFailure()
+		return nil, providerError("papers_with_code", "%s (%s)", papersWithCodeRedirectError, resp.Request.URL.Host)
+	}
+
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	if contentType != "" && !strings.Contains(contentType, "application/json") {
+		pwc.RecordFailure()
+		return nil, providerError("papers_with_code", "expected JSON response, got %q", contentType)
 	}
 
 	var result struct {
@@ -110,9 +134,12 @@ func (pwc *PapersWithCodeProvider) Search(ctx context.Context, query string, opt
 			Abstract:      strings.TrimSpace(item.Abstract),
 			Link:          link,
 			Source:        "papers_with_code",
+			SourceApis:    []string{"papers_with_code"},
 			Authors:       item.Authors,
 			Year:          year,
 			CitationCount: item.Stars, // stars as proxy for impact
+			OpenAccessUrl: item.PDFURL,
+			PdfUrl:        item.PDFURL,
 		})
 	}
 

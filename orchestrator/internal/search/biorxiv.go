@@ -20,6 +20,14 @@ type BioRxivProvider struct {
 
 var _ SearchProvider = (*BioRxivProvider)(nil)
 
+var buildBioRxivSearchURL = func(limit int, query string) string {
+	return fmt.Sprintf(
+		"https://api.biorxiv.org/publisher/10.1101/na/0/%d/%s",
+		limit,
+		url.QueryEscape(query),
+	)
+}
+
 // NewBioRxivProvider returns a provider for bioRxiv preprints.
 func NewBioRxivProvider() *BioRxivProvider {
 	return &BioRxivProvider{
@@ -56,11 +64,7 @@ func (b *BioRxivProvider) Search(ctx context.Context, query string, opts SearchO
 	}
 
 	// BioRxiv provides a search endpoint via their content search API
-	searchURL := fmt.Sprintf(
-		"https://api.biorxiv.org/publisher/10.1101/na/0/%d/%s",
-		limit,
-		url.QueryEscape(query),
-	)
+	searchURL := buildBioRxivSearchURL(limit, query)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
 	if err != nil {
@@ -105,13 +109,30 @@ func (b *BioRxivProvider) Search(ctx context.Context, query string, opts SearchO
 		if item.Server == "medrxiv" {
 			link = "https://www.medrxiv.org/content/" + item.DOI
 		}
+		pdfUrl := link + ".full.pdf"
+
+		year := 0
+		month := 0
+		if len(item.Date) >= 4 {
+			fmt.Sscanf(item.Date[:4], "%d", &year)
+		}
+		if len(item.Date) >= 7 {
+			fmt.Sscanf(item.Date[5:7], "%d", &month)
+		}
+
 		papers = append(papers, Paper{
-			ID:       b.server + ":" + item.DOI,
-			Title:    strings.TrimSpace(item.Title),
-			Abstract: strings.TrimSpace(item.Abstract),
-			Link:     link,
-			DOI:      item.DOI,
-			Source:   b.server,
+			ID:            b.server + ":" + item.DOI,
+			Title:         strings.TrimSpace(item.Title),
+			Abstract:      strings.TrimSpace(item.Abstract),
+			Link:          link,
+			DOI:           item.DOI,
+			Source:        b.server,
+			SourceApis:    []string{b.server},
+			Authors:       parseDelimitedAuthors(item.Authors),
+			Year:          year,
+			Month:         month,
+			OpenAccessUrl: pdfUrl,
+			PdfUrl:        pdfUrl,
 		})
 	}
 
@@ -152,6 +173,7 @@ func (b *BioRxivProvider) searchByDateRange(ctx context.Context, query string, o
 			Title    string `json:"title"`
 			Abstract string `json:"abstract"`
 			Date     string `json:"date"`
+			Authors  string `json:"authors"`
 		} `json:"collection"`
 	}
 
@@ -188,13 +210,30 @@ func (b *BioRxivProvider) searchByDateRange(ctx context.Context, query string, o
 			continue
 		}
 		link := fmt.Sprintf("https://www.%s.org/content/%s", b.server, item.DOI)
+		pdfUrl := link + ".full.pdf"
+
+		year := 0
+		month := 0
+		if len(item.Date) >= 4 {
+			fmt.Sscanf(item.Date[:4], "%d", &year)
+		}
+		if len(item.Date) >= 7 {
+			fmt.Sscanf(item.Date[5:7], "%d", &month)
+		}
+
 		papers = append(papers, Paper{
-			ID:       b.server + ":" + item.DOI,
-			Title:    strings.TrimSpace(item.Title),
-			Abstract: strings.TrimSpace(item.Abstract),
-			Link:     link,
-			DOI:      item.DOI,
-			Source:   b.server,
+			ID:            b.server + ":" + item.DOI,
+			Title:         strings.TrimSpace(item.Title),
+			Abstract:      strings.TrimSpace(item.Abstract),
+			Link:          link,
+			DOI:           item.DOI,
+			Source:        b.server,
+			SourceApis:    []string{b.server},
+			Authors:       parseDelimitedAuthors(item.Authors),
+			Year:          year,
+			Month:         month,
+			OpenAccessUrl: pdfUrl,
+			PdfUrl:        pdfUrl,
 		})
 	}
 

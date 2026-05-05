@@ -1,0 +1,554 @@
+syntax = "proto3";
+
+package wisdev;
+
+option go_package = "github.com/wisdev/wisdev-agent-os/orchestrator/proto/wisdev;wisdev";
+
+// ──────────────────────────────────────────────────────────────────────
+//  AgentGateway (Go) — Frontend entry point
+// ──────────────────────────────────────────────────────────────────────
+service AgentGateway {
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse) {}
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse) {}
+  rpc ResumeSession(ResumeSessionRequest) returns (ResumeSessionResponse) {}
+  rpc GetNextQuestion(GetNextQuestionRequest) returns (GetNextQuestionResponse) {}
+  rpc SubmitAnswer(SubmitAnswerRequest) returns (SubmitAnswerResponse) {}
+  rpc ExecutePlan(ExecutePlanRequest) returns (stream PlanExecutionUpdate) {}
+  rpc CancelPlan(CancelPlanRequest) returns (CancelPlanResponse) {}
+  rpc ListTools(ListToolsRequest) returns (ListToolsResponse) {}
+  rpc InvokeTool(InvokeToolRequest) returns (InvokeToolResponse) {}
+  rpc SaveCheckpoint(SaveCheckpointRequest) returns (SaveCheckpointResponse) {}
+  rpc LoadCheckpoint(LoadCheckpointRequest) returns (LoadCheckpointResponse) {}
+  rpc ToolSearch(ToolSearchRequest) returns (ToolSearchResponse) {}
+  rpc ProgrammaticLoop(ProgrammaticLoopRequest) returns (ProgrammaticLoopResponse) {}
+  rpc StructuredOutput(StructuredOutputRequest) returns (StructuredOutputResponse) {}
+}
+
+// ──────────────────────────────────────────────────────────────────────
+//  AcademicCapabilityService (Python) — LLM Reasoning
+// ──────────────────────────────────────────────────────────────────────
+service AcademicCapabilityService {
+  rpc PlanResearch(PlanResearchRequest) returns (PlanResearchResponse) {}
+  rpc VerifyPlan(VerifyPlanRequest) returns (VerifyPlanResponse) {}
+  rpc ExecuteCapability(ExecuteCapabilityRequest) returns (ExecuteCapabilityResponse) {}
+  rpc StreamCapability(ExecuteCapabilityRequest) returns (stream CapabilityChunk) {}
+  rpc GenerateStructuredOutput(StructuredOutputRequest) returns (StructuredOutputResponse) {}
+  rpc SelectModel(ModelSelectionRequest) returns (ModelSelectionResponse) {}
+  rpc VerifyClaims(VerifyClaimsRequest) returns (VerifyClaimsResponse) {}
+  rpc RunScript(RunScriptRequest) returns (RunScriptResponse) {}
+}
+
+// ──────────────────────────────────────────────────────────────────────
+//  SearchGateway (Go) — Parallel Search
+// ──────────────────────────────────────────────────────────────────────
+service SearchGateway {
+  rpc Search(SearchRequest) returns (SearchResponse) {}
+  rpc StreamSearch(SearchRequest) returns (stream SearchUpdate) {}
+  rpc IterativeSearch(IterativeSearchRequest) returns (IterativeSearchResponse) {}
+  rpc ReRankResults(ReRankRequest) returns (ReRankResponse) {}
+}
+
+// ──────────────────────────────────────────────────────────────────────
+//  Shared Enums
+// ──────────────────────────────────────────────────────────────────────
+
+enum SessionStatus {
+  SESSION_STATUS_UNSPECIFIED = 0;
+  QUESTIONING = 1;
+  GENERATING_TREE = 2;
+  EDITING_TREE = 3;
+  EXECUTING_PLAN = 4;
+  PAUSED = 5;
+  COMPLETE = 6;
+  FAILED = 7;
+}
+
+enum QuestionStopReason {
+  QUESTION_STOP_REASON_UNSPECIFIED = 0;
+  EVIDENCE_SUFFICIENT = 1;
+  CLARIFICATION_BUDGET_REACHED = 2;
+  USER_PROCEED = 3;
+}
+
+enum RiskLevel {
+  RISK_LEVEL_UNSPECIFIED = 0;
+  LOW = 1;
+  MEDIUM = 2;
+  HIGH = 3;
+}
+
+enum ExecutionTarget {
+  EXECUTION_TARGET_UNSPECIFIED = 0;
+  GO_NATIVE = 1;
+  PYTHON_CAPABILITY = 2;
+  PYTHON_SANDBOX = 3;
+}
+
+enum QualityMode {
+  QUALITY_UNSPECIFIED = 0;
+  QUALITY_QUICK       = 1;
+  QUALITY_BALANCED    = 2;
+  QUALITY_THOROUGH    = 3;
+}
+
+enum PlanStepStatus {
+  STEP_PENDING    = 0;
+  STEP_RUNNING    = 1;
+  STEP_DONE       = 2;
+  STEP_SKIPPED    = 3;
+  STEP_FAILED     = 4;
+}
+
+enum ClaimVerdict {
+  VERDICT_UNSPECIFIED           = 0;
+  VERDICT_SUPPORTED             = 1;
+  VERDICT_CONTRADICTED          = 2;
+  VERDICT_INSUFFICIENT_EVIDENCE = 3;
+}
+
+enum ModelTier {
+  TIER_LOCAL   = 0;
+  TIER_FAST    = 1;
+  TIER_DEEP    = 2;
+  TIER_CLAUDE  = 3;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+//  Messages
+// ──────────────────────────────────────────────────────────────────────
+
+message AgentSession {
+  string schema_version = 1;
+  string policy_version = 2;
+  string trace_id = 3;
+  string session_id = 4;
+  string user_id = 5;
+  SessionStatus status = 6;
+  bytes checkpoint_blob = 7;
+  repeated string question_sequence = 8;
+  int32 current_question_index = 9;
+  int32 min_questions = 10;
+  int32 max_questions = 11;
+  float complexity_score = 12;
+  int32 clarification_budget = 13;
+  QuestionStopReason question_stop_reason = 14;
+}
+
+message QuestionStateSummary {
+  int32 answered_count = 1;
+  int32 min_questions = 2;
+  int32 max_questions = 3;
+  float complexity_score = 4;
+  repeated string remaining_question_ids = 5;
+  QuestionStopReason stop_reason = 6;
+}
+
+message ToolDefinition {
+  string name = 1;
+  string description = 2;
+  RiskLevel risk = 3;
+  string parameter_json_schema = 4;
+  ExecutionTarget execution_target = 5;
+  bool parallelizable = 6;
+  repeated string dependencies = 7;
+}
+
+message PlanExecutionUpdate {
+  string trace_id = 1;
+  string session_id = 2;
+  string plan_id = 3;
+  oneof update {
+    StepStarted step_started = 10;
+    StepCompleted step_completed = 11;
+    StepFailed step_failed = 12;
+    ConfirmationRequired confirmation_needed = 13;
+    PlanRevised plan_revised = 14;
+    PaperFound paper_found = 15;
+    Progress progress = 16;
+    ExecutionCancelled execution_cancelled = 17;
+  }
+}
+
+message StepStarted {
+  string step_id = 1;
+  string action = 2;
+  int32 lane_id = 3;
+  int32 attempt = 4;
+}
+message StepCompleted {
+  string step_id = 1;
+  int32 lane_id = 2;
+  int32 attempts = 3;
+  bool degraded = 4;
+}
+message StepFailed {
+  string step_id = 1;
+  string reason = 2;
+  string error_code = 3;
+  int32 lane_id = 4;
+  int32 attempts = 5;
+  bool degraded = 6;
+}
+message PlanRevised {
+  string rationale = 1;
+  int32 replan_count = 2;
+  string source_step_id = 3;
+}
+message PaperFound { string paper_id = 1; string title = 2; string source = 3; }
+message Progress {
+  int32 completed = 1;
+  int32 total = 2;
+  int32 failed = 3;
+}
+message ExecutionCancelled {
+  string reason = 1;
+  string status = 2;
+}
+
+message ConfirmationRequired {
+  string action = 1;
+  string rationale = 2;
+  string approval_token = 3;
+  repeated string allowed_actions = 4;
+  string step_id = 5;
+  string guardrail_reason = 6;
+}
+
+message ConfidenceReport {
+  float  overall_confidence = 1;
+  float  grounding_ratio = 2;
+  float  llm_self_score = 3;
+  float  calibrated_score = 4;
+  string calibration_method = 5;
+  repeated string doubt_signals = 6;
+  int32  refinement_rounds = 7;
+  int64  tokens_used = 8;
+}
+
+message ModelRequirements {
+  bool needs_function_calling = 1;
+  bool needs_structured_output = 2;
+  int32 max_tokens = 3;
+  float max_cost_usd = 4;
+  string preferred_provider = 5;
+}
+
+// Service Request/Response Messages
+
+message CreateSessionRequest { string user_id = 1; string query = 2; }
+message CreateSessionResponse { AgentSession session = 1; }
+message GetSessionRequest { string session_id = 1; }
+message GetSessionResponse { AgentSession session = 1; }
+message ResumeSessionRequest { string session_id = 1; }
+message ResumeSessionResponse { AgentSession session = 1; }
+message GetNextQuestionRequest { string session_id = 1; }
+message GetNextQuestionResponse {
+  string question_id = 1;
+  string question = 2;
+  repeated string options = 3;
+  bool done = 4;
+  QuestionStateSummary question_state = 5;
+  QuestionStopReason stop_reason = 6;
+}
+message SubmitAnswerRequest {
+  string session_id = 1;
+  string question_id = 2;
+  repeated string values = 3;
+  bool proceed = 4;
+}
+message SubmitAnswerResponse {
+  AgentSession session = 1;
+  bool completed = 2;
+  QuestionStopReason stop_reason = 3;
+  QuestionStateSummary question_state = 4;
+}
+message ExecutePlanRequest { string session_id = 1; }
+message CancelPlanRequest { string session_id = 1; }
+message CancelPlanResponse { bool cancelled = 1; }
+message ListToolsRequest {}
+message ListToolsResponse { repeated ToolDefinition tools = 1; }
+message InvokeToolRequest { string session_id = 1; string tool_name = 2; string payload_json = 3; }
+message InvokeToolResponse { bool ok = 1; string result_json = 2; }
+message SaveCheckpointRequest { string session_id = 1; }
+message SaveCheckpointResponse { bool saved = 1; }
+message LoadCheckpointRequest { string session_id = 1; }
+message LoadCheckpointResponse { AgentSession session = 1; }
+
+message PlanResearchRequest {
+  string query = 1;
+  string trace_id = 2;
+  QualityMode quality_mode = 3;
+  int32 max_refinements = 4;
+  repeated string context_documents = 5;
+}
+
+message PlanResearchResponse {
+  string plan_id = 1;
+  repeated PlanStep steps = 2;
+  ConfidenceReport confidence_report = 3;
+  string reasoning = 4;
+  string trace_id = 5;
+  int64 estimated_duration_ms = 6;
+}
+
+message PlanStep {
+  string step_id = 1;
+  string capability = 2;
+  string rationale = 3;
+  PlanStepStatus status = 4;
+  float impact = 5;
+  float risk = 6;
+  map<string, string> params = 7;
+}
+
+message VerifyPlanRequest {
+  string plan_id = 1;
+  repeated PlanStep steps = 2;
+  string original_query = 3;
+  string trace_id = 4;
+}
+
+message VerifyPlanResponse {
+  bool plan_approved = 1;
+  repeated string issues = 2;
+  repeated PlanStep revised_steps = 3;
+  float revision_confidence = 4;
+  string trace_id = 5;
+}
+
+message ExecuteCapabilityRequest {
+  string capability = 1;
+  string payload_json = 2;
+  string trace_id = 3;
+  ModelTier model_tier = 4;
+  int32 timeout_ms = 5;
+}
+
+message ExecuteCapabilityResponse {
+  bool success = 1;
+  string result_json = 2;
+  string error_code = 3;
+  ConfidenceReport confidence_report = 4;
+  string trace_id = 5;
+  int64 latency_ms = 6;
+}
+
+message CapabilityChunk {
+  string chunk_json = 1;
+  bool is_final = 2;
+  string trace_id = 3;
+}
+
+message StructuredOutputRequest {
+  string prompt = 1;
+  string json_schema = 2;
+  ModelTier model_tier = 3;
+  string trace_id = 4;
+  repeated string context_documents = 5;
+}
+
+message StructuredOutputResponse {
+  string result_json = 1;
+  bool schema_valid = 2;
+  ConfidenceReport confidence_report = 3;
+  string trace_id = 4;
+}
+
+message ModelSelectionRequest {
+  bool requires_function_calling = 1;
+  bool requires_structured_output = 2;
+  int32 max_tokens = 3;
+  float cost_budget_usd = 4;
+  int32 latency_target_ms = 5;
+  string task_hint = 6;
+  string trace_id = 7;
+  string model_format = 8;
+}
+
+message ModelSelectionResponse {
+  ModelTier selected_tier = 1;
+  string provider = 2;
+  string model_id = 3;
+  float estimated_cost = 4;
+  string rationale = 5;
+  string trace_id = 6;
+}
+
+message VerifyClaimsRequest {
+  repeated Claim claims = 1;
+  repeated string context_documents = 2;
+  bool include_search = 3;
+  string trace_id = 4;
+}
+
+message Claim {
+  string claim_id = 1;
+  string text = 2;
+  string source = 3;
+}
+
+message VerifyClaimsResponse {
+  repeated ClaimResult results = 1;
+  ConfidenceReport confidence_report = 2;
+  string trace_id = 3;
+}
+
+message ClaimResult {
+  string claim_id = 1;
+  string claim_text = 2;
+  ClaimVerdict verdict = 3;
+  float confidence = 4;
+  string explanation = 5;
+  repeated string supporting_evidence = 6;
+  repeated string contradicting_evidence = 7;
+}
+
+message RunScriptRequest {
+  string script_source = 1;
+  string input_json = 2;
+  bool sandbox_docker = 3;
+  int32 timeout_ms = 4;
+  string trace_id = 5;
+}
+
+message RunScriptResponse {
+  bool success = 1;
+  string output_json = 2;
+  string error = 3;
+  int64 latency_ms = 4;
+  string trace_id = 5;
+}
+
+message SearchRequest { string query = 1; int32 limit = 2; }
+message SearchResponse { repeated SearchPaper papers = 1; }
+message SearchUpdate { SearchPaper paper = 1; Progress progress = 2; }
+message SearchPaper { string id = 1; string title = 2; string doi = 3; string link = 4; string source = 5; }
+
+// vNext control-plane envelopes
+message ExecutionError {
+  string code = 1;
+  string message = 2;
+  int32 http_status = 3;
+  bool retryable = 4;
+}
+
+message GuardrailDecision {
+  bool allowed = 1;
+  bool requires_confirmation = 2;
+  string reason = 3;
+  int32 max_tool_calls = 4;
+  int32 max_script_runs = 5;
+  int32 max_cost_cents = 6;
+}
+
+message ToolSearchRequest {
+  string query = 1;
+  int32 limit = 2;
+  repeated ToolDefinition candidate_tools = 3;
+}
+
+message ToolSearchResult {
+  string name = 1;
+  string description = 2;
+  RiskLevel risk = 3;
+  float score = 4;
+}
+
+message ToolSearchResponse {
+  string query = 1;
+  repeated ToolSearchResult tools = 2;
+  GuardrailDecision guardrail = 3;
+  ExecutionError error = 4;
+}
+
+message ProgrammaticLoopRequest {
+  string session_id = 1;
+  string action = 2;
+  string payload_json = 3;
+  int32 max_iterations = 4;
+}
+
+message ProgrammaticLoopIteration {
+  int32 iteration = 1;
+  bool success = 2;
+  string output_json = 3;
+  ExecutionError error = 4;
+}
+
+message ProgrammaticLoopResponse {
+  string session_id = 1;
+  string action = 2;
+  repeated ProgrammaticLoopIteration iterations = 3;
+  bool completed = 4;
+  GuardrailDecision guardrail = 5;
+  ExecutionError error = 6;
+}
+
+message PolicyEvaluationResult {
+  bool ok = 1;
+  bool allowed = 2;
+  bool requires_confirmation = 3;
+  string reason = 4;
+}
+
+message SandboxValidationResult {
+  bool ok = 1;
+  bool valid = 2;
+  string reason = 3;
+}
+
+message StructuredValidationResult {
+  bool ok = 1;
+  bool valid = 2;
+  string reason = 3;
+  string normalized_json = 4;
+}
+
+message IterativeSearchRequest {
+  repeated string queries = 1;
+  string session_id = 2;
+  int32 max_iterations = 3;
+  float coverage_threshold = 4;
+}
+
+message IterativeSearchResponse {
+  repeated SearchPaper papers = 1;
+  repeated IterationLog iterations = 2;
+  float final_coverage = 3;
+  float final_reward = 4;
+}
+
+// IterationLog is the wire-transport representation of a single research iteration.
+// Uses float32 / int32 for wire efficiency. The authoritative domain model with
+// float64 precision lives in internal/wisdev.IterationLog; toProtoIterationLogs()
+// in server_grpc.go performs the narrowing conversion.
+message IterationLog {
+  int32 iteration = 1;
+  repeated string queries_added = 2;
+  float coverage_score = 3;
+  float prm_reward = 4;
+}
+
+message ReRankRequest {
+  string query = 1;
+  repeated ReRankDocument papers = 2;
+  int32 top_k = 3;
+  string domain = 4;
+}
+
+message ReRankDocument {
+  string id = 1;
+  string title = 2;
+  string doi = 3;
+  string link = 4;
+  string source = 5;
+  string abstract = 6;
+  int32 citation_count = 7;
+  float score = 8;
+}
+
+message ReRankResponse {
+  repeated ReRankDocument papers = 1;
+  int32 rerank_time_ms = 2;
+  string rerank_method = 3;
+}

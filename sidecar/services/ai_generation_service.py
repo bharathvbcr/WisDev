@@ -10,13 +10,13 @@ Features:
 
 import os
 import json
-import re
 from typing import Any, Optional, TypeVar, Type
 from enum import Enum
 
 import structlog
 import httpx
 from pydantic import BaseModel
+from artifacts.emitters import emit_for_action, flatten_to_legacy
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -57,6 +57,11 @@ class AiGenerationParsingError(AiGenerationServiceError):
     pass
 
 
+class AiGenerationStructuredOutputRequiresNativeRuntimeError(AiGenerationServiceError):
+    """Raised when a caller requires native structured generation semantics."""
+    pass
+
+
 class AiGenerationService:
     """
     Service for interacting with tiered generation models.
@@ -82,7 +87,7 @@ class AiGenerationService:
         self.vertex_proxy_url = (
             os.environ.get("VERTEX_FUNCTION_URL")
             or os.environ.get("VERTEX_MODEL_URL")
-            or "https://vertex-proxy-cyucrnqqnq-uc.a.run.app"
+            or ""
         )
         self.prefer_vertex = True
 
@@ -185,138 +190,6 @@ class AiGenerationService:
         raise RuntimeError(
             f"Missing model configuration: set {env_key} (or AI_MODEL_DEFAULT_ID)"
         )
-
-    @staticmethod
-    def _extract_balanced_json(input_text: str, start_index: int, opener: str) -> Optional[str]:
-        closer = "}" if opener == "{" else "]"
-        depth = 0
-        in_string = False
-        escaped = False
-
-        for i in range(start_index, len(input_text)):
-            char = input_text[i]
-
-            if in_string:
-                if escaped:
-                    escaped = False
-                    continue
-                if char == "\\":
-                    escaped = True
-                    continue
-                if char == '"':
-                    in_string = False
-                continue
-
-            if char == '"':
-                in_string = True
-                continue
-
-            if char == opener:
-                depth += 1
-                continue
-
-            if char == closer:
-                depth -= 1
-                if depth == 0:
-                    return input_text[start_index:i + 1]
-
-        return None
-
-    @classmethod
-    def _get_json_candidates(cls, input_text: str) -> list[str]:
-        candidates: list[str] = []
-        for i, char in enumerate(input_text):
-            if char not in ("{", "["):
-                continue
-            candidate = cls._extract_balanced_json(input_text, i, char)
-            if candidate:
-                candidates.append(candidate)
-        return candidates
-
-    @staticmethod
-    def _recover_truncated_json(input_text: str) -> Optional[dict | list]:
-        first_obj = input_text.find("{")
-        first_arr = input_text.find("[")
-        indices = [idx for idx in (first_obj, first_arr) if idx >= 0]
-        if not indices:
-            return None
-
-        start = min(indices)
-        recovered = input_text[start:]
-
-        in_string = False
-        escaped = False
-        last_quote_start = -1
-        for i, char in enumerate(recovered):
-            if in_string:
-                if escaped:
-                    escaped = False
-                    continue
-                if char == "\\":
-                    escaped = True
-                    continue
-                if char == '"':
-                    in_string = False
-                continue
-            if char == '"':
-                in_string = True
-                last_quote_start = i
-
-        if in_string and last_quote_start >= 0:
-            recovered = recovered[:last_quote_start]
-            recovered = re.sub(r",\s*$", "", recovered)
-            recovered = re.sub(r":\s*$", "", recovered)
-
-        previous = ""
-        while recovered != previous:
-            previous = recovered
-            recovered = re.sub(r",\s*$", "", recovered)
-            recovered = re.sub(r":\s*$", "", recovered)
-            recovered = re.sub(r",\s*\"[^\"]*\"\s*$", "", recovered)
-            recovered = re.sub(r"\{\s*$", "", recovered)
-            recovered = re.sub(r"\[\s*$", "", recovered)
-
-        stack: list[str] = []
-        in_string = False
-        escaped = False
-        for char in recovered:
-            if in_string:
-                if escaped:
-                    escaped = False
-                    continue
-                if char == "\\":
-                    escaped = True
-                    continue
-                if char == '"':
-                    in_string = False
-                continue
-
-            if char == '"':
-                in_string = True
-                continue
-
-            if char in ("{", "["):
-                stack.append(char)
-            elif char == "}" and stack and stack[-1] == "{":
-                stack.pop()
-            elif char == "]" and stack and stack[-1] == "[":
-                stack.pop()
-
-        if not recovered:
-            return None
-
-        if stack:
-            for opener in reversed(stack):
-                recovered += "}" if opener == "{" else "]"
-
-        try:
-            parsed = json.loads(recovered)
-            if isinstance(parsed, (dict, list)):
-                return parsed
-        except json.JSONDecodeError:
-            return None
-
-        return None
 
     @staticmethod
     def _estimate_schema_depth(schema: dict, _current: int = 0, _seen: Optional[frozenset] = None) -> int:
@@ -547,7 +420,7 @@ class AiGenerationService:
         """
         Generate structured output using the google.genai SDK natively.
 
-        Uses LLM Provider when VERTEX_PROJECT is set, otherwise falls back to
+        Uses Vertex AI when GOOGLE_CLOUD_PROJECT is set, otherwise falls back to
         a direct API key (GOOGLE_API_KEY). Model IDs are resolved from
         AI_MODEL_LIGHT_ID / AI_MODEL_BALANCED_ID / AI_MODEL_HEAVY_ID.
 
@@ -563,7 +436,7 @@ class AiGenerationService:
         except ImportError as exc:
             raise RuntimeError("google-genai SDK not available") from exc
 
-        project = os.environ.get("VERTEX_PROJECT") or os.environ.get("VERTEX_PROJECT")
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCLOUD_PROJECT")
         location = (
             os.environ.get("GOOGLE_CLOUD_LOCATION")
             or os.environ.get("GOOGLE_CLOUD_REGION")
@@ -574,7 +447,7 @@ class AiGenerationService:
         if not project and not api_key:
             raise RuntimeError(
                 "No credentials for native model SDK "
-                "(set VERTEX_PROJECT or GOOGLE_API_KEY)"
+                "(set GOOGLE_CLOUD_PROJECT or GOOGLE_API_KEY)"
             )
 
         # Map model classes to concrete provider model IDs.
@@ -587,7 +460,7 @@ class AiGenerationService:
         model_name = self._resolve_model_id_for_class(normalized_tier)
 
         if project:
-            client = genai.Client(vertexai=False, project=project, location=location)
+            client = genai.Client(vertexai=True, project=project, location=location)
         else:
             client = genai.Client(api_key=api_key)
 
@@ -609,7 +482,8 @@ class AiGenerationService:
         )
 
         # Native structured output guarantees valid JSON — validate with Pydantic
-        return response_model.model_validate_json(response.text)
+        response_text = response.text or "{}"
+        return response_model.model_validate_json(response_text)
 
     async def generate_json(
         self,
@@ -692,18 +566,12 @@ class AiGenerationService:
         except Exception:
             prepared_schema = None
 
-        # Add JSON instruction to prompt
-        json_prompt = f"""{prompt}
-
-IMPORTANT: Respond ONLY with valid JSON. No markdown, no explanation, just the JSON object.
-"""
-
         response_text = ""
         last_error: Optional[Exception] = None
         for index, model_class in enumerate(fallback_chain):
             try:
                 response_text = await self._generate_via_vertex_proxy(
-                    prompt=json_prompt,
+                    prompt=prompt,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     model=model_class,
@@ -726,35 +594,18 @@ IMPORTANT: Respond ONLY with valid JSON. No markdown, no explanation, just the J
         if not response_text and last_error is not None:
             raise last_error
 
-        # Clean up response (remove markdown code blocks if present)
         cleaned = response_text.strip()
-        if cleaned.startswith("```"):
-            cleaned = re.sub(r"^```(?:json|JSON)?\s*", "", cleaned, count=1)
-            cleaned = re.sub(r"\s*```$", "", cleaned, count=1)
-        cleaned = cleaned.strip()
 
         last_json_error: Optional[Exception] = None
         last_validation_error: Optional[Exception] = None
 
-        # Try direct parse first, then any balanced JSON candidates extracted from text
-        for candidate in [cleaned, *self._get_json_candidates(cleaned)]:
-            try:
-                data = json.loads(candidate)
-            except json.JSONDecodeError as e:
-                last_json_error = e
-                continue
-
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError as e:
+            last_json_error = e
+        else:
             try:
                 return response_model.model_validate(data)
-            except Exception as e:
-                last_validation_error = e
-                continue
-
-        # Truncation recovery path for partial JSON payloads from model output
-        recovered_data = self._recover_truncated_json(cleaned)
-        if recovered_data is not None:
-            try:
-                return response_model.model_validate(recovered_data)
             except Exception as e:
                 last_validation_error = e
 
@@ -768,13 +619,13 @@ IMPORTANT: Respond ONLY with valid JSON. No markdown, no explanation, just the J
 
         logger.error(
             "ai_json_parse_error",
-            error=str(last_json_error) if last_json_error else "No JSON object found in response",
+            error=str(last_json_error) if last_json_error else "structured response was empty",
             response_preview=cleaned[:200],
         )
         raise AiGenerationParsingError(
             f"Failed to parse JSON: {last_json_error}"
             if last_json_error
-            else "Failed to parse JSON: No JSON object found"
+            else "Failed to parse JSON: structured response was empty"
         )
 
     async def generate_with_thinking(
@@ -790,11 +641,11 @@ IMPORTANT: Respond ONLY with valid JSON. No markdown, no explanation, just the J
         try:
             import google.genai as genai
             from google.genai.types import GenerateContentConfig, ThinkingConfig
-        except ImportError:
+        except ImportError as exc:
             logger.warning("google-genai SDK not available or lacks ThinkingConfig; falling back to generate_json.")
             return await self.generate_json(prompt, response_schema, max_tokens=8192)
 
-        project = os.environ.get("VERTEX_PROJECT") or os.environ.get("VERTEX_PROJECT")
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCLOUD_PROJECT")
         location = (
             os.environ.get("GOOGLE_CLOUD_LOCATION")
             or os.environ.get("GOOGLE_CLOUD_REGION")
@@ -816,27 +667,27 @@ IMPORTANT: Respond ONLY with valid JSON. No markdown, no explanation, just the J
             return await self.generate_json(prompt, response_schema, max_tokens=8192)
 
         if project:
-            client = genai.Client(vertexai=False, project=project, location=location)
+            client = genai.Client(vertexai=True, project=project, location=location)
         else:
             client = genai.Client(api_key=api_key)
 
         raw_schema = response_schema.model_json_schema()
         prepared_schema = self._prepare_schema_for_provider(raw_schema)
 
-        config = GenerateContentConfig(
-            thinking_config=ThinkingConfig(thinking_budget=thinking_budget),
-            temperature=0.7,
-            response_mime_type="application/json",
-            response_json_schema=prepared_schema,
-        )
-
         try:
+            config = GenerateContentConfig(
+                thinking_config=ThinkingConfig(thinking_budget=thinking_budget),
+                temperature=0.7,
+                response_mime_type="application/json",
+                response_json_schema=prepared_schema,
+            )
             response = await client.aio.models.generate_content(
                 model=model_name,
                 contents=prompt,
                 config=config,
             )
-            return response_schema.model_validate_json(response.text)
+            response_text = response.text or "{}"
+            return response_schema.model_validate_json(response_text)
         except Exception as e:
             logger.warning(
                 "ai_thinking_generation_failed",
@@ -968,6 +819,92 @@ IMPORTANT: Respond ONLY with valid JSON. No markdown, no explanation, just the J
                 score += 0.1
         
         return min(1.0, score)
+
+    @staticmethod
+    def _ensure_wisdev_shape(action: str, result: dict[str, Any]) -> dict[str, Any]:
+        """
+        Enforce stable legacy key shapes for WisDev action outputs.
+
+        This keeps Python -> Go ingress resilient by guaranteeing key names and
+        value types expected by normalizeStepArtifacts.
+        """
+        shaped = dict(result)
+        if action == "research.resolveCanonicalCitations":
+            shaped["canonicalSources"] = list(shaped.get("canonicalSources", []))
+            shaped["citations"] = list(shaped.get("citations", []))
+            shaped["resolvedCount"] = int(shaped.get("resolvedCount", 0) or 0)
+            shaped["duplicateCount"] = int(shaped.get("duplicateCount", 0) or 0)
+        elif action == "research.verifyCitations":
+            shaped["verifiedRecords"] = list(shaped.get("verifiedRecords", []))
+            shaped["citations"] = list(shaped.get("citations", []))
+            shaped["validCount"] = int(shaped.get("validCount", 0) or 0)
+            shaped["invalidCount"] = int(shaped.get("invalidCount", 0) or 0)
+            shaped["duplicateCount"] = int(shaped.get("duplicateCount", 0) or 0)
+        elif action in ("research.proposeHypotheses", "research.generateHypotheses"):
+            shaped["branches"] = list(shaped.get("branches", []))
+        elif action == "research.verifyReasoningPaths":
+            shaped["branches"] = list(shaped.get("branches", []))
+            verification = shaped.get("reasoningVerification")
+            if not isinstance(verification, dict):
+                verification = {}
+            shaped["reasoningVerification"] = {
+                "totalBranches": int(verification.get("totalBranches", 0) or 0),
+                "verifiedBranches": int(verification.get("verifiedBranches", 0) or 0),
+                "rejectedBranches": int(verification.get("rejectedBranches", 0) or 0),
+                "readyForSynthesis": bool(verification.get("readyForSynthesis", False)),
+            }
+        elif action == "research.buildClaimEvidenceTable":
+            table = shaped.get("claimEvidenceTable")
+            if not isinstance(table, dict):
+                table = {}
+            shaped["claimEvidenceTable"] = {
+                "table": str(table.get("table", "") or ""),
+                "rowCount": int(table.get("rowCount", 0) or 0),
+            }
+        return shaped
+
+    def emit_wisdev_action_output(self, action: str, raw_result: dict[str, Any]) -> dict[str, Any]:
+        """
+        Convert raw action output into the stable legacy artifact map.
+
+        The conversion always goes through StepArtifactEnvelope emitters before
+        flattening for Go ingress compatibility.
+        """
+        envelope = emit_for_action(action, raw_result)
+        flattened = flatten_to_legacy(envelope)
+        return self._ensure_wisdev_shape(action, flattened)
+
+    async def generate_wisdev_action_output(
+        self,
+        action: str,
+        prompt: str,
+        response_model: Type[T],
+        complexity_score: float = 0.5,
+        uncertainty_score: float = 0.5,
+        strict_domain: bool = False,
+        remaining_budget_ratio: float = 1.0,
+        historical_reward: float = 0.5,
+        temperature: float = 0.3,
+        max_tokens: int = 2048,
+        strategy: Optional[ModelSelectionStrategy] = None,
+    ) -> dict[str, Any]:
+        """
+        Generate typed JSON and return emitter-backed legacy artifact output.
+        """
+        parsed = await self.generate_json(
+            prompt=prompt,
+            response_model=response_model,
+            complexity_score=complexity_score,
+            uncertainty_score=uncertainty_score,
+            strict_domain=strict_domain,
+            remaining_budget_ratio=remaining_budget_ratio,
+            historical_reward=historical_reward,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            strategy=strategy,
+        )
+        raw = parsed.model_dump(by_alias=True, exclude_none=True)
+        return self.emit_wisdev_action_output(action, raw)
 
 
 # Singleton instance

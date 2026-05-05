@@ -1,4 +1,4 @@
-# ScholarLM Load Testing
+# WisDev Load Testing
 
 This directory contains load testing scripts using [Locust](https://locust.io/).
 
@@ -35,4 +35,4 @@ To test "thousands of users":
    ```bash
    locust -f locustfile.py --headless -u 1000 -r 50 --run-time 10m --host http://YOUR_CLOUDRUN_URL
    ```
-2. Monitor your Container Service instance count and Redis CPU usage during the test.
+2. Monitor your Cloud Run instance count and Redis CPU usage during the test.

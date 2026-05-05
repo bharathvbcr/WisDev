@@ -277,3 +277,128 @@ def format_regenerate_prompt(
         feedback=(feedback or "No specific feedback provided") + seed_context,
         count=count,
     )
+
+
+# =============================================================================
+# Manuscript Section Writing Prompts
+# =============================================================================
+
+SECTION_WRITER_PROMPTS: dict[str, str] = {
+    "abstract_writer": (
+        "Write a structured abstract in 200-250 words with the subheadings "
+        "Background, Objective, Methods, Results, and Conclusions."
+    ),
+    "framing_writer": (
+        "Use a funnel structure: broad problem, specific gap, then the manuscript contribution statement."
+    ),
+    "literature_reviewer": (
+        "Organize the section thematically. Synthesize agreements first, then highlight contradictions and unresolved tensions."
+    ),
+    "methods_writer": (
+        "Use passive academic prose. Cover inclusion/exclusion criteria and extraction logic. Do not extrapolate beyond the provided evidence."
+    ),
+    "results_writer": (
+        "Use objective quantitative language when possible. Report findings without interpreting them."
+    ),
+    "discussion_writer": (
+        "Interpret the results, address contradictions, surface limitations, and discuss plausible mechanisms without overstating certainty."
+    ),
+    "conclusion_writer": (
+        "Close with established findings only, then end with 2-3 grounded open questions."
+    ),
+}
+
+SECTION_REFINER_PROMPT = """You are a manuscript editor performing a targeted revision pass. You will receive:
+1. A draft section flagged by a blind verifier.
+2. A list of specific issues that must be resolved.
+
+Revise the draft to fix each stated issue. Preserve the original argument structure where no issue applies.
+Do not introduce new claims not supported by the evidence.
+Do not remove citations unless identified as incorrect in the issues list.
+Preserve or add square-bracket packet citations using only the provided packet IDs, for example [packet_123]."""
+
+
+def format_section_writer_prompt(
+    writer_role: str,
+    section_goal: str,
+    claim_packets: list[dict],
+    source_titles: list[str],
+) -> tuple[str, str]:
+    """Build system and user prompts for role-specific section generation."""
+    role_prompt = SECTION_WRITER_PROMPTS.get(
+        writer_role,
+        "Write disciplined academic prose that stays strictly grounded in the provided evidence packets.",
+    )
+    packet_blocks: list[str] = []
+    for packet in claim_packets:
+        evidence_spans = packet.get("evidenceSpans") or []
+        span_lines = [
+            f"- {span.get('sourceCanonicalId', 'unknown')}: {span.get('snippet', '')}".strip()
+            for span in evidence_spans[:3]
+        ]
+        packet_blocks.append(
+            "\n".join(
+                [
+                    f"Packet ID: {packet.get('packetId', 'unknown')}",
+                    f"Claim: {packet.get('claimText', '')}",
+                    f"Verifier Status: {packet.get('verifierStatus', 'unknown')}",
+                    f"Notes: {', '.join(packet.get('verifierNotes') or []) or 'None'}",
+                    "Evidence:",
+                ]
+                + (span_lines if span_lines else ["- No evidence spans attached"])
+            )
+        )
+
+    system_prompt = (
+        "You are a specialist manuscript section writer. "
+        "Stay grounded in the supplied evidence packets and source list only. "
+        "Cite grounded claims inline using square-bracket packet IDs exactly as provided, "
+        "for example [packet_123]. Every substantive paragraph must include at least one packet citation. "
+        f"{role_prompt}"
+    )
+    user_prompt = "\n\n".join(
+        [
+            f"Section goal: {section_goal}",
+            f"Writer role: {writer_role}",
+            f"Source titles: {', '.join(source_titles) if source_titles else 'None provided'}",
+            "Claim packets:",
+            "\n\n".join(packet_blocks) if packet_blocks else "No claim packets were provided.",
+            "Write polished narrative prose for this section.",
+            "Use inline square-bracket packet citations such as [packet_123] using only packet IDs from the provided list.",
+            "Every substantive paragraph must include at least one packet citation.",
+        ]
+    )
+    return system_prompt, user_prompt
+
+
+def format_section_refiner_prompt(
+    original_content: str,
+    unresolved_issues: list[str],
+    claim_packets: list[dict],
+) -> tuple[str, str]:
+    """Build system and user prompts for a single targeted refinement pass."""
+    packet_blocks: list[str] = []
+    for packet in claim_packets:
+        packet_blocks.append(
+            "\n".join(
+                [
+                    f"Packet ID: {packet.get('packetId', 'unknown')}",
+                    f"Claim: {packet.get('claimText', '')}",
+                    f"Verifier Status: {packet.get('verifierStatus', 'unknown')}",
+                ]
+            )
+        )
+
+    user_prompt = "\n\n".join(
+        [
+            "Original draft:",
+            original_content or "No existing content provided.",
+            "Issues to resolve:",
+            "\n".join(f"- {issue}" for issue in unresolved_issues) if unresolved_issues else "- No explicit issues provided.",
+            "Grounding packets:",
+            "\n\n".join(packet_blocks) if packet_blocks else "No grounding packets were provided.",
+            "Ensure every substantive paragraph includes at least one square-bracket packet citation such as [packet_123].",
+            "Return the revised section only.",
+        ]
+    )
+    return SECTION_REFINER_PROMPT, user_prompt

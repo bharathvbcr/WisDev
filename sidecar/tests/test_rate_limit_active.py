@@ -1,3 +1,4 @@
+import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 from main import app, limiter

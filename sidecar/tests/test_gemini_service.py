@@ -1,13 +1,14 @@
 import pytest
 import json
 import httpx
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
 from services.ai_generation_service import (
     AiGenerationService,
     AiGenerationParsingError,
+    AiGenerationRetryableError,
     AiGenerationRateLimitError,
 )
 
@@ -76,37 +77,33 @@ async def test_generate_json_native_success(ai_generation_service, mock_response
         assert payload["jsonSchema"]["properties"]["name"]["type"] == "string"
 
 @pytest.mark.asyncio
-async def test_generate_json_with_markdown_fallback(ai_generation_service, mock_response):
-    # Mocking a response where model wrapped JSON in markdown code blocks
+async def test_generate_json_rejects_markdown_wrapped_json(ai_generation_service, mock_response):
     raw_text = """```json
 {"name": "Markdown", "age": 25, "tags": []}
 ```"""
     mock_response.json.return_value = {"success": True, "text": raw_text}
     
     with patch("httpx.AsyncClient.post", return_value=mock_response):
-        result = await ai_generation_service.generate_json("Generate person", SimpleModel)
-        assert result.name == "Markdown"
+        with pytest.raises(AiGenerationParsingError):
+            await ai_generation_service.generate_json("Generate person", SimpleModel)
 
 @pytest.mark.asyncio
-async def test_generate_json_recovery_from_filler(ai_generation_service, mock_response):
-    # Mocking response with conversational filler
+async def test_generate_json_rejects_filler_wrapped_json(ai_generation_service, mock_response):
     raw_text = "Sure, here is the data: {\"name\": \"Filler\", \"age\": 40, \"tags\": [\"filler\"]} Hope this helps!"
     mock_response.json.return_value = {"success": True, "text": raw_text}
     
     with patch("httpx.AsyncClient.post", return_value=mock_response):
-        result = await ai_generation_service.generate_json("Generate person", SimpleModel)
-        assert result.name == "Filler"
+        with pytest.raises(AiGenerationParsingError):
+            await ai_generation_service.generate_json("Generate person", SimpleModel)
 
 @pytest.mark.asyncio
-async def test_generate_json_truncation_recovery(ai_generation_service, mock_response):
-    # Mocking a truncated JSON (missing closing brace)
+async def test_generate_json_rejects_truncated_json(ai_generation_service, mock_response):
     raw_text = "{\"name\": \"Truncated\", \"age\": 50, \"tags\": [\"t\""
     mock_response.json.return_value = {"success": True, "text": raw_text}
     
     with patch("httpx.AsyncClient.post", return_value=mock_response):
-        result = await ai_generation_service.generate_json("Generate person", SimpleModel)
-        assert result.name == "Truncated"
-        assert result.tags == ["t"]
+        with pytest.raises(AiGenerationParsingError):
+            await ai_generation_service.generate_json("Generate person", SimpleModel)
 
 @pytest.mark.asyncio
 async def test_generate_json_validation_error(ai_generation_service, mock_response):

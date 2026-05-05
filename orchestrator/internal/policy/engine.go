@@ -14,26 +14,26 @@ const (
 )
 
 type PolicyConfig struct {
-	PolicyVersion                   string
-	AllowLowRiskAutoRun             bool
-	RequireConfirmationForMedium    bool
-	AlwaysConfirmHighRisk           bool
-	MaxToolCallsPerSession          int
-	MaxScriptRunsPerSession         int
-	MaxCostPerSessionCents          int
-	DefaultProviderPriority         []string
-	MedicalProviderPriorityOverride []string
-	CSProviderPriorityOverride      []string
+	PolicyVersion                   string   `json:"policyVersion"`
+	AllowLowRiskAutoRun             bool     `json:"allowLowRiskAutoRun"`
+	RequireConfirmationForMedium    bool     `json:"requireConfirmationForMedium"`
+	AlwaysConfirmHighRisk           bool     `json:"alwaysConfirmHighRisk"`
+	MaxToolCallsPerSession          int      `json:"maxToolCallsPerSession"`
+	MaxScriptRunsPerSession         int      `json:"maxScriptRunsPerSession"`
+	MaxCostPerSessionCents          int      `json:"maxCostPerSessionCents"`
+	DefaultProviderPriority         []string `json:"defaultProviderPriority,omitempty"`
+	MedicalProviderPriorityOverride []string `json:"medicalProviderPriorityOverride,omitempty"`
+	CSProviderPriorityOverride      []string `json:"csProviderPriorityOverride,omitempty"`
 }
 
 type BudgetState struct {
-	ToolCallsUsed   int
-	ScriptRunsUsed  int
-	CostCentsUsed   int
-	MaxToolCalls    int
-	MaxScriptRuns   int
-	MaxCostCents    int
-	LastUpdatedUnix int64
+	ToolCallsUsed   int   `json:"toolCallsUsed"`
+	ScriptRunsUsed  int   `json:"scriptRunsUsed"`
+	CostCentsUsed   int   `json:"costCentsUsed"`
+	MaxToolCalls    int   `json:"maxToolCalls"`
+	MaxScriptRuns   int   `json:"maxScriptRuns"`
+	MaxCostCents    int   `json:"maxCostCents"`
+	LastUpdatedUnix int64 `json:"lastUpdatedUnix"`
 }
 
 type GuardrailDecision struct {
@@ -48,7 +48,7 @@ func DefaultPolicyConfig() PolicyConfig {
 		AllowLowRiskAutoRun:             true,
 		RequireConfirmationForMedium:    true,
 		AlwaysConfirmHighRisk:           true,
-		MaxToolCallsPerSession:          6,
+		MaxToolCallsPerSession:          24,
 		MaxScriptRunsPerSession:         1,
 		MaxCostPerSessionCents:          50,
 		DefaultProviderPriority:         []string{"semantic-scholar", "openalex", "crossref", "pubmed", "arxiv", "clinicaltrials"},
@@ -67,23 +67,20 @@ func NewBudgetState(cfg PolicyConfig) BudgetState {
 }
 
 func EvaluateGuardrail(cfg PolicyConfig, budget BudgetState, risk RiskLevel, isScript bool, estimatedCostCents int) GuardrailDecision {
-	if rustBridgeEnabled() || RustRequired() {
-		if decision, ok := evaluateGuardrailViaRust(cfg, budget, risk, isScript, estimatedCostCents); ok {
-			return decision
-		}
+	return EvaluateGuardrailWithHints(cfg, budget, risk, isScript, estimatedCostCents, PolicyHints{})
+}
+
+func EvaluateGuardrailWithHints(cfg PolicyConfig, budget BudgetState, risk RiskLevel, isScript bool, estimatedCostCents int, hints PolicyHints) GuardrailDecision {
+	if decision, blocked := evaluateHardBudgetGuardrail(budget, isScript, estimatedCostCents); blocked {
+		return decision
 	}
+	_ = hints
 	return evaluateGuardrailHeuristic(cfg, budget, risk, isScript, estimatedCostCents)
 }
 
 func evaluateGuardrailHeuristic(cfg PolicyConfig, budget BudgetState, risk RiskLevel, isScript bool, estimatedCostCents int) GuardrailDecision {
-	if budget.ToolCallsUsed >= budget.MaxToolCalls {
-		return GuardrailDecision{Allowed: false, Reason: "tool_budget_exceeded"}
-	}
-	if isScript && budget.ScriptRunsUsed >= budget.MaxScriptRuns {
-		return GuardrailDecision{Allowed: false, Reason: "script_budget_exceeded"}
-	}
-	if estimatedCostCents > 0 && (budget.CostCentsUsed+estimatedCostCents) > budget.MaxCostCents {
-		return GuardrailDecision{Allowed: false, Reason: "cost_budget_exceeded"}
+	if decision, blocked := evaluateHardBudgetGuardrail(budget, isScript, estimatedCostCents); blocked {
+		return decision
 	}
 
 	switch risk {
@@ -103,6 +100,19 @@ func evaluateGuardrailHeuristic(cfg PolicyConfig, budget BudgetState, risk RiskL
 		}
 		return GuardrailDecision{Allowed: true, RequiresConfirmation: true, Reason: "low_risk_manual_only"}
 	}
+}
+
+func evaluateHardBudgetGuardrail(budget BudgetState, isScript bool, estimatedCostCents int) (GuardrailDecision, bool) {
+	if budget.ToolCallsUsed >= budget.MaxToolCalls {
+		return GuardrailDecision{Allowed: false, Reason: "tool_budget_exceeded"}, true
+	}
+	if isScript && budget.ScriptRunsUsed >= budget.MaxScriptRuns {
+		return GuardrailDecision{Allowed: false, Reason: "script_budget_exceeded"}, true
+	}
+	if estimatedCostCents > 0 && (budget.CostCentsUsed+estimatedCostCents) > budget.MaxCostCents {
+		return GuardrailDecision{Allowed: false, Reason: "cost_budget_exceeded"}, true
+	}
+	return GuardrailDecision{}, false
 }
 
 func ApplyBudgetUsage(budget *BudgetState, isScript bool, actualCostCents int) {

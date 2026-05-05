@@ -13,14 +13,14 @@ def test_main_startup_with_redis(mock_redis_env):
     # We need to reload the module to trigger the redis config logic
     import importlib
     import main
-    with patch("main._start_grpc_server"):
-        with patch("main._wait_for_grpc_sidecar_ready", new_callable=AsyncMock):
-            importlib.reload(main)
-            from main import app
-            
-            with TestClient(app) as client:
-                response = client.get("/health")
-                assert response.status_code == 200
+    main = importlib.reload(main)
+    with patch.object(main, "_start_grpc_server"):
+        with patch.object(main, "_wait_for_grpc_sidecar_ready", new_callable=AsyncMock):
+            with patch.object(main, "_grpc_sidecar_ready", new_callable=AsyncMock, return_value=(True, "")):
+                with patch.object(main, "_grpc_sidecar_health", new_callable=AsyncMock, return_value=("ok", "")):
+                    with TestClient(main.app) as client:
+                        response = client.get("/health")
+                        assert response.status_code == 200
 
 @pytest.mark.asyncio
 async def test_lifespan_shutdown():
@@ -91,6 +91,22 @@ def test_root_endpoint():
         response = client.get("/")
         assert response.status_code == 200
         assert "service" in response.json()
+        assert response.json()["wisdev"]["defaultExecutionMode"] == "guided"
+        assert "yolo" in response.json()["wisdev"]["executionModes"]
+        assert response.json()["wisdev"]["artifactSchema"]["version"] == "artifacts-v1"
+        assert "citationBundle" in response.json()["wisdev"]["artifactSchema"]["bundles"]
+
+def test_wisdev_artifact_schema_profile_matches_canonical_schema():
+    from main import get_wisdev_artifact_schema_profile
+
+    profile = get_wisdev_artifact_schema_profile()
+    assert profile["version"] == "artifacts-v1"
+    assert set(profile["bundles"]) >= {
+        "paperBundle",
+        "citationBundle",
+        "reasoningBundle",
+        "claimEvidenceArtifact",
+    }
 
 def test_metrics_endpoint():
     from main import app
@@ -112,3 +128,37 @@ def test_trace_propagation_middleware():
         response2 = client.get("/")
         assert "X-Trace-Id" in response2.headers
         assert len(response2.headers["X-Trace-Id"]) == 32
+
+def test_health_includes_wisdev_runtime_profile():
+    from main import app
+    with TestClient(app) as client:
+        response = client.get("/health")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["wisdev"]["academicIntegrity"]["requireCanonicalBibliography"] is True
+        assert payload["wisdev"]["artifactSchema"]["version"] == "artifacts-v1"
+        assert "claimEvidenceTable" in payload["wisdev"]["artifactSchema"]["legacyKeys"]
+
+
+def test_wisdev_typed_action_route_is_reachable():
+    from main import app
+    with TestClient(app) as client:
+        response = client.post(
+            "/action/research.verifyCitations",
+            json={"papers": [{"title": "Paper A"}], "sessionId": "sess-1"},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert "verifiedRecords" in payload
+        assert "citations" in payload
+        assert payload.get("validCount") == 1
+
+
+def test_wisdev_typed_action_validation_is_enforced():
+    from main import app
+    with TestClient(app) as client:
+        response = client.post(
+            "/action/research.buildClaimEvidenceTable",
+            json={"papers": []},
+        )
+        assert response.status_code == 422

@@ -1,5 +1,5 @@
 """
-ScholarLM LLM Sidecar gRPC Server.
+WisDev LLM Sidecar gRPC Server.
 
 Provides primitives for LLM generation, embeddings, and structured output.
 Legacy AcademicCapabilityService (v2) has been decommissioned.
@@ -10,12 +10,22 @@ import json
 import logging
 import os
 import time
+from typing import Any, AsyncIterator, cast
 
 import grpc
-from proto import llm_v1_pb2 as llm_pb2
-from proto import llm_v1_pb2_grpc as llm_pb2_grpc
+from proto import require_generated_module, require_proto_runtime_compatibility
 
-from services.gemini_service import GeminiService, GEMINI_LIGHT_MODEL, GEMINI_HEAVY_MODEL
+require_proto_runtime_compatibility()
+llm_pb2 = require_generated_module("llm_pb2")
+llm_pb2_grpc = cast(Any, require_generated_module("llm_pb2_grpc"))
+
+from services.gemini_service import (
+    GeminiService,
+    GEMINI_HEAVY_MODEL,
+    GEMINI_LIGHT_MODEL,
+    get_gemini_runtime_diagnostics,
+)
+from services.llm_runtime import SERVER_VERSION, LLMRuntime, LLMRuntimeError
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +66,6 @@ def _log_error(event: str, **fields) -> None:
 # Constants
 # ---------------------------------------------------------------------------
 
-SERVER_VERSION = "1.1.0-sidecar"
 _server_start_time = 0.0
 
 
@@ -70,7 +79,7 @@ async def _abort_with_typed_error(
     details: dict | None = None,
 ):
     """Abort with a JSON error envelope in the details field."""
-    envelope = {
+    envelope: dict[str, Any] = {
         "ok": False,
         "traceId": trace_id,
         "error": {
@@ -100,16 +109,18 @@ def _get_trace_id(request) -> str:
     return ""
 
 
-def _validate_internal_key(request, context) -> None:
-    """Validate internal service key or OIDC token if configured."""
-    internal_key = os.environ.get("INTERNAL_SERVICE_KEY")
-    oidc_audience = os.environ.get("OIDC_AUDIENCE")
-    
-    if not internal_key and not oidc_audience:
-        return
-        
-    metadata = dict(context.invocation_metadata())
-    
+def _context_metadata(context) -> dict[str, str]:
+    if context is None or not hasattr(context, "invocation_metadata"):
+        return {}
+    return dict(context.invocation_metadata())
+
+
+def _validate_internal_key_sync(metadata: dict, internal_key: str, oidc_audience: str) -> None:
+    """Synchronous credential check — called via asyncio.to_thread from async handlers.
+
+    Separated from the async wrapper so the blocking OIDC HTTP call does not
+    execute on the event loop thread.
+    """
     # 1. Try OIDC ID Token if audience is set (production preference)
     if oidc_audience:
         auth_header = metadata.get("authorization", "")
@@ -117,271 +128,175 @@ def _validate_internal_key(request, context) -> None:
             id_token_str = auth_header[7:]
             try:
                 from google.oauth2 import id_token
-                from google.auth.transport import requests
-                id_token.verify_oauth2_token(id_token_str, requests.Request(), oidc_audience)
-                return # Success
+                from google.auth.transport import requests as google_requests
+                id_token.verify_oauth2_token(id_token_str, google_requests.Request(), oidc_audience)
+                return  # Success
             except Exception as e:
                 _log("oidc_token_verification_failed", error=str(e))
-                # Fall through to check internal key if verification fails
-    
+                # Fall through to check internal key
+
     # 2. Try static internal service key (legacy/internal)
     provided_key = metadata.get("internal_service_key", "")
     if internal_key and provided_key == internal_key:
-        return # Success
-        
+        return  # Success
+
     raise PermissionError("Unauthorized: missing or invalid service credentials")
 
 
-class LLMServiceServicer(llm_pb2_grpc.LLMServiceServicer):
+async def _validate_internal_key(request, context) -> None:
+    """Async credential validator — safe to await in gRPC handler coroutines.
+
+    Runs the blocking OIDC token verification in a thread-pool executor via
+    asyncio.to_thread so that it does not stall the event loop under load.
+    """
+    internal_key = os.environ.get("INTERNAL_SERVICE_KEY", "")
+    oidc_audience = os.environ.get("OIDC_AUDIENCE", "")
+
+    if not internal_key and not oidc_audience:
+        return
+
+    metadata = dict(context.invocation_metadata())
+    # Delegate the potentially-blocking OIDC HTTP call to a thread.
+    await asyncio.to_thread(_validate_internal_key_sync, metadata, internal_key, oidc_audience)
+
+
+class LLMServiceServicer(llm_pb2_grpc.LLMServiceServicer):  # type: ignore[name-defined, misc, valid-type]
     """Implementation of the sidecar LLMService (v1)."""
 
-    def __init__(self):
-        self.default_gemini = GeminiService()
+    def __init__(self, runtime: LLMRuntime | None = None):
+        self.runtime = runtime or LLMRuntime()
+        self.default_gemini = self.runtime._default_gemini
 
     async def Generate(self, request, context):
-        trace_id = _get_trace_id(request)
         try:
-            _validate_internal_key(request, context)
+            await _validate_internal_key(request, context)
         except PermissionError as e:
             await _abort_with_typed_error(
-                context, grpc.StatusCode.PERMISSION_DENIED, "UNAUTHORIZED", str(e), trace_id, 403
+                context, grpc.StatusCode.PERMISSION_DENIED, "UNAUTHORIZED", str(e), _get_trace_id(request), 403
             )
             return
 
-        model = request.model or GEMINI_LIGHT_MODEL
-        svc = GeminiService(model=model)
-        start_time = time.time()
         try:
-            _log("llm_generate_start", trace_id=trace_id, model=model)
-            prompt = _ensure_non_empty_prompt(request.prompt, trace_id)
-            if request.system_prompt:
-                prompt = f"{request.system_prompt}\n\n{prompt}"
-
-            text = await svc.generate_text(
-                prompt=prompt,
-                temperature=request.temperature or 0.7,
-                max_tokens=request.max_tokens or 2048,
+            return await self.runtime.generate(
+                request,
+                metadata=_context_metadata(context),
+                validate_credentials=False,
             )
-            if not text.strip():
-                raise RuntimeError("empty text response from Gemini")
-            latency_ms = int((time.time() - start_time) * 1000)
-            _log("llm_generate_success", trace_id=trace_id, latency_ms=latency_ms)
-            return llm_pb2.GenerateResponse(
-                text=text,
-                model_used=model,
-                input_tokens=len(prompt) // 4,
-                output_tokens=len(text) // 4,
-                finish_reason="stop",
-                latency_ms=latency_ms,
-            )
-        except asyncio.CancelledError:
-            _log("llm_generate_cancelled", trace_id=trace_id)
-            raise
-        except Exception as e:
-            _log_error("llm_generate_failed", trace_id=trace_id, error=str(e))
-            status = grpc.StatusCode.INVALID_ARGUMENT if isinstance(e, ValueError) else grpc.StatusCode.INTERNAL
-            code = "INVALID_PROMPT" if isinstance(e, ValueError) else "GENERATE_FAILED"
-            http_status = 400 if isinstance(e, ValueError) else 500
+        except LLMRuntimeError as exc:
             await _abort_with_typed_error(
-                context, status, code, str(e), trace_id, http_status
+                context, exc.grpc_status, exc.code, exc.message, exc.trace_id, exc.http_status, exc.details
             )
+            return
 
     async def GenerateStream(self, request, context):
-        trace_id = _get_trace_id(request)
         try:
-            _validate_internal_key(request, context)
+            await _validate_internal_key(request, context)
         except PermissionError as e:
             await _abort_with_typed_error(
-                context, grpc.StatusCode.PERMISSION_DENIED, "UNAUTHORIZED", str(e), trace_id, 403
+                context, grpc.StatusCode.PERMISSION_DENIED, "UNAUTHORIZED", str(e), _get_trace_id(request), 403
             )
             return
 
-        model = request.model or GEMINI_LIGHT_MODEL
-        svc = GeminiService(model=model)
-
         try:
-            _log("llm_stream_start", trace_id=trace_id, model=model)
-            prompt = _ensure_non_empty_prompt(request.prompt, trace_id)
-            if request.system_prompt:
-                prompt = f"{request.system_prompt}\n\n{prompt}"
-
-            # Use native streaming from GeminiService
-            async for chunk_text in svc.generate_stream(
-                prompt=prompt,
-                temperature=request.temperature or 0.7,
-                max_tokens=request.max_tokens or 2048,
+            async for chunk in self.runtime.generate_stream(
+                request,
+                metadata=_context_metadata(context),
+                validate_credentials=False,
             ):
-                yield llm_pb2.GenerateChunk(
-                    delta=chunk_text,
-                    done=False,
-                    finish_reason="",
-                )
-            
-            # Final empty chunk to signal completion
-            yield llm_pb2.GenerateChunk(
-                delta="",
-                done=True,
-                finish_reason="stop",
-            )
-            _log("llm_stream_success", trace_id=trace_id)
-        except asyncio.CancelledError:
-            _log("llm_stream_cancelled", trace_id=trace_id)
-            raise
-        except Exception as e:
-            _log_error("llm_stream_failed", trace_id=trace_id, error=str(e))
-            status = grpc.StatusCode.INVALID_ARGUMENT if isinstance(e, ValueError) else grpc.StatusCode.INTERNAL
-            code = "INVALID_PROMPT" if isinstance(e, ValueError) else "STREAM_FAILED"
-            http_status = 400 if isinstance(e, ValueError) else 500
+                yield chunk
+        except LLMRuntimeError as exc:
             await _abort_with_typed_error(
-                context, status, code, str(e), trace_id, http_status
+                context, exc.grpc_status, exc.code, exc.message, exc.trace_id, exc.http_status, exc.details
             )
 
     async def StructuredOutput(self, request, context):
-        trace_id = _get_trace_id(request)
         try:
-            _validate_internal_key(request, context)
+            await _validate_internal_key(request, context)
         except PermissionError as e:
             await _abort_with_typed_error(
-                context, grpc.StatusCode.PERMISSION_DENIED, "UNAUTHORIZED", str(e), trace_id, 403
+                context, grpc.StatusCode.PERMISSION_DENIED, "UNAUTHORIZED", str(e), _get_trace_id(request), 403
             )
             return
 
-        model = request.model or GEMINI_LIGHT_MODEL
-        svc = GeminiService(model=model)
-        start_time = time.time()
-        schema = {}
-        if request.json_schema:
-            try:
-                schema = json.loads(request.json_schema)
-            except json.JSONDecodeError as e:
-                await _abort_with_typed_error(
-                    context,
-                    grpc.StatusCode.INVALID_ARGUMENT,
-                    "INVALID_JSON_SCHEMA",
-                    "json_schema must be valid JSON",
-                    trace_id,
-                    400,
-                    {"error": str(e)},
-                )
-                return
         try:
-            _log("llm_structured_start", trace_id=trace_id, model=model)
-            prompt = _ensure_non_empty_prompt(request.prompt, trace_id)
-            if request.system_prompt:
-                prompt = f"{request.system_prompt}\n\n{prompt}"
-
-            json_result = await svc.generate_structured(
-                prompt=prompt,
-                json_schema=schema,
-                temperature=request.temperature or 0.3,
-                max_tokens=request.max_tokens or 2048,
+            return await self.runtime.structured_output(
+                request,
+                metadata=_context_metadata(context),
+                validate_credentials=False,
             )
-            if not isinstance(json_result, str):
-                json_result = json.dumps(json_result)
-
-            json.loads(json_result)
-            latency_ms = int((time.time() - start_time) * 1000)
-            _log("llm_structured_success", trace_id=trace_id, latency_ms=latency_ms)
-            return llm_pb2.StructuredResponse(
-                json_result=json_result,
-                model_used=model,
-                input_tokens=len(prompt) // 4,
-                output_tokens=len(json_result) // 4,
-                schema_valid=True,
-                latency_ms=latency_ms,
-            )
-        except asyncio.CancelledError:
-            _log("llm_structured_cancelled", trace_id=trace_id)
-            raise
-        except Exception as e:
-            _log_error("llm_structured_failed", trace_id=trace_id, error=str(e))
-            status = grpc.StatusCode.INVALID_ARGUMENT if isinstance(e, ValueError) else grpc.StatusCode.INTERNAL
-            code = "INVALID_PROMPT" if isinstance(e, ValueError) else "STRUCTURED_FAILED"
-            http_status = 400 if isinstance(e, ValueError) else 500
+        except LLMRuntimeError as exc:
             await _abort_with_typed_error(
-                context, status, code, str(e), trace_id, http_status
+                context, exc.grpc_status, exc.code, exc.message, exc.trace_id, exc.http_status, exc.details
             )
+            return
 
     async def Embed(self, request, context):
-        trace_id = _get_trace_id(request)
         try:
-            _validate_internal_key(request, context)
+            await _validate_internal_key(request, context)
         except PermissionError as e:
             await _abort_with_typed_error(
-                context, grpc.StatusCode.PERMISSION_DENIED, "UNAUTHORIZED", str(e), trace_id, 403
+                context, grpc.StatusCode.PERMISSION_DENIED, "UNAUTHORIZED", str(e), _get_trace_id(request), 403
             )
             return
 
-        start_time = time.time()
         try:
-            _log("llm_embed_start", trace_id=trace_id)
-            model = request.model or "text-embedding-004"
-            vector = await self.default_gemini.embed(
-                text=request.text,
-                model=model,
-                task_type=request.task_type or "RETRIEVAL_QUERY",
+            return await self.runtime.embed(
+                request,
+                metadata=_context_metadata(context),
+                validate_credentials=False,
             )
-            latency_ms = int((time.time() - start_time) * 1000)
-            _log("llm_embed_success", trace_id=trace_id, latency_ms=latency_ms)
-            return llm_pb2.EmbedResponse(
-                embedding=vector,
-                token_count=len(request.text) // 4,
-                model_used=model,
-                latency_ms=latency_ms,
-            )
-        except asyncio.CancelledError:
-            _log("llm_embed_cancelled", trace_id=trace_id)
-            raise
-        except Exception as e:
-            _log_error("llm_embed_failed", trace_id=trace_id, error=str(e))
+        except LLMRuntimeError as exc:
             await _abort_with_typed_error(
-                context, grpc.StatusCode.INTERNAL, "EMBED_FAILED", str(e), trace_id, 500
+                context, exc.grpc_status, exc.code, exc.message, exc.trace_id, exc.http_status, exc.details
             )
+            return
 
     async def EmbedBatch(self, request, context):
-        trace_id = _get_trace_id(request)
         try:
-            _validate_internal_key(request, context)
+            await _validate_internal_key(request, context)
         except PermissionError as e:
             await _abort_with_typed_error(
-                context, grpc.StatusCode.PERMISSION_DENIED, "UNAUTHORIZED", str(e), trace_id, 403
+                context, grpc.StatusCode.PERMISSION_DENIED, "UNAUTHORIZED", str(e), _get_trace_id(request), 403
             )
             return
 
-        start_time = time.time()
         try:
-            _log("llm_embed_batch_start", trace_id=trace_id, count=len(request.texts))
-            model = request.model or "text-embedding-004"
-            vectors = await self.default_gemini.embed_batch(
-                texts=list(request.texts),
-                model=model,
-                task_type=request.task_type or "RETRIEVAL_DOCUMENT",
+            return await self.runtime.embed_batch(
+                request,
+                metadata=_context_metadata(context),
+                validate_credentials=False,
             )
-            latency_ms = int((time.time() - start_time) * 1000)
-            _log("llm_embed_batch_success", trace_id=trace_id, latency_ms=latency_ms)
-
-            proto_vectors = [llm_pb2.EmbedVector(values=v, token_count=0) for v in vectors]
-            return llm_pb2.EmbedBatchResponse(
-                embeddings=proto_vectors,
-                model_used=model,
-                latency_ms=latency_ms,
-            )
-        except asyncio.CancelledError:
-            _log("llm_embed_batch_cancelled", trace_id=trace_id)
-            raise
-        except Exception as e:
-            _log_error("llm_embed_batch_failed", trace_id=trace_id, error=str(e))
+        except LLMRuntimeError as exc:
             await _abort_with_typed_error(
-                context, grpc.StatusCode.INTERNAL, "EMBED_BATCH_FAILED", str(e), trace_id, 500
+                context, exc.grpc_status, exc.code, exc.message, exc.trace_id, exc.http_status, exc.details
             )
+            return
 
     async def Health(self, request, context):
-        is_ready = self.default_gemini.is_ready()
+        diagnostics = get_gemini_runtime_diagnostics()
+        is_ready = bool(diagnostics.get("ready"))
+        error_detail = str(diagnostics.get("detail") or "Gemini runtime unavailable")
+        error_message = ""
+        if not is_ready:
+            context_parts: list[str] = []
+            if diagnostics.get("source") is not None:
+                context_parts.append(f"source={diagnostics.get('source')}")
+            if diagnostics.get("mode") is not None:
+                context_parts.append(f"mode={diagnostics.get('mode')}")
+            if diagnostics.get("projectConfigured") is not None:
+                context_parts.append(f"projectConfigured={diagnostics.get('projectConfigured')}")
+            if diagnostics.get("proxyConfigured") is not None:
+                context_parts.append(f"proxyConfigured={diagnostics.get('proxyConfigured')}")
+
+            if context_parts:
+                error_message = f"{error_detail} ({', '.join(context_parts)})"
+            else:
+                error_message = error_detail
         return llm_pb2.HealthResponse(
             ok=is_ready,
             version=SERVER_VERSION,
             models_available=[GEMINI_LIGHT_MODEL, GEMINI_HEAVY_MODEL],
-            error="" if is_ready else "Gemini credentials not configured",
+            error=error_message,
         )
 
 
@@ -391,21 +306,49 @@ class LLMServiceServicer(llm_pb2_grpc.LLMServiceServicer):
 
 async def serve_async(interceptors=None):
     global _server_start_time
-    port = os.environ.get("GRPC_PORT", "50052")
+    explicit_addr = os.environ.get("PYTHON_SIDECAR_GRPC_ADDR", "").strip()
+    if explicit_addr:
+        bind_target = explicit_addr
+    else:
+        bind_target = "[::]:" + os.environ.get("GRPC_PORT", "50052")
+    # Grace period (seconds) allowed for in-flight RPCs to complete after
+    # SIGTERM before the server is forcefully stopped.
+    grace_seconds = int(os.environ.get("GRPC_SHUTDOWN_GRACE_SECONDS", "10"))
+
     # Pass OTel server interceptor when provided so inbound gRPC calls from Go
-    # continue the existing OpenTelemetry trace rather than starting a new root span.
+    # continue the existing Cloud Trace trace rather than starting a new root span.
     server = grpc.aio.server(interceptors=interceptors or [])
 
     # Register LLMService (sidecar contract).
     llm_pb2_grpc.add_LLMServiceServicer_to_server(LLMServiceServicer(), server)
 
-    server.add_insecure_port("[::]:" + port)
+    server.add_insecure_port(bind_target)
     await server.start()
     _server_start_time = time.time()
     logging.info(
-        f"Starting ScholarLM LLM Sidecar (Async) on port {port} "
+        f"Starting WisDev LLM Sidecar (Async) on {bind_target} "
         f"| version={SERVER_VERSION} | otel_interceptor={'yes' if interceptors else 'no'}"
     )
+
+    # Register a SIGTERM handler so Cloud Run revision replacements (which
+    # send SIGTERM) drain in-flight RPCs rather than dropping them.
+    loop = asyncio.get_running_loop()
+
+    async def _graceful_shutdown(sig_name: str) -> None:
+        logging.info(f"gRPC server received {sig_name}; draining with {grace_seconds}s grace period")
+        await server.stop(grace=grace_seconds)
+
+    import signal
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(
+                sig,
+                lambda s=sig: asyncio.ensure_future(_graceful_shutdown(s.name)),
+            )
+        except (NotImplementedError, RuntimeError):
+            # Signal handlers are not available on Windows or in threads.
+            pass
+
     await server.wait_for_termination()
 
 

@@ -7,7 +7,7 @@ import pytest
 
 import grpc_server
 from grpc_server import LLMServiceServicer, _abort_with_typed_error
-from proto import llm_v1_pb2 as llm_pb2
+from proto import llm_pb2
 
 
 class AbortCalled(RuntimeError):

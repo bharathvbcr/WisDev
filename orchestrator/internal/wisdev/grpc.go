@@ -3,10 +3,11 @@ package wisdev
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/policy"
-	wisdevpb "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/v2"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/policy"
+	wisdevpb "github.com/wisdev/wisdev-agent-os/orchestrator/proto/wisdev"
 )
 
 type agentGatewayGRPCServer struct {
@@ -139,7 +140,7 @@ func (s *agentGatewayGRPCServer) ResumeSession(ctx context.Context, req *wisdevp
 	if err != nil {
 		return nil, err
 	}
-	if err := transitionSessionStatus(session, SessionPaused); err != nil {
+	if err := transitionSessionStatus(session, SessionExecutingPlan); err != nil {
 		return nil, err
 	}
 	if err := s.gateway.Store.Put(ctx, session, s.gateway.SessionTTL); err != nil {
@@ -184,7 +185,7 @@ func (s *agentGatewayGRPCServer) SubmitAnswer(ctx context.Context, req *wisdevpb
 	if err != nil {
 		return nil, err
 	}
-	session.Answers[req.GetQuestionId()] = QuestionAnswer{
+	session.Answers[req.GetQuestionId()] = Answer{
 		QuestionID: req.GetQuestionId(),
 		Values:     req.GetValues(),
 		AnsweredAt: NowMillis(),
@@ -315,6 +316,17 @@ func mapPlanExecutionEventToUpdate(event PlanExecutionEvent) *wisdevpb.PlanExecu
 		update.Update = &wisdevpb.PlanExecutionUpdate_Progress{
 			Progress: &wisdevpb.Progress{Completed: int32(completed), Total: int32(total), Failed: int32(failed)},
 		}
+	case EventPlanCancelled:
+		status, _ := event.Payload["status"].(string)
+		if status == "" {
+			status = "cancelled"
+		}
+		update.Update = &wisdevpb.PlanExecutionUpdate_ExecutionCancelled{
+			ExecutionCancelled: &wisdevpb.ExecutionCancelled{
+				Reason: event.Message,
+				Status: status,
+			},
+		}
 	default:
 		replanCount, _ := event.Payload["replanCount"].(int)
 		sourceStepID, _ := event.Payload["fromStep"].(string)
@@ -348,19 +360,23 @@ func mapRiskToProto(risk RiskLevel) wisdevpb.RiskLevel {
 		return wisdevpb.RiskLevel_HIGH
 	case RiskLevelMedium:
 		return wisdevpb.RiskLevel_MEDIUM
-	default:
+	case RiskLevelLow:
 		return wisdevpb.RiskLevel_LOW
+	default:
+		return wisdevpb.RiskLevel_RISK_LEVEL_UNSPECIFIED
 	}
 }
 
 func mapTargetToProto(target ExecutionTarget) wisdevpb.ExecutionTarget {
 	switch target {
+	case ExecutionTargetGoNative:
+		return wisdevpb.ExecutionTarget_GO_NATIVE
 	case ExecutionTargetPythonCapability:
 		return wisdevpb.ExecutionTarget_PYTHON_CAPABILITY
 	case ExecutionTargetPythonSandbox:
 		return wisdevpb.ExecutionTarget_PYTHON_SANDBOX
 	default:
-		return wisdevpb.ExecutionTarget_GO_NATIVE
+		return wisdevpb.ExecutionTarget_EXECUTION_TARGET_UNSPECIFIED
 	}
 }
 
@@ -397,11 +413,26 @@ func (s *agentGatewayGRPCServer) InvokeTool(ctx context.Context, req *wisdevpb.I
 	var result map[string]any
 	switch Tool.ExecutionTarget {
 	case ExecutionTargetGoNative:
-		papers, searchErr := FastParallelSearch(ctx, s.gateway.Redis, session.CorrectedQuery, 10)
-		if searchErr != nil {
-			return &wisdevpb.InvokeToolResponse{Ok: false, ResultJson: ""}, nil
+		// Dispatch on the specific tool name rather than treating every
+		// Go-native tool as a parallel search.
+		switch req.GetToolName() {
+		case "parallel_search", "fast_search", "web_search", "search":
+			queryUsed := strings.TrimSpace(ResolveSessionSearchQuery(session.Query, session.CorrectedQuery, session.OriginalQuery))
+			if queryUsed == "" {
+				return &wisdevpb.InvokeToolResponse{Ok: false, ResultJson: ""}, nil
+			}
+			papers, _, searchErr := RetrieveCanonicalPapersWithRegistry(ctx, s.gateway.Redis, s.gateway.SearchRegistry, queryUsed, 10)
+			if searchErr != nil {
+				return &wisdevpb.InvokeToolResponse{Ok: false, ResultJson: ""}, nil
+			}
+			result = map[string]any{
+				"papers":    papers,
+				"queryUsed": queryUsed,
+			}
+		default:
+			return &wisdevpb.InvokeToolResponse{Ok: false, ResultJson: ""},
+				fmt.Errorf("no Go-native handler registered for tool %q", req.GetToolName())
 		}
-		result = map[string]any{"papers": papers}
 	default:
 		r, execErr := s.gateway.PythonExecute(ctx, req.GetToolName(), payload, session)
 		if execErr != nil {
@@ -546,12 +577,14 @@ func (s *agentGatewayGRPCServer) ProgrammaticLoop(ctx context.Context, req *wisd
 	}
 
 	var session *AgentSession
-	if sid := strings.TrimSpace(req.GetSessionId()); sid != "" {
+	if sid := strings.TrimSpace(req.GetSessionId()); sid != "" && s.gateway != nil && s.gateway.Store != nil {
 		if loaded, err := s.gateway.Store.Get(ctx, sid); err == nil {
-			session = loaded
-			remainingCalls := session.Budget.MaxToolCalls - session.Budget.ToolCallsUsed
-			if remainingCalls > 0 && iterations > remainingCalls {
-				iterations = remainingCalls
+			if loaded != nil {
+				session = loaded
+				remainingCalls := session.Budget.MaxToolCalls - session.Budget.ToolCallsUsed
+				if remainingCalls > 0 && iterations > remainingCalls {
+					iterations = remainingCalls
+				}
 			}
 		}
 	}
@@ -559,7 +592,26 @@ func (s *agentGatewayGRPCServer) ProgrammaticLoop(ctx context.Context, req *wisd
 		iterations = 1
 	}
 
-	tree := RunProgrammaticTreeLoop(ctx, nil, session, action, payload, iterations, nil)
+	execFn := s.gateway.ProgrammaticLoopExecutor()
+	if execFn == nil {
+		return &wisdevpb.ProgrammaticLoopResponse{
+			SessionId: req.GetSessionId(),
+			Action:    action,
+			Completed: false,
+			Error: &wisdevpb.ExecutionError{
+				Code:       "PROGRAMMATIC_LOOP_UNAVAILABLE",
+				Message:    "programmatic loop executor is unavailable",
+				HttpStatus: 503,
+				Retryable:  true,
+			},
+		}, nil
+	}
+
+	tree := RunProgrammaticTreeLoop(ctx, execFn, session, action, payload, iterations, nil)
+	if session != nil && len(tree.BranchArtifacts) > 0 && s.gateway != nil && s.gateway.Store != nil {
+		session.UpdatedAt = NowMillis()
+		_ = s.gateway.Store.Put(ctx, session, 0)
+	}
 	loop := make([]*wisdevpb.ProgrammaticLoopIteration, 0, len(tree.Iterations))
 	completed := tree.Completed
 	for _, item := range tree.Iterations {

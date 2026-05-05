@@ -1,4 +1,4 @@
-// Package search provides the unified academic search infrastructure for ScholarLM.
+// Package search provides the unified academic search infrastructure for WisDev.
 //
 // Architecture:
 //   - SearchProvider interface — every academic source implements this
@@ -12,19 +12,74 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/telemetry"
+	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
+	"log/slog"
 	"math"
 	"net/http"
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/llm"
-	"github.com/wisdev-agent/wisdev-agent-os/orchestrator/internal/telemetry"
-	llmv1 "github.com/wisdev-agent/wisdev-agent-os/orchestrator/proto/llm/v1"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/semaphore"
 )
+
+// ============================================================
+// Shared HTTP client
+// ============================================================
+
+// SharedHTTPClient is a package-level HTTP client reused across all search providers
+// to benefit from connection pooling. Tests may swap it out to inject mock transports.
+var SharedHTTPClient = &http.Client{
+	Timeout: 30 * time.Second,
+}
+
+func providerHTTPErrorKind(resp *http.Response) string {
+	if resp == nil {
+		return "unknown"
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return "rate_limit"
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		if strings.TrimSpace(resp.Header.Get("Retry-After")) != "" ||
+			strings.TrimSpace(resp.Header.Get("X-RateLimit-Remaining")) == "0" ||
+			strings.TrimSpace(resp.Header.Get("X-Rate-Limit-Remaining")) == "0" ||
+			strings.TrimSpace(resp.Header.Get("RateLimit-Remaining")) == "0" {
+			return "rate_limit"
+		}
+	}
+	if resp.StatusCode >= 500 {
+		return "upstream_5xx"
+	}
+	if resp.StatusCode >= 400 {
+		return "permanent"
+	}
+	return "none"
+}
+
+func providerHTTPStatusError(provider string, resp *http.Response) error {
+	kind := providerHTTPErrorKind(resp)
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode
+	}
+	switch kind {
+	case "rate_limit":
+		return providerError(provider, "rate limit exceeded (%d)", status)
+	case "upstream_5xx":
+		return providerError(provider, "upstream error (%d)", status)
+	case "permanent":
+		return providerError(provider, "HTTP %d", status)
+	default:
+		return providerError(provider, "HTTP %d", status)
+	}
+}
 
 // ============================================================
 // Core types
@@ -32,32 +87,46 @@ import (
 
 // Paper is the canonical paper type shared across all providers.
 type Paper struct {
-	ID            string   `json:"id"`
-	Title         string   `json:"title"`
-	Abstract      string   `json:"abstract"`
-	Link          string   `json:"link"`
-	DOI           string   `json:"doi,omitempty"`
-	Source        string   `json:"source"`
-	SourceApis    []string `json:"sourceApis,omitempty"`
-	Authors       []string `json:"authors,omitempty"`
-	Year          int      `json:"year,omitempty"`
-	Venue         string   `json:"venue,omitempty"`
-	Keywords      []string `json:"keywords,omitempty"`
-	CitationCount int      `json:"citationCount,omitempty"`
-	Score         float64  `json:"score,omitempty"`
-	EvidenceLevel string   `json:"evidenceLevel,omitempty"`
+	ID                       string   `json:"id"`
+	Title                    string   `json:"title"`
+	Abstract                 string   `json:"abstract"`
+	Link                     string   `json:"link"`
+	DOI                      string   `json:"doi,omitempty"`
+	ArxivID                  string   `json:"arxivId,omitempty"`
+	Source                   string   `json:"source"`
+	SourceApis               []string `json:"sourceApis,omitempty"`
+	Authors                  []string `json:"authors,omitempty"`
+	Year                     int      `json:"year,omitempty"`
+	Month                    int      `json:"month,omitempty"`
+	Venue                    string   `json:"venue,omitempty"`
+	Keywords                 []string `json:"keywords,omitempty"`
+	CitationCount            int      `json:"citationCount,omitempty"`
+	ReferenceCount           int      `json:"referenceCount,omitempty"`
+	InfluentialCitationCount int      `json:"influentialCitationCount,omitempty"`
+	OpenAccessUrl            string   `json:"openAccessUrl,omitempty"`
+	PdfUrl                   string   `json:"pdfUrl,omitempty"`
+	Score                    float64  `json:"score,omitempty"`
+	EvidenceLevel            string   `json:"evidenceLevel,omitempty"`
+	FullText                 string   `json:"fullText,omitempty"`     // Added for Phase 2: Docling integration
+	StructureMap             []any    `json:"structureMap,omitempty"` // Added for Phase 2: Docling integration
 	// internal: how many providers returned this paper (used for dedup)
 	providerCount int
 }
 
 // SearchOpts controls provider behaviour per-request.
 type SearchOpts struct {
+	UserID           string
 	Limit            int
 	Domain           string
+	Sources          []string
 	YearFrom         int
 	YearTo           int
 	SkipCache        bool
 	QualitySort      bool
+	ExpandQuery      bool
+	PageIndexRerank  bool
+	Stage2Rerank     bool
+	TraceID          string
 	DynamicProviders bool
 	LLMClient        *llm.Client // Required if DynamicProviders is true
 }
@@ -83,6 +152,63 @@ type SearchResult struct {
 type ProviderWarning struct {
 	Provider string `json:"provider"`
 	Message  string `json:"message"`
+}
+
+var canonicalProviderNames = map[string]struct{}{
+	"semantic_scholar": {},
+	"openalex":         {},
+	"pubmed":           {},
+	"core":             {},
+	"arxiv":            {},
+	"crossref":         {},
+	"dblp":             {},
+	"europe_pmc":       {},
+	"biorxiv":          {},
+	"medrxiv":          {},
+	"clinical_trials":  {},
+	"papers_with_code": {},
+	"google_scholar":   {},
+	"ssrn":             {},
+	"doaj":             {},
+	"repec":            {},
+	"nasa_ads":         {},
+	"philpapers":       {},
+	"ieee":             {},
+}
+
+// IsCanonicalProviderName reports whether name is a recognized canonical provider ID.
+func IsCanonicalProviderName(name string) bool {
+	_, ok := canonicalProviderNames[strings.TrimSpace(name)]
+	return ok
+}
+
+// NormalizeProviderName canonicalizes provider hints used across transport, routing, and cache keys.
+func NormalizeProviderName(raw string) string {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	if normalized == "" {
+		return ""
+	}
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	normalized = strings.Join(strings.Fields(normalized), "_")
+
+	switch normalized {
+	case "semanticscholar":
+		return "semantic_scholar"
+	case "open_alex":
+		return "openalex"
+	case "europepmc":
+		return "europe_pmc"
+	case "paperswithcode":
+		return "papers_with_code"
+	case "clinicaltrials":
+		return "clinical_trials"
+	case "googlescholar":
+		return "google_scholar"
+	case "nasaads":
+		return "nasa_ads"
+	default:
+		return normalized
+	}
 }
 
 // ============================================================
@@ -126,9 +252,14 @@ type ProviderRegistry struct {
 	providers  map[string]SearchProvider // keyed by Name()
 	routes     map[string][]string       // domain → []providerName
 	defaults   []string                  // used when domain is empty / unrecognised
-	breakers   map[string]*CircuitBreaker
+	breakers   map[string]*resilience.CircuitBreaker
 	semaphores map[string]*semaphore.Weighted
 	redis      redis.UniversalClient
+
+	// Phase 2: Search Intelligence
+	intelligence *SearchIntelligence
+	router       *ProviderRouter
+	abTest       *ABTestManager
 
 	// Adaptive concurrency
 	adaptiveCaps map[string]int64
@@ -137,15 +268,24 @@ type ProviderRegistry struct {
 
 // NewProviderRegistry creates an empty registry.
 func NewProviderRegistry() *ProviderRegistry {
-	return &ProviderRegistry{
+	reg := &ProviderRegistry{
 		providers:    make(map[string]SearchProvider),
 		routes:       make(map[string][]string),
-		breakers:     make(map[string]*CircuitBreaker),
+		breakers:     make(map[string]*resilience.CircuitBreaker),
 		semaphores:   make(map[string]*semaphore.Weighted),
 		adaptiveCaps: make(map[string]int64),
 		// Global backpressure limit: 50 concurrent provider requests across all users
 		globalSem: semaphore.NewWeighted(50),
+		abTest:    NewABTestManager(0.05), // 5% canary by default
 	}
+	return reg
+}
+
+func (r *ProviderRegistry) SetDB(db DBProvider) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.intelligence = NewSearchIntelligence(db)
+	r.router = NewProviderRouter(r.intelligence, r)
 }
 
 func (r *ProviderRegistry) SetRedis(client redis.UniversalClient) {
@@ -154,13 +294,19 @@ func (r *ProviderRegistry) SetRedis(client redis.UniversalClient) {
 	r.redis = client
 }
 
+func (r *ProviderRegistry) GetIntelligence() *SearchIntelligence {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.intelligence
+}
+
 // Register adds a provider. Safe for concurrent use.
 func (r *ProviderRegistry) Register(p SearchProvider) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	name := p.Name()
 	r.providers[name] = p
-	r.breakers[name] = NewCircuitBreaker(name, 5, 30*time.Second)
+	r.breakers[name] = resilience.NewCircuitBreaker(name)
 
 	// Default to 10 concurrent requests per provider
 	cap := int64(10)
@@ -254,6 +400,94 @@ func (r *ProviderRegistry) All() []SearchProvider {
 	return out
 }
 
+func (r *ProviderRegistry) dynamicProviderSelectionReady() bool {
+	names, _ := r.dynamicProviderCandidates()
+	return len(names) > 1
+}
+
+func (r *ProviderRegistry) dynamicProviderCandidates() ([]string, map[string][]string) {
+	if r == nil {
+		return nil, nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	available := make([]string, 0, len(r.providers))
+	tools := make(map[string][]string)
+	for name, p := range r.providers {
+		if p == nil || !p.Healthy() {
+			continue
+		}
+		available = append(available, name)
+		if t := p.Tools(); len(t) > 0 {
+			tools[name] = t
+		}
+	}
+	sort.Strings(available)
+	return available, tools
+}
+
+func (r *ProviderRegistry) dynamicProviderFallback() []SearchProvider {
+	if r == nil {
+		return nil
+	}
+	providers := r.ProvidersFor("general")
+	if len(providers) == 0 {
+		providers = r.All()
+	}
+	return providers
+}
+
+// ResolveRequestedProviders treats provider hints as hard constraints.
+// It returns only the requested providers that are currently available,
+// alongside warnings for unavailable or unknown providers.
+func (r *ProviderRegistry) ResolveRequestedProviders(names []string) ([]SearchProvider, []ProviderWarning) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	selected := make([]SearchProvider, 0, len(names))
+	warnings := make([]ProviderWarning, 0)
+	seen := make(map[string]struct{}, len(names))
+
+	for _, rawName := range names {
+		name := normalizeRequestedProviderName(rawName)
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+
+		provider, ok := r.providers[name]
+		if !ok {
+			warnings = append(warnings, ProviderWarning{
+				Provider: name,
+				Message:  "requested provider is not registered",
+			})
+			continue
+		}
+		if !provider.Healthy() {
+			warnings = append(warnings, ProviderWarning{
+				Provider: name,
+				Message:  "requested provider is currently unavailable",
+			})
+			continue
+		}
+		if breaker := r.breakers[name]; breaker != nil && breaker.State() == resilience.StateOpen {
+			warnings = append(warnings, ProviderWarning{
+				Provider: name,
+				Message:  "requested provider is temporarily unavailable",
+			})
+			continue
+		}
+
+		selected = append(selected, provider)
+	}
+
+	return selected, warnings
+}
+
 // GetCitations fetches papers that cited the given paper ID.
 func (r *ProviderRegistry) GetCitations(ctx context.Context, paperID string, limit int) ([]Paper, error) {
 	r.mu.RLock()
@@ -278,48 +512,48 @@ func (r *ProviderRegistry) GetCitations(ctx context.Context, paperID string, lim
 
 // SelectProvidersDynamic uses the LLM to choose the best providers for a query.
 func (r *ProviderRegistry) SelectProvidersDynamic(ctx context.Context, llmClient *llm.Client, query string) []SearchProvider {
+	fallbackProviders := r.dynamicProviderFallback()
 	if llmClient == nil {
-		return r.ProvidersFor("general")
+		return fallbackProviders
+	}
+	if remaining := llmClient.ProviderCooldownRemaining(); remaining > 0 {
+		slog.Warn("dynamic provider selection skipped during LLM provider cooldown",
+			"component", "search.provider",
+			"operation", "select_providers_dynamic",
+			"retry_after_ms", remaining.Milliseconds(),
+			"query", strings.TrimSpace(query),
+		)
+		return fallbackProviders
 	}
 
-	r.mu.RLock()
-	available := make([]string, 0, len(r.providers))
-	tools := make(map[string][]string)
-	for name, p := range r.providers {
-		available = append(available, name)
-		if t := p.Tools(); len(t) > 0 {
-			tools[name] = t
-		}
+	available, tools := r.dynamicProviderCandidates()
+	if len(available) <= 1 {
+		return fallbackProviders
 	}
-	r.mu.RUnlock()
 
-	prompt := fmt.Sprintf(`Select the top 3-4 academic search providers from the list below that are most relevant to this research query.
+	prompt := appendSearchStructuredOutputInstruction(fmt.Sprintf(`Select the top 3-4 academic search providers from the list below that are most relevant to this research query.
 Query: %s
 Available Providers: %v
 Specialised Tools: %v
 
-Return a JSON array of strings containing only the provider names.`, query, available, tools)
+Return only provider names from the available list.`, query, available, tools))
 
-	resp, err := llmClient.Generate(ctx, &llmv1.GenerateRequest{
-		Prompt: prompt,
-		Model:  llm.ResolveStandardModel(),
-	})
+	resp, err := llmClient.StructuredOutput(ctx, applySearchStandardStructuredPolicy(&llmv1.StructuredRequest{
+		Prompt:     prompt,
+		Model:      llm.ResolveStandardModel(),
+		JsonSchema: `{"type":"array","items":{"type":"string"},"maxItems":4}`,
+	}))
 	if err != nil {
-		return r.ProvidersFor("general")
+		return fallbackProviders
 	}
 
 	var selectedNames []string
-	if err := json.Unmarshal([]byte(resp.Text), &selectedNames); err != nil {
-		// Try to extract from text if not pure JSON
-		for _, name := range available {
-			if strings.Contains(strings.ToLower(resp.Text), strings.ToLower(name)) {
-				selectedNames = append(selectedNames, name)
-			}
-		}
+	if err := json.Unmarshal([]byte(resp.JsonResult), &selectedNames); err != nil {
+		return fallbackProviders
 	}
 
 	if len(selectedNames) == 0 {
-		return r.ProvidersFor("general")
+		return fallbackProviders
 	}
 
 	r.mu.RLock()
@@ -331,7 +565,7 @@ Return a JSON array of strings containing only the provider names.`, query, avai
 		}
 	}
 	if len(out) == 0 {
-		return r.ProvidersFor("general")
+		return fallbackProviders
 	}
 	return out
 }
@@ -340,21 +574,113 @@ Return a JSON array of strings containing only the provider names.`, query, avai
 // Parallel orchestrator
 // ============================================================
 
-// SharedHTTPClient is the connection-pooled client used by all providers.
-var SharedHTTPClient = &http.Client{
-	Transport: &http.Transport{
-		MaxIdleConns:        500,
-		MaxIdleConnsPerHost: 50,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 5 * time.Second,
-	},
-	Timeout: 12 * time.Second,
+// StreamParallelSearch is a version of ParallelSearch that streams results through a channel
+// as they arrive from individual providers.
+func StreamParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, opts SearchOpts) <-chan ProviderResult {
+	out := make(chan ProviderResult)
+
+	go func() {
+		defer close(out)
+
+		providers := reg.ProvidersFor(opts.Domain)
+		if len(providers) == 0 {
+			providers = reg.All()
+		}
+
+		// Global backpressure
+		if reg.globalSem != nil {
+			gCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			if err := reg.globalSem.Acquire(gCtx, 1); err != nil {
+				cancel()
+				out <- ProviderResult{Provider: "system", Err: fmt.Errorf("system busy")}
+				return
+			}
+			cancel()
+			defer reg.globalSem.Release(1)
+		}
+
+		if ctx.Err() != nil {
+			return
+		}
+
+		var wg sync.WaitGroup
+		for _, p := range providers {
+			wg.Add(1)
+			go func(prov SearchProvider) {
+				defer wg.Done()
+
+				t0 := time.Now()
+
+				reg.mu.RLock()
+				breaker := reg.breakers[prov.Name()]
+				reg.mu.RUnlock()
+
+				var papers []Paper
+				var err error
+
+				if breaker != nil {
+					err = breaker.Call(ctx, func(innerCtx context.Context) error {
+						var innerErr error
+						papers, innerErr = prov.Search(innerCtx, query, opts)
+						return innerErr
+					})
+				} else {
+					papers, err = prov.Search(ctx, query, opts)
+				}
+
+				select {
+				case out <- ProviderResult{
+					Provider:  prov.Name(),
+					Papers:    papers,
+					LatencyMs: time.Since(t0).Milliseconds(),
+					Err:       err,
+				}:
+				case <-ctx.Done():
+				}
+			}(p)
+		}
+		wg.Wait()
+	}()
+
+	return out
 }
 
 // ParallelSearch fans out to all providers appropriate for the domain,
 // collects results concurrently, fuses them with RRF, and returns a
 // single deduplicated ranked list.
 func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, opts SearchOpts) SearchResult {
+	// Guard: reject empty queries before any provider dispatch. This prevents
+	// accidental fan-outs with empty strings that consume API quota on every
+	// registered provider. The wisdev.ParallelSearch wrapper has its own guard,
+	// but direct callers of this lower-level function also need protection.
+	if strings.TrimSpace(query) == "" {
+		return SearchResult{
+			Papers:    []Paper{},
+			Providers: map[string]int{},
+			Warnings: []ProviderWarning{{
+				Provider: "system",
+				Message:  "query is required",
+			}},
+		}
+	}
+	if reg == nil {
+		return SearchResult{
+			Papers:    []Paper{},
+			Providers: map[string]int{},
+			Warnings: []ProviderWarning{{
+				Provider: "system",
+				Message:  "search registry is not initialized",
+			}},
+		}
+	}
+
+	ctx, span := telemetry.StartSpan(ctx, "ParallelSearch",
+		attribute.String("query", query),
+		attribute.String("domain", opts.Domain),
+		attribute.Int("limit", opts.Limit),
+	)
+	defer span.End()
+
 	started := time.Now()
 	limit := opts.Limit
 	if limit <= 0 {
@@ -370,12 +696,26 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 	}
 
 	var providers []SearchProvider
-	if opts.DynamicProviders && opts.LLMClient != nil {
+	var warnings []ProviderWarning
+	if opts.DynamicProviders && opts.LLMClient != nil && reg.dynamicProviderSelectionReady() {
 		providers = reg.SelectProvidersDynamic(ctx, opts.LLMClient, query)
+	} else if len(opts.Sources) > 0 {
+		providers, warnings = reg.ResolveRequestedProviders(opts.Sources)
+	} else if reg.router != nil {
+		providers = reg.router.Route(ctx, query, opts.Domain)
 	} else {
 		providers = reg.ProvidersFor(opts.Domain)
 		if len(providers) == 0 {
 			providers = reg.All()
+		}
+	}
+
+	if len(providers) == 0 {
+		return SearchResult{
+			Papers:    []Paper{},
+			Providers: map[string]int{},
+			LatencyMs: time.Since(started).Milliseconds(),
+			Warnings:  warnings,
 		}
 	}
 
@@ -398,6 +738,18 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 
 	// Fan-out
 	results := make(chan ProviderResult, len(providers))
+	if ctx.Err() != nil {
+		return SearchResult{
+			Papers:    []Paper{},
+			Providers: map[string]int{},
+			LatencyMs: time.Since(started).Milliseconds(),
+			Warnings: []ProviderWarning{{
+				Provider: "system",
+				Message:  "query context canceled",
+			}},
+		}
+	}
+
 	for _, p := range providers {
 		breaker := reg.breakers[p.Name()]
 
@@ -405,7 +757,7 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 		sem := reg.semaphores[p.Name()]
 		reg.mu.RUnlock()
 
-		if breaker != nil && !breaker.Allow() {
+		if breaker != nil && breaker.State() == resilience.StateOpen {
 			results <- ProviderResult{
 				Provider: p.Name(),
 				Err:      fmt.Errorf("circuit breaker open"),
@@ -413,13 +765,19 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 			continue
 		}
 
-		go func(prov SearchProvider, cb *CircuitBreaker, s *semaphore.Weighted) {
+		go func(prov SearchProvider, cb *resilience.CircuitBreaker, s *semaphore.Weighted) {
+			pctx, pspan := telemetry.StartSpan(ctx, "ProviderSearch:"+prov.Name(),
+				attribute.String("provider", prov.Name()),
+			)
+			defer pspan.End()
+
 			// Acquire provider-specific semaphore with timeout
-			acquireCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			acquireCtx, cancel := context.WithTimeout(pctx, 5*time.Second)
 			defer cancel()
 
 			if s != nil {
 				if err := s.Acquire(acquireCtx, 1); err != nil {
+					pspan.RecordError(err)
 					results <- ProviderResult{
 						Provider: prov.Name(),
 						Err:      fmt.Errorf("concurrency limit reached: %w", err),
@@ -430,20 +788,42 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 			}
 
 			t0 := time.Now()
-			papers, err := prov.Search(ctx, query, opts)
+			var papers []Paper
+			var err error
+
+			if cb != nil {
+				err = cb.Call(pctx, func(c context.Context) error {
+					var innerErr error
+					papers, innerErr = prov.Search(c, query, opts)
+					return innerErr
+				})
+			} else {
+				papers, err = prov.Search(pctx, query, opts)
+			}
+
+			if err != nil {
+				pspan.RecordError(err)
+			}
+			pspan.SetAttributes(attribute.Int("result_count", len(papers)))
 
 			// Update adaptive concurrency
 			reg.AdjustConcurrency(prov.Name(), err)
 
 			telemetry.RecordSearchProviderRequest(prov.Name(), err)
-			if cb != nil {
-				cb.RecordResult(err)
-			}
+
+			latency := time.Since(t0).Milliseconds()
 			results <- ProviderResult{
 				Provider:  prov.Name(),
 				Papers:    papers,
-				LatencyMs: time.Since(t0).Milliseconds(),
+				LatencyMs: latency,
 				Err:       err,
+			}
+
+			// Phase 2: Record search intelligence
+			if reg.intelligence != nil {
+				// Information gain heuristic: log2(1 + count)
+				gain := math.Log2(1.0 + float64(len(papers)))
+				_ = reg.intelligence.RecordSearch(ctx, query, prov.Name(), gain, latency)
 			}
 		}(p, breaker, sem)
 	}
@@ -451,8 +831,6 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 	// Collect
 	var ranked [][]Paper
 	providerCounts := make(map[string]int)
-	var warnings []ProviderWarning
-
 	for range providers {
 		r := <-results
 		if r.Err != nil {
@@ -471,12 +849,28 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 	// Fuse + deduplicate
 	fused := RRFFuse(ranked, 60)
 	deduped := Deduplicate(fused)
-	if len(deduped) > limit {
-		deduped = deduped[:limit]
+
+	// Phase 2: Apply learned provider and click feedback on every request when
+	// intelligence is available. This keeps ranking responsive to live usage
+	// instead of hiding it behind a canary path.
+	if reg.intelligence != nil {
+		providerScores, scoreErr := reg.intelligence.GetProviderScores(ctx)
+		if scoreErr == nil && len(providerScores) > 0 {
+			deduped = BoostByIntelligence(deduped, providerScores)
+		}
+
+		clicks, clickErr := reg.intelligence.GetClickCountsForQuery(ctx, query, 200)
+		if clickErr == nil && len(clicks) > 0 {
+			deduped = BoostByClicks(deduped, clicks)
+		}
 	}
 
 	if opts.QualitySort {
 		ScoreQuality(deduped)
+	}
+
+	if len(deduped) > limit {
+		deduped = deduped[:limit]
 	}
 
 	finalResult := SearchResult{
@@ -495,79 +889,13 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 	return finalResult
 }
 
+func normalizeRequestedProviderName(raw string) string {
+	return NormalizeProviderName(raw)
+}
+
 // ============================================================
 // RRF Fusion — Reciprocal Rank Fusion (k=60)
 // ============================================================
-
-// RRFFuse merges multiple ranked lists using Reciprocal Rank Fusion.
-// k is the RRF constant (default 60 as per the original paper).
-func RRFFuse(lists [][]Paper, k int) []Paper {
-	if k <= 0 {
-		k = 60
-	}
-
-	scores := make(map[string]float64)
-	papers := make(map[string]Paper)
-
-	for _, list := range lists {
-		for rank, paper := range list {
-			key := paperKey(paper)
-			scores[key] += 1.0 / float64(k+rank+1)
-			if _, exists := papers[key]; !exists {
-				if len(paper.SourceApis) == 0 && strings.TrimSpace(paper.Source) != "" {
-					paper.SourceApis = []string{paper.Source}
-				}
-				papers[key] = paper
-			} else {
-				// Merge: preserve the best metadata across providers.
-				existing := papers[key]
-				if paper.CitationCount > existing.CitationCount {
-					existing.CitationCount = paper.CitationCount
-				}
-				if strings.TrimSpace(existing.Abstract) == "" && strings.TrimSpace(paper.Abstract) != "" {
-					existing.Abstract = paper.Abstract
-				}
-				if strings.TrimSpace(existing.Link) == "" && strings.TrimSpace(paper.Link) != "" {
-					existing.Link = paper.Link
-				}
-				if strings.TrimSpace(existing.DOI) == "" && strings.TrimSpace(paper.DOI) != "" {
-					existing.DOI = paper.DOI
-				}
-				if existing.Year == 0 && paper.Year > 0 {
-					existing.Year = paper.Year
-				}
-				if strings.TrimSpace(existing.Venue) == "" && strings.TrimSpace(paper.Venue) != "" {
-					existing.Venue = paper.Venue
-				}
-				existing.SourceApis = mergeProviderList(existing.SourceApis, paper.SourceApis, existing.Source, paper.Source)
-				if len(existing.SourceApis) == 0 && strings.TrimSpace(existing.Source) != "" {
-					existing.SourceApis = []string{existing.Source}
-				}
-				papers[key] = existing
-			}
-		}
-	}
-
-	type scoredPaper struct {
-		paper Paper
-		score float64
-	}
-	result := make([]scoredPaper, 0, len(papers))
-	for key, paper := range papers {
-		paper.Score = scores[key]
-		result = append(result, scoredPaper{paper, scores[key]})
-	}
-
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].score > result[j].score
-	})
-
-	out := make([]Paper, len(result))
-	for i, sp := range result {
-		out[i] = sp.paper
-	}
-	return out
-}
 
 // ============================================================
 // Deduplication
@@ -582,6 +910,61 @@ func Deduplicate(papers []Paper) []Paper {
 		index, exists := seen[key]
 		if exists {
 			out[index].SourceApis = mergeProviderList(out[index].SourceApis, p.SourceApis, out[index].Source, p.Source)
+			if strings.TrimSpace(out[index].Abstract) == "" && strings.TrimSpace(p.Abstract) != "" {
+				out[index].Abstract = p.Abstract
+			}
+			if strings.TrimSpace(out[index].Link) == "" && strings.TrimSpace(p.Link) != "" {
+				out[index].Link = p.Link
+			}
+			if strings.TrimSpace(out[index].DOI) == "" && strings.TrimSpace(p.DOI) != "" {
+				out[index].DOI = p.DOI
+			}
+			if strings.TrimSpace(out[index].ArxivID) == "" && strings.TrimSpace(p.ArxivID) != "" {
+				out[index].ArxivID = p.ArxivID
+			}
+			if strings.TrimSpace(out[index].Source) == "" && strings.TrimSpace(p.Source) != "" {
+				out[index].Source = p.Source
+			}
+			if countNonEmptyStrings(p.Authors) > countNonEmptyStrings(out[index].Authors) {
+				out[index].Authors = append([]string(nil), p.Authors...)
+			}
+			if out[index].Year == 0 && p.Year != 0 {
+				out[index].Year = p.Year
+			}
+			if out[index].Month == 0 && p.Month != 0 {
+				out[index].Month = p.Month
+			}
+			if strings.TrimSpace(out[index].Venue) == "" && strings.TrimSpace(p.Venue) != "" {
+				out[index].Venue = p.Venue
+			}
+			out[index].Keywords = mergeProviderList(out[index].Keywords, p.Keywords)
+			if p.CitationCount > out[index].CitationCount {
+				out[index].CitationCount = p.CitationCount
+			}
+			if p.ReferenceCount > out[index].ReferenceCount {
+				out[index].ReferenceCount = p.ReferenceCount
+			}
+			if p.InfluentialCitationCount > out[index].InfluentialCitationCount {
+				out[index].InfluentialCitationCount = p.InfluentialCitationCount
+			}
+			if strings.TrimSpace(out[index].OpenAccessUrl) == "" && strings.TrimSpace(p.OpenAccessUrl) != "" {
+				out[index].OpenAccessUrl = p.OpenAccessUrl
+			}
+			if strings.TrimSpace(out[index].PdfUrl) == "" && strings.TrimSpace(p.PdfUrl) != "" {
+				out[index].PdfUrl = p.PdfUrl
+			}
+			if p.Score > out[index].Score {
+				out[index].Score = p.Score
+			}
+			if strings.TrimSpace(out[index].EvidenceLevel) == "" && strings.TrimSpace(p.EvidenceLevel) != "" {
+				out[index].EvidenceLevel = p.EvidenceLevel
+			}
+			if strings.TrimSpace(out[index].FullText) == "" && strings.TrimSpace(p.FullText) != "" {
+				out[index].FullText = p.FullText
+			}
+			if len(out[index].StructureMap) == 0 && len(p.StructureMap) > 0 {
+				out[index].StructureMap = append([]any(nil), p.StructureMap...)
+			}
 			continue
 		}
 		if len(p.SourceApis) == 0 && strings.TrimSpace(p.Source) != "" {

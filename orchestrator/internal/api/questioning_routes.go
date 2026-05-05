@@ -222,6 +222,12 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 		if !patchDynamicQuestionOptions(latest, questionID, options, source, explanation, overwrite) {
 			return
 		}
+		previousUpdatedAt := wisdev.IntValue64(latest["updatedAt"])
+		nextUpdatedAt := time.Now().UnixMilli()
+		if nextUpdatedAt <= previousUpdatedAt {
+			nextUpdatedAt = previousUpdatedAt + 1
+		}
+		latest["updatedAt"] = nextUpdatedAt
 		_ = agentGateway.StateStore.PersistAgentSessionMutation(sessionID, userID, latest, wisdev.RuntimeJournalEntry{
 			EventID:   wisdev.NewTraceID(),
 			SessionID: sessionID,

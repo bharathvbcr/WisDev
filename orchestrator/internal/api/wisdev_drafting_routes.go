@@ -87,7 +87,12 @@ func (s *wisdevServer) registerDraftingRoutes(mux *http.ServeMux, agentGateway *
 		if job, err := loadFullPaperJobState(agentGateway, req.DocumentID); err == nil {
 			job["currentStageId"] = "drafting"
 			job["currentStage"] = "drafting"
-			job["updatedAt"] = time.Now().UnixMilli()
+			previousUpdatedAt := wisdev.IntValue64(job["updatedAt"])
+			nextUpdatedAt := time.Now().UnixMilli()
+			if nextUpdatedAt <= previousUpdatedAt {
+				nextUpdatedAt = previousUpdatedAt + 1
+			}
+			job["updatedAt"] = nextUpdatedAt
 			stages := sliceAnyMap(job["stages"])
 			for index, stage := range stages {
 				switch wisdev.AsOptionalString(stage["id"]) {

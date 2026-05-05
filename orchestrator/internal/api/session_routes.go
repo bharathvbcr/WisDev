@@ -150,6 +150,14 @@ func sessionPayloadForResponse(agentGateway *wisdev.AgentGateway, session *wisde
 	return sessionPayload, nil
 }
 
+func newAgentSessionID() string {
+	id := strings.TrimPrefix(strings.TrimSpace(wisdev.NewTraceID()), "trace_")
+	if id == "" || id == "fallback" {
+		id = fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return "ws_" + id
+}
+
 func (s *wisdevServer) registerSessionRoutes(mux *http.ServeMux, agentGateway *wisdev.AgentGateway) {
 	handleWisdevPlan := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -298,7 +306,7 @@ func (s *wisdevServer) registerSessionRoutes(mux *http.ServeMux, agentGateway *w
 		}
 
 		now := time.Now().UnixMilli()
-		sessionID := fmt.Sprintf("ws_%d", time.Now().UnixMilli())
+		sessionID := newAgentSessionID()
 		correctedQuery := strings.TrimSpace(req.CorrectedQuery)
 		if correctedQuery == "" {
 			correctedQuery = originalQuery

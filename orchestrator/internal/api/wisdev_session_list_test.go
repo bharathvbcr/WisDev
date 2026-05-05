@@ -96,6 +96,41 @@ func TestWisDevSessionListRoute(t *testing.T) {
 	})
 }
 
+func TestWisDevSessionInitializeGeneratesDistinctSessionIDs(t *testing.T) {
+	t.Setenv("WISDEV_STATE_DIR", t.TempDir())
+
+	journal := wisdev.NewRuntimeJournal(nil)
+	gw := &wisdev.AgentGateway{
+		Store:        wisdev.NewInMemorySessionStore(),
+		StateStore:   wisdev.NewRuntimeStateStore(nil, journal),
+		Journal:      journal,
+		PolicyConfig: policy.DefaultPolicyConfig(),
+	}
+	mux := http.NewServeMux()
+	RegisterWisDevRoutes(mux, gw, nil, nil)
+
+	seen := map[string]bool{}
+	for i := 0; i < 25; i++ {
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/wisdev/session/initialize",
+			strings.NewReader(`{"userId":"u1","originalQuery":"same millisecond collision test"}`),
+		)
+		req = req.WithContext(context.WithValue(req.Context(), contextKey("user_id"), "u1"))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+		session := mapAny(body["session"])
+		sessionID := wisdev.AsOptionalString(session["sessionId"])
+		require.NotEmpty(t, sessionID)
+		require.False(t, seen[sessionID], "duplicate session ID: %s", sessionID)
+		seen[sessionID] = true
+	}
+}
+
 func TestWisDevSessionListRoute_WithoutStateStore(t *testing.T) {
 	gw := &wisdev.AgentGateway{
 		Store:        wisdev.NewInMemorySessionStore(),

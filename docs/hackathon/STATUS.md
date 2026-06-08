@@ -10,7 +10,7 @@
 
 | Item | Status |
 |------|--------|
-| WisDev OSS repo published | ✅ https://github.com/bharathvbcr/WisDev |
+| WisDev OSS repo published | ✅ https://github.com/bharathvbcr/WisDev (pushed `023c4ff`) |
 | MCP tools rebranded (`wisdev*`) | ✅ |
 | ADK + MCP + YOLO runtime | ✅ |
 | Submission doc package | ✅ `docs/hackathon/*` |
@@ -29,8 +29,8 @@
 | Record demo video | ⬜ | `DEMO_SCRIPT.md` |
 | Upload video (YouTube/Vimeo) | ⬜ | Paste URL in `SUBMISSION.md` |
 | Export architecture diagram | ✅ | `assets/architecture-overview.png` via `npm run ops:hackathon:diagram` |
-| Create judge Firebase account | ⬜ | `npm run ops:hackathon:judge-user` |
-| Fill `JUDGE_ACCESS.md` credentials | ⬜ | |
+| Create judge Firebase account | ✅ | `judge.wisdev2026@scholarlm.dev` |
+| Fill `JUDGE_ACCESS.md` credentials | ✅ | Password in Devpost private field only |
 | Deploy latest ScholarLM frontend | ⬜ | Firebase Hosting / Cloud Run |
 | Run preflight before submit | ⬜ | `npm run ops:hackathon:preflight -- --require-judge-auth` |
 | Submit Devpost | ⬜ | Copy from `SUBMISSION.md` |

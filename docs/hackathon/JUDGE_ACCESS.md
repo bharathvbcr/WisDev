@@ -25,11 +25,11 @@ Paste this into the Devpost **Testing access** field (fill in credentials before
 ### Judge credentials
 
 ```
-Email:    [CREATE — e.g. judge.wisdev2026@yourdomain.com]
-Password: [SET — share via Devpost private notes or password field]
+Email:    judge.wisdev2026@scholarlm.dev
+Password: [Devpost private testing field only — do not commit]
 ```
 
-> **Action required:** Create this Firebase Auth user in the ScholarLM project (`scholarlm-vbcr`) before submitting.
+> **Created** in Firebase Auth (`scholarlm-vbcr`). Store the password in Devpost **Testing access** / private notes only.
 
 From the ScholarLM repo root (requires Application Default Credentials):
 

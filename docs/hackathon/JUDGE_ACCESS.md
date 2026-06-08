@@ -31,6 +31,15 @@ Password: [SET — share via Devpost private notes or password field]
 
 > **Action required:** Create this Firebase Auth user in the ScholarLM project (`scholarlm-vbcr`) before submitting.
 
+From the ScholarLM repo root (requires Application Default Credentials):
+
+```powershell
+$env:HACKATHON_JUDGE_EMAIL = "judge.wisdev2026@yourdomain.com"
+$env:HACKATHON_JUDGE_PASSWORD = "your-secure-password"
+npm run ops:hackathon:judge-user
+npm run ops:hackathon:preflight -- --require-judge-auth
+```
+
 ---
 
 ## Option B — CLI (no login, runs locally)

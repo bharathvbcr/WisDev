@@ -105,9 +105,12 @@ Query → Plan → Search → Analyze → Synthesize → Report
 
 ## Submission checklist
 
+See live tracker: [`STATUS.md`](./STATUS.md)
+
 - [ ] Record demo video (see `DEMO_SCRIPT.md`)
 - [ ] Upload video to YouTube (unlisted) or Vimeo
-- [ ] Export architecture diagram (see `ARCHITECTURE.md`)
-- [ ] Create judge demo account (see `JUDGE_ACCESS.md`)
+- [ ] Export architecture diagram: `npm run ops:hackathon:diagram` (from ScholarLM repo root)
+- [ ] Create judge demo account: `npm run ops:hackathon:judge-user` (see `JUDGE_ACCESS.md`)
+- [ ] Verify stack: `npm run ops:hackathon:preflight -- --require-judge-auth`
 - [ ] Paste video URL into Devpost
 - [ ] Submit before deadline (7:00 PM CDT June 11)

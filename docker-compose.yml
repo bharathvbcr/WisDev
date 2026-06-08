@@ -1,0 +1,38 @@
+services:
+  orchestrator:
+    build:
+      context: ./orchestrator
+    environment:
+      WISDEV_CONFIG: /app/config/wisdev.example.yaml
+      SCHOLAR_MODELS_CONFIG: /scholar_models.json
+      WISDEV_STATE_DIR: /data/state
+      WISDEV_JOURNAL_PATH: /data/wisdev_journal.jsonl
+      PYTHON_SIDECAR_HTTP_URL: http://sidecar:8090
+      PYTHON_SIDECAR_GRPC_ADDR: sidecar:50052
+      TEMPORAL_ENABLED: "false"
+    ports:
+      - "8081:8081"
+      - "50053:50053"
+    volumes:
+      - wisdev-data:/data
+      - ./config:/app/config:ro
+      - ../scholar_models.json:/scholar_models.json:ro
+    depends_on:
+      - sidecar
+
+  sidecar:
+    build:
+      context: ./sidecar
+    environment:
+      SCHOLAR_MODELS_CONFIG: /scholar_models.json
+      WISDEV_LLM_BASE_URL: ${WISDEV_LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+      WISDEV_LLM_MODEL: ${WISDEV_LLM_MODEL:-llama3.1}
+      WISDEV_LLM_API_KEY: ${WISDEV_LLM_API_KEY:-}
+    ports:
+      - "8090:8090"
+      - "50052:50052"
+    volumes:
+      - ../scholar_models.json:/scholar_models.json:ro
+
+volumes:
+  wisdev-data:

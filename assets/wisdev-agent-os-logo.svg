@@ -1,0 +1,56 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">WisDev sharp Trishul logo</title>
+  <desc id="desc">A realistic sharp-edged Trishul-inspired logo with black metal surfaces and red bevel accents.</desc>
+  <defs>
+    <linearGradient id="metal" x1="327" y1="72" x2="678" y2="927" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4A4A4A"/>
+      <stop offset="0.16" stop-color="#141414"/>
+      <stop offset="0.44" stop-color="#020202"/>
+      <stop offset="0.72" stop-color="#242424"/>
+      <stop offset="1" stop-color="#000000"/>
+    </linearGradient>
+    <linearGradient id="redBevel" x1="247" y1="93" x2="745" y2="879" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF6A5D"/>
+      <stop offset="0.3" stop-color="#E50914"/>
+      <stop offset="0.72" stop-color="#8F000B"/>
+      <stop offset="1" stop-color="#310003"/>
+    </linearGradient>
+    <linearGradient id="redEdge" x1="512" y1="72" x2="512" y2="928" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFB5AE"/>
+      <stop offset="0.2" stop-color="#FF251F"/>
+      <stop offset="0.78" stop-color="#850009"/>
+      <stop offset="1" stop-color="#1A0002"/>
+    </linearGradient>
+    <linearGradient id="innerCut" x1="397" y1="190" x2="620" y2="860" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1D1D1D"/>
+      <stop offset="0.48" stop-color="#050505"/>
+      <stop offset="1" stop-color="#000000"/>
+    </linearGradient>
+    <filter id="realShadow" x="120" y="36" width="790" height="948" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="22" dy="30" stdDeviation="18" flood-color="#000000" flood-opacity="0.58"/>
+      <feDropShadow dx="0" dy="0" stdDeviation="5" flood-color="#E50914" flood-opacity="0.2"/>
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" fill="none"/>
+
+  <g filter="url(#realShadow)">
+    <path d="M512 56L565 154L548 500H644L632 389L670 286L773 171L742 336L810 439L918 501L774 539L694 646L650 771L621 606H548L548 912L512 964L476 912L476 606H403L374 771L330 646L250 539L106 501L214 439L282 336L251 171L354 286L392 389L380 500H476L459 154L512 56Z" fill="url(#redEdge)"/>
+
+    <path d="M512 96L546 160L530 524H666L650 393L682 310L742 242L721 348L776 432L850 474L755 499L678 601L636 712L616 574H530V902L512 928L494 902V574H408L388 712L346 601L269 499L174 474L248 432L303 348L282 242L342 310L374 393L358 524H494L478 160L512 96Z" fill="url(#metal)"/>
+
+    <path d="M512 96L546 160L530 524H666L650 393L682 310L742 242L721 348L776 432L850 474L755 499L678 601L636 712L616 574H530V902L512 928L494 902V574H408L388 712L346 601L269 499L174 474L248 432L303 348L282 242L342 310L374 393L358 524H494L478 160L512 96Z" stroke="url(#redBevel)" stroke-width="14" stroke-linejoin="miter"/>
+
+    <path d="M512 135L528 168L516 525H508L496 168L512 135Z" fill="#E50914" fill-opacity="0.86"/>
+    <path d="M530 574H616L624 628L558 604L530 638V574Z" fill="#080808" fill-opacity="0.86"/>
+    <path d="M494 574H408L400 628L466 604L494 638V574Z" fill="#080808" fill-opacity="0.86"/>
+
+    <path d="M650 393L682 310L742 242L721 348L776 432L850 474L755 499L678 601L636 712L616 574H530V524H666L650 393Z" fill="url(#innerCut)" fill-opacity="0.45"/>
+    <path d="M374 393L342 310L282 242L303 348L248 432L174 474L269 499L346 601L388 712L408 574H494V524H358L374 393Z" fill="url(#innerCut)" fill-opacity="0.38"/>
+
+    <path d="M534 161L522 509" stroke="#FF554B" stroke-width="8" stroke-linecap="square" opacity="0.72"/>
+    <path d="M681 314L646 398L662 507" stroke="#FF3A32" stroke-width="7" stroke-linecap="square" opacity="0.58"/>
+    <path d="M343 314L378 398L362 507" stroke="#FF3A32" stroke-width="7" stroke-linecap="square" opacity="0.52"/>
+    <path d="M512 928L512 588" stroke="#5D0006" stroke-width="8" stroke-linecap="square" opacity="0.72"/>
+  </g>
+</svg>

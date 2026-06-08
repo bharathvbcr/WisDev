@@ -1,0 +1,96 @@
+runtime:
+  name: WisDev
+  version: '1.0'
+  # Canonical runtime wrapper: official Google ADK for Go.
+  # Direct WisDev executor calls are fallback-only when this runtime is unavailable.
+  framework: google-adk-go
+  agentId: wisdev-go
+  configMode: yaml
+
+telemetry:
+  openTelemetry: true
+  serviceName: wisdev-orchestrator
+  namespace: wisdev
+
+hitl:
+  enabled: true
+  confirmationWindowMinutes: 10
+  mediumRiskRequiresConfirmation: true
+  highRiskRequiresConfirmation: true
+  allowedActions:
+    - approve
+    - skip
+    - edit_payload
+    - reject_and_replan
+
+a2a:
+  enabled: true
+  protocolVersion: refined
+  exposeAgentCard: true
+
+plugins:
+  # MCP (Model Context Protocol) academic search plugin.
+  # Registered as ADK function-tools via MCPADKBridge; backed by /wisdev/mcp.
+  - name: mcp-academic-search
+    description: MCP-protocol academic search and evidence retrieval tools for WisDev agents.
+    executionTargets:
+      - GO_NATIVE
+    mcp:
+      enabled: true
+      endpoint: /wisdev/mcp
+      protocolVersion: "2024-11-05"
+    tools:
+      - wisdevSearchPapers
+      - wisdevPaperLookup
+      - wisdevEvidenceSearch
+      - wisdevAuthorSearch
+
+  - name: go-native-tools
+    description: Native WisDev Go retrieval, RAG, and orchestration primitives.
+    executionTargets:
+      - GO_NATIVE
+    tools:
+      - research.retrievePapers
+      - research.resolveCanonicalCitations
+      - research.fullPaperRetrieve
+      - research.fullPaperGatewayDispatch
+      - research.verifyReasoningPaths
+      - research.verifyClaimsBatch
+      - research.synthesizeAnswer
+
+  - name: python-capability-tools
+    description: Python-backed WisDev research and synthesis capabilities.
+    executionTargets:
+      - PYTHON_CAPABILITY
+    tools:
+      - research.initializeFlow
+      - research.generateQueries
+      - research.dynamicOptions
+      - research.recommendedAnswers
+      - research.regenerateOptions
+      - research.enhanceQuery
+      - research.queryDecompose
+      - research.proposeHypotheses
+      - research.coordinateReplan
+      - research.generateThoughts
+      - research.buildClaimEvidenceTable
+      - research.detectContradictions
+      - research.graphRagMap
+      - research.systematicReviewPrisma
+      - research.snowballCitations
+      - research.verifyClaims
+      - research.verifyCitations
+      - research.evaluateEvidence
+      - research.finalDraft
+
+  - name: python-sandbox-tools
+    description: High-control sandboxed execution for allowlisted research primitives.
+    executionTargets:
+      - PYTHON_SANDBOX
+    tools:
+      - script.runResearchPrimitive
+
+policy:
+  maxToolCallsPerSession: 24
+  maxScriptRunsPerSession: 2
+  maxCostPerSessionCents: 50

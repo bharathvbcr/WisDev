@@ -1,0 +1,32 @@
+agent:
+  mode: yolo
+  max_steps: 25
+  require_approval: false
+  workspace: "."
+
+llm:
+  provider: openai-compatible
+  model_tier: standard
+  model: "${WISDEV_LLM_MODEL}"
+  api_key_env: WISDEV_LLM_API_KEY
+  base_url: "${WISDEV_LLM_BASE_URL}"
+
+storage:
+  type: local
+  state_dir: "${WISDEV_STATE_DIR}"
+  journal_path: "${WISDEV_JOURNAL_PATH}"
+
+execution:
+  backend: local-journal
+  temporal_enabled: false
+
+sidecar:
+  enabled: true
+  http_url: "${PYTHON_SIDECAR_HTTP_URL}"
+  grpc_addr: "${PYTHON_SIDECAR_GRPC_ADDR}"
+
+observability:
+  structured_logs: true
+  otel_enabled: false
+  redact_prompts: true
+

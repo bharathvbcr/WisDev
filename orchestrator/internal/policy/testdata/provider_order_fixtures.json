@@ -1,0 +1,20 @@
+[
+  {
+    "name": "medical_query_routes_pubmed_first",
+    "query": "clinical trial outcomes for diabetes treatment",
+    "domainHint": "medicine",
+    "expectedFirstProvider": "pubmed"
+  },
+  {
+    "name": "cs_query_routes_semantic_first",
+    "query": "transformer llm retrieval augmentation",
+    "domainHint": "cs",
+    "expectedFirstProvider": "semantic-scholar"
+  },
+  {
+    "name": "general_query_routes_default_semantic_first",
+    "query": "interdisciplinary research methodology",
+    "domainHint": "general",
+    "expectedFirstProvider": "semantic-scholar"
+  }
+]

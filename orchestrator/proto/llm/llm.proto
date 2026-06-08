@@ -1,0 +1,114 @@
+syntax = "proto3";
+
+package llm;
+
+option go_package = "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm;llm";
+
+// Canonical WisDev sidecar contract. The Python sidecar currently owns
+// text generation, structured output, embeddings, and health only.
+service LLMService {
+  rpc Generate(GenerateRequest) returns (GenerateResponse);
+  rpc GenerateStream(GenerateRequest) returns (stream GenerateChunk);
+  rpc StructuredOutput(StructuredRequest) returns (StructuredResponse);
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
+  rpc EmbedBatch(EmbedBatchRequest) returns (EmbedBatchResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message GenerateRequest {
+  string prompt = 1;
+  string system_prompt = 2;
+  string model = 3;
+  float temperature = 4;
+  int32 max_tokens = 5;
+  repeated string stop_sequences = 6;
+  map<string, string> metadata = 7;
+  optional int32 thinking_budget = 8;
+  string service_tier = 9;
+  string retry_profile = 10;
+  string request_class = 11;
+  int32 latency_budget_ms = 12;
+}
+
+message GenerateResponse {
+  string text = 1;
+  string model_used = 2;
+  int32 input_tokens = 3;
+  int32 output_tokens = 4;
+  string finish_reason = 5;
+  int64 latency_ms = 6;
+}
+
+message GenerateChunk {
+  string delta = 1;
+  bool done = 2;
+  string finish_reason = 3;
+}
+
+message StructuredRequest {
+  string prompt = 1;
+  string system_prompt = 2;
+  string json_schema = 3;
+  string model = 4;
+  float temperature = 5;
+  int32 max_tokens = 6;
+  map<string, string> metadata = 7;
+  optional int32 thinking_budget = 8;
+  string service_tier = 9;
+  string retry_profile = 10;
+  string request_class = 11;
+  int32 latency_budget_ms = 12;
+}
+
+message StructuredResponse {
+  string json_result = 1;
+  string model_used = 2;
+  int32 input_tokens = 3;
+  int32 output_tokens = 4;
+  bool schema_valid = 5;
+  string error = 6;
+  int64 latency_ms = 7;
+}
+
+message EmbedRequest {
+  string text = 1;
+  string model = 2;
+  string task_type = 3;
+  map<string, string> metadata = 4;
+  int32 latency_budget_ms = 5;
+}
+
+message EmbedResponse {
+  repeated float embedding = 1;
+  int32 token_count = 2;
+  string model_used = 3;
+  int64 latency_ms = 4;
+}
+
+message EmbedBatchRequest {
+  repeated string texts = 1;
+  string model = 2;
+  string task_type = 3;
+  map<string, string> metadata = 4;
+  int32 latency_budget_ms = 5;
+}
+
+message EmbedBatchResponse {
+  repeated EmbedVector embeddings = 1;
+  string model_used = 2;
+  int64 latency_ms = 3;
+}
+
+message EmbedVector {
+  repeated float values = 1;
+  int32 token_count = 2;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ok = 1;
+  string version = 2;
+  repeated string models_available = 3;
+  string error = 4;
+}

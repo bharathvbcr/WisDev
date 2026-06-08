@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WisDev Artifact Schema",
+  "description": "Canonical schema for WisDev artifacts shared across Go and Python",
+  "version": "artifacts-v1",
+  "definitions": {
+    "CanonicalCitation": {
+      "type": "object",
+      "properties": {
+        "id": { "type": ["string", "null"] },
+        "title": { "type": "string" },
+        "doi": { "type": ["string", "null"] },
+        "arxivId": { "type": ["string", "null"] },
+        "canonicalId": { "type": ["string", "null"] },
+        "authors": { "type": "array", "items": { "type": "string" } },
+        "year": { "type": ["integer", "null"] },
+        "resolved": { "type": "boolean" },
+        "verified": { "type": "boolean" },
+        "verificationStatus": { "type": ["string", "null"] },
+        "sourceAuthority": { "type": ["string", "null"] },
+        "resolutionEngine": { "type": ["string", "null"] },
+        "resolverAgreementCount": { "type": ["integer", "null"] },
+        "resolverConflict": { "type": "boolean" },
+        "conflictNote": { "type": ["string", "null"] },
+        "landingUrl": { "type": ["string", "null"] },
+        "semanticScholarId": { "type": ["string", "null"] },
+        "openAlexId": { "type": ["string", "null"] },
+        "provenanceHash": { "type": ["string", "null"] }
+      },
+      "required": ["title"]
+    },
+    "PaperArtifactBundle": {
+      "type": "object",
+      "properties": {
+        "papers": { "type": "array", "items": { "$ref": "#/definitions/CanonicalCitation" } },
+        "retrievalStrategies": { "type": "array", "items": { "type": "string" } },
+        "retrievalTrace": { "type": "array", "items": { "type": "object" } },
+        "queryUsed": { "type": ["string", "null"] },
+        "traceId": { "type": ["string", "null"] }
+      }
+    },
+    "CitationArtifactBundle": {
+      "type": "object",
+      "properties": {
+        "citations": { "type": "array", "items": { "$ref": "#/definitions/CanonicalCitation" } },
+        "canonicalSources": { "type": "array", "items": { "$ref": "#/definitions/CanonicalCitation" } },
+        "verifiedRecords": { "type": "array", "items": { "$ref": "#/definitions/CanonicalCitation" } },
+        "resolvedCount": { "type": "integer" },
+        "validCount": { "type": "integer" },
+        "invalidCount": { "type": "integer" },
+        "duplicateCount": { "type": "integer" }
+      }
+    },
+    "CitationTrustBundle": {
+      "type": "object",
+      "properties": {
+        "citations": { "type": "array", "items": { "$ref": "#/definitions/CanonicalCitation" } },
+        "verifiedCount": { "type": "integer" },
+        "ambiguousCount": { "type": "integer" },
+        "rejectedCount": { "type": "integer" },
+        "resolverTrace": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "promotionEligible": { "type": "boolean" },
+        "blockingIssues": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "ReasoningBranch": {
+      "type": "object",
+      "properties": {
+        "claim": { "type": "string" },
+        "falsifiabilityCondition": { "type": "string" },
+        "supportScore": { "type": "number" },
+        "isTerminated": { "type": "boolean" },
+        "source": { "type": ["string", "null"] }
+      }
+    },
+    "ReasoningVerification": {
+      "type": "object",
+      "properties": {
+        "totalBranches": { "type": "integer" },
+        "verifiedBranches": { "type": "integer" },
+        "rejectedBranches": { "type": "integer" },
+        "readyForSynthesis": { "type": "boolean" }
+      }
+    },
+    "ReasoningArtifactBundle": {
+      "type": "object",
+      "properties": {
+        "branches": { "type": "array", "items": { "$ref": "#/definitions/ReasoningBranch" } },
+        "verification": { "$ref": "#/definitions/ReasoningVerification" },
+        "minimumReasoningPaths": { "type": "integer" }
+      }
+    },
+    "ClaimEvidenceArtifact": {
+      "type": "object",
+      "properties": {
+        "table": { "type": "string" },
+        "rowCount": { "type": "integer" }
+      },
+      "required": ["table"]
+    }
+  },
+  "type": "object",
+  "properties": {
+    "action": { "type": "string" },
+    "schemaVersion": { "type": "string" },
+    "paperBundle": { "$ref": "#/definitions/PaperArtifactBundle" },
+    "citationBundle": { "$ref": "#/definitions/CitationArtifactBundle" },
+    "citationTrustBundle": { "$ref": "#/definitions/CitationTrustBundle" },
+    "reasoningBundle": { "$ref": "#/definitions/ReasoningArtifactBundle" },
+    "claimEvidenceArtifact": { "$ref": "#/definitions/ClaimEvidenceArtifact" },
+    "artifacts": { "type": "object", "additionalProperties": true }
+  }
+}

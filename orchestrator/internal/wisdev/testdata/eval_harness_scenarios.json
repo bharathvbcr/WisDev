@@ -1,0 +1,331 @@
+{
+  "questioning": [
+    {
+      "name": "medicine_complex_query_expands_sequence",
+      "query": "systematic review of longitudinal oncology trial reproducibility and causal biomarkers",
+      "domain": "medicine",
+      "expectedSequence": ["q1_domain", "q2_scope", "q3_timeframe", "q4_subtopics", "q5_study_types", "q6_exclusions", "q7_evidence_quality"],
+      "expectedMinQuestions": 7,
+      "expectedMaxQuestions": 7
+    },
+    {
+      "name": "short_general_query_stays_minimal",
+      "query": "llm benchmarks",
+      "domain": "cs",
+      "expectedSequence": ["q1_domain", "q2_scope", "q3_timeframe", "q4_subtopics", "q5_study_types", "q6_exclusions"],
+      "expectedMinQuestions": 6,
+      "expectedMaxQuestions": 6
+    }
+  ],
+  "webFilter": [
+    {
+      "name": "academic_filter_prefers_canonical_sources",
+      "query": "meta-analysis paper on oncology outcomes",
+      "policy": {
+        "allowedDomains": ["arxiv.org", "example.com"],
+        "blockedDomains": [],
+        "freshnessDays": 3650,
+        "minSignalScore": 0.0,
+        "maxResults": 5,
+        "intent": "academic",
+        "requireCanonicalCitationSignals": true
+      },
+      "results": [
+        {
+          "title": "Blog recap",
+          "link": "https://example.com/post",
+          "snippet": "oncology outcomes overview",
+          "displayLink": "example.com"
+        },
+        {
+          "title": "ArXiv paper",
+          "link": "https://arxiv.org/abs/1234",
+          "snippet": "doi 10.1000/example",
+          "displayLink": "arxiv.org"
+        }
+      ],
+      "expectedCount": 2,
+      "expectedFirstLink": "https://example.com/post"
+    }
+  ],
+  "deepAgents": [
+    {
+      "name": "guided_policy_requires_confirmation",
+      "mode": "guided",
+      "expectedRequireHumanConfirmation": true,
+      "expectedExcludedActions": ["research.synthesizeAnswer"]
+    },
+    {
+      "name": "yolo_policy_allows_full_allowlist",
+      "mode": "yolo",
+      "expectedRequireHumanConfirmation": false,
+      "expectedIncludedActions": ["research.synthesizeAnswer"]
+    }
+  ],
+  "researchQuality": [
+    {
+      "name": "open_ledger_reopens_followups_and_penalizes_weak_citations",
+      "query": "oncology biomarker reproducibility",
+      "ledger": [
+        {
+          "id": "rq_cov",
+          "category": "coverage",
+          "status": "open",
+          "title": "Need longitudinal validation",
+          "description": "longitudinal cohort biomarker validation",
+          "supportingQueries": ["oncology biomarker longitudinal cohort validation"],
+          "sourceFamilies": ["pubmed"],
+          "confidence": 0.62
+        },
+        {
+          "id": "rq_contra",
+          "category": "contradiction",
+          "status": "open",
+          "title": "Resolve contradiction",
+          "description": "studies disagree on reproducibility across cohorts",
+          "supportingQueries": ["oncology biomarker reproducibility conflicting cohort results"],
+          "sourceFamilies": ["pubmed", "crossref"],
+          "confidence": 0.59
+        },
+        {
+          "id": "rq_diversity",
+          "category": "source_diversity",
+          "status": "open",
+          "title": "Missing systematic review evidence",
+          "description": "The loop still needs stronger systematic review evidence.",
+          "supportingQueries": ["oncology biomarker systematic review reproducibility"],
+          "sourceFamilies": ["pubmed"],
+          "confidence": 0.60
+        }
+      ],
+      "findings": [
+        {
+          "claim": "Biomarker X remained reproducible across two cohorts.",
+          "source_id": "doi:10.1000/example",
+          "paperTitle": "Cohort Validation Study",
+          "snippet": "Biomarker X remained reproducible across two independent cohorts.",
+          "confidence": 0.91
+        },
+        {
+          "claim": "Biomarker Y showed inconsistent replication.",
+          "source_id": "",
+          "paperTitle": "Conflicting Follow-up",
+          "snippet": "",
+          "confidence": 0.42
+        }
+      ],
+      "expectedFollowUps": [
+        "oncology biomarker longitudinal cohort validation",
+        "oncology biomarker reproducibility conflicting cohort results",
+        "oncology biomarker systematic review reproducibility"
+      ],
+      "expectedOpenCount": 3,
+      "expectedCoverageRecall": 1.0,
+      "expectedContradictionCount": 1,
+      "expectedCitationIntegrity": 0.5,
+      "expectedVerifierVerdict": "abstain",
+      "expectedPromotedClaims": 0,
+      "expectedRejectedClaims": 2,
+      "expectedAnswerStatus": "rejected",
+      "expectedObligationTypes": [
+        "missing_replication",
+        "missing_counter_evidence",
+        "missing_source_diversity"
+      ],
+      "expectedOwnerWorkers": [
+        "contradiction_critic",
+        "source_diversifier"
+      ],
+      "expectedDurableTaskOps": [
+        "branch_expansion",
+        "verifier_pass"
+      ]
+    },
+    {
+      "name": "resolved_ledger_closes_followups_with_grounded_citations",
+      "query": "foundation model benchmark survey",
+      "ledger": [
+        {
+          "id": "rq_resolved",
+          "category": "coverage",
+          "status": "resolved",
+          "title": "Coverage satisfied",
+          "description": "Coverage breadth and grounding passed the default checks.",
+          "sourceFamilies": ["arxiv", "openalex"],
+          "confidence": 0.9
+        }
+      ],
+      "findings": [
+        {
+          "claim": "The survey covers 42 benchmark families.",
+          "source_id": "arxiv:1234.5678",
+          "paperTitle": "Benchmark Survey",
+          "snippet": "We review 42 benchmark families across language, vision, and multimodal tasks.",
+          "confidence": 0.88
+        }
+      ],
+      "expectedFollowUps": [],
+      "expectedOpenCount": 0,
+      "expectedCoverageRecall": 1.0,
+      "expectedContradictionCount": 0,
+      "expectedCitationIntegrity": 1.0
+    },
+    {
+      "name": "verifier_promotes_multi_source_claims",
+      "query": "sleep memory replication",
+      "ledger": [
+        {
+          "id": "rq_verified",
+          "category": "claim_evidence",
+          "status": "resolved",
+          "title": "Claim evidence triangulated",
+          "description": "Two independent source families support the claim.",
+          "sourceFamilies": ["pubmed", "openalex"],
+          "confidence": 0.91
+        }
+      ],
+      "findings": [
+        {
+          "claim": "Sleep improves memory consolidation.",
+          "keywords": ["pubmed"],
+          "source_id": "doi:10.1000/sleep-a",
+          "paperTitle": "Sleep Cohort",
+          "snippet": "Sleep improved delayed recall in a cohort.",
+          "confidence": 0.88
+        },
+        {
+          "claim": "Sleep improves memory consolidation.",
+          "keywords": ["openalex"],
+          "source_id": "doi:10.1000/sleep-b",
+          "paperTitle": "Sleep Replication",
+          "snippet": "An independent replication found improved recall after sleep.",
+          "confidence": 0.84
+        }
+      ],
+      "expectedFollowUps": [],
+      "expectedOpenCount": 0,
+      "expectedCoverageRecall": 1.0,
+      "expectedContradictionCount": 0,
+      "expectedCitationIntegrity": 1.0,
+      "expectedVerifierVerdict": "promote",
+      "expectedPromotedClaims": 1,
+      "expectedRejectedClaims": 0,
+      "expectedAnswerStatus": "verified",
+      "expectedObligationTypes": [
+        "missing_source_diversity"
+      ],
+      "expectedOwnerWorkers": [
+        "source_diversifier"
+      ],
+      "expectedDurableTaskOps": [
+        "branch_expansion",
+        "verifier_pass"
+      ]
+    },
+    {
+      "name": "deep_budget_exhaustion_stale_sources_and_citation_conflict",
+      "query": "older biomarker trial evidence conflict",
+      "plane": "deep",
+      "ledger": [
+        {
+          "id": "rq_budget",
+          "category": "budget",
+          "status": "open",
+          "title": "Budget exhausted before contradiction recovery",
+          "description": "The research loop exhausted the search budget while contradiction and stale-source recovery gaps remained.",
+          "supportingQueries": ["older biomarker trial replication contradiction"],
+          "sourceFamilies": ["pubmed"],
+          "confidence": 0.55
+        },
+        {
+          "id": "rq_citation_conflict",
+          "category": "citation_metadata_conflict",
+          "status": "open",
+          "title": "Citation metadata conflict",
+          "description": "The same source identifier resolves to conflicting title metadata.",
+          "sourceFamilies": ["pubmed", "crossref"],
+          "confidence": 0.52
+        }
+      ],
+      "findings": [
+        {
+          "claim": "Older trial evidence supports Biomarker Z.",
+          "source_id": "doi:10.1000/older-biomarker",
+          "paperTitle": "Older Biomarker Trial",
+          "snippet": "Biomarker Z was associated with the primary endpoint.",
+          "confidence": 0.64
+        }
+      ],
+      "papers": [
+        {
+          "id": "doi:10.1000/older-biomarker",
+          "title": "Older Biomarker Trial",
+          "abstract": "Older biomarker evidence.",
+          "doi": "10.1000/older-biomarker",
+          "source": "pubmed",
+          "year": 2011
+        }
+      ],
+      "expectedFollowUps": [
+        "older biomarker trial replication contradiction"
+      ],
+      "expectedOpenCount": 2,
+      "expectedCoverageRecall": 1.0,
+      "expectedContradictionCount": 0,
+      "expectedCitationIntegrity": 1.0,
+      "expectedDurableRequired": true,
+      "expectedAnswerStatus": "budget_exhausted",
+      "expectedObligationTypes": [
+        "missing_counter_evidence",
+        "missing_citation_identity"
+      ],
+      "expectedOwnerWorkers": [
+        "contradiction_critic",
+        "citation_graph"
+      ],
+      "expectedDurableTaskOps": [
+        "worker_task",
+        "search_batch",
+        "branch_expansion",
+        "citation_graph_step"
+      ],
+      "expectedBudgetExhausted": true,
+      "expectedStaleSourceCount": 1,
+      "expectedCitationConflicts": 1,
+      "expectedAcquisitionAttempts": 1
+    },
+    {
+      "name": "source_acquisition_tracks_pdf_worker_and_fetch_failure",
+      "query": "transformer interpretability replication",
+      "plane": "autonomous",
+      "ledger": [],
+      "findings": [],
+      "papers": [
+        {
+          "id": "arxiv:2401.12345",
+          "title": "Transformer Interpretability Replication",
+          "abstract": "Replication evidence.",
+          "arxivId": "2401.12345",
+          "source": "arxiv",
+          "pdfUrl": "https://arxiv.org/pdf/2401.12345.pdf",
+          "year": 2024
+        },
+        {
+          "title": "Unresolvable Workshop Abstract",
+          "abstract": "No durable identifier or fetch URL.",
+          "source": "workshop",
+          "year": 2025
+        }
+      ],
+      "expectedFollowUps": [],
+      "expectedOpenCount": 0,
+      "expectedCoverageRecall": 1.0,
+      "expectedContradictionCount": 0,
+      "expectedCitationIntegrity": 0.0,
+      "expectedDurableRequired": false,
+      "expectedAcquisitionAttempts": 3,
+      "expectedAcquisitionFailures": 1,
+      "expectedPythonPdfExtractions": 1
+    }
+  ]
+}

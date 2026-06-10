@@ -215,16 +215,16 @@ func TestAutonomousLoopRunReCritiquesRevisedDraftAfterCritiqueRetrieval(t *testi
 			if strings.Contains(strings.ToLower(query), "intervention") {
 				return []search.Paper{{
 					ID:       "p-intervention",
-					Title:    "Intervention Follow Up",
-					Abstract: "A randomized intervention study resolves the draft critique.",
+					Title:    "Sleep memory intervention follow up",
+					Abstract: "A randomized sleep and memory intervention study resolves the draft critique.",
 					Source:   "pubmed",
 					Score:    0.92,
 				}}, nil
 			}
 			return []search.Paper{{
 				ID:       "p-base",
-				Title:    "Base Evidence",
-				Abstract: "Initial observational evidence for the research question.",
+				Title:    "Sleep and memory evidence",
+				Abstract: "Initial observational evidence links sleep quality to memory performance.",
 				Source:   "openalex",
 				Score:    0.82,
 			}}, nil
@@ -242,12 +242,12 @@ func TestAutonomousLoopRunReCritiquesRevisedDraftAfterCritiqueRetrieval(t *testi
 	msc.On("Generate", mock.Anything, mock.MatchedBy(func(req *llmv1.GenerateRequest) bool {
 		return strings.Contains(req.Prompt, "Synthesize a comprehensive research report")
 	})).Return(&llmv1.GenerateResponse{Text: "Initial draft"}, nil).Once()
-	msc.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
-		return strings.Contains(req.Prompt, "Critique the following research draft")
-	})).Return(&llmv1.StructuredResponse{JsonResult: `{"needsRevision": true, "reasoning": "Initial critique requires intervention evidence.", "nextQueries": ["sleep memory intervention study"], "missingAspects": ["intervention evidence"], "confidence": 0.41}`}, nil).Once()
 	msc.On("Generate", mock.Anything, mock.MatchedBy(func(req *llmv1.GenerateRequest) bool {
 		return strings.Contains(req.Prompt, "Synthesize a comprehensive research report")
 	})).Return(&llmv1.GenerateResponse{Text: "Revised draft"}, nil).Once()
+	msc.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
+		return strings.Contains(req.Prompt, "Critique the following research draft")
+	})).Return(&llmv1.StructuredResponse{JsonResult: `{"needsRevision": true, "reasoning": "Initial critique requires intervention evidence.", "nextQueries": ["sleep memory intervention study"], "missingAspects": ["intervention evidence"], "confidence": 0.41}`}, nil).Once()
 	msc.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
 		return strings.Contains(req.Prompt, "Critique the following research draft")
 	})).Return(&llmv1.StructuredResponse{JsonResult: `{"needsRevision": false, "reasoning": "Post retrieval review passes after intervention evidence.", "confidence": 0.89}`}, nil).Once()
@@ -267,7 +267,7 @@ func TestAutonomousLoopRunReCritiquesRevisedDraftAfterCritiqueRetrieval(t *testi
 	if result == nil || result.DraftCritique == nil {
 		t.Fatalf("expected final draft critique, got %#v", result)
 	}
-	if result.FinalAnswer != "Revised draft" {
+	if !strings.Contains(result.FinalAnswer, "Revised draft") {
 		t.Fatalf("expected revised draft answer, got %q", result.FinalAnswer)
 	}
 	if result.DraftCritique.NeedsRevision {

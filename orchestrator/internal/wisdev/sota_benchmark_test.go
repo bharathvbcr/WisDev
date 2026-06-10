@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/rag"
@@ -82,6 +83,10 @@ func TestBenchmark_SOTARubricPenalizesMissingCitationsAndInjection(t *testing.T)
 }
 
 func TestBenchmark_LiveLoopSmoke(t *testing.T) {
+	preparedQueryCache = sync.Map{}
+	originalGlobalLLM := GlobalLLMClient
+	GlobalLLMClient = nil
+	defer func() { GlobalLLMClient = originalGlobalLLM }()
 	prompt := BenchmarkPrompt{Query: "retrieval augmented generation hallucination reduction", ExpectedGaps: []string{"citation precision", "abstention"}}
 	reg := search.NewProviderRegistry()
 	reg.Register(&mockSearchProvider{

@@ -3,6 +3,7 @@ package wisdev
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -75,6 +76,37 @@ func wisdevRecoverableStructuredContext(ctx context.Context) (context.Context, c
 		ctx = context.Background()
 	}
 	return context.WithTimeout(ctx, wisdevRecoverableStructuredTimeout)
+}
+
+func wisdevStructuredOutputCanUseDeterministicFallback(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if !strings.Contains(message, "structured output") {
+		return false
+	}
+	return strings.Contains(message, "not valid json") ||
+		strings.Contains(message, "invalid json") ||
+		strings.Contains(message, "returned empty text") ||
+		strings.Contains(message, "no structured candidates returned")
+}
+
+func wisdevStructuredOutputCanUseTimeoutFallback(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "deadline exceeded") ||
+		strings.Contains(message, "deadline_exceeded") ||
+		strings.Contains(message, "deadline expired") ||
+		strings.Contains(message, "context deadline") ||
+		strings.Contains(message, "gateway timeout") ||
+		strings.Contains(message, "timed out") ||
+		strings.Contains(message, "timeout")
 }
 
 func normalizeWisdevGeneratedText(operation string, resp *llmv1.GenerateResponse) (string, error) {

@@ -1,18 +1,10 @@
 package wisdev
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
-
-func TestS14NgramVariations(t *testing.T) {
-	query := "machine learning for healthcare"
-	words := strings.Fields(query)
-	vars := s14NgramVariations(words)
-	assert.NotEmpty(t, vars)
-}
 
 func TestAggressiveExpansion_Empty(t *testing.T) {
 	resp := GenerateAggressiveExpansion(nil, "", 10, false, false, false, nil)

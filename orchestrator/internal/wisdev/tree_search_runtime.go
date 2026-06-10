@@ -126,7 +126,7 @@ func (rt *TreeSearchRuntime) attachInitialExploration(branch *ResearchBranch, re
 		finding := EvidenceFinding{
 			ID:         stableWisDevID("treefinding", res.Hypothesis.ID, paper.ID),
 			Claim:      paper.Title,
-			Snippet:    paper.Abstract,
+			Snippet:    evidenceTextFromPaper(paper),
 			PaperTitle: paper.Title,
 			SourceID:   paper.ID,
 			Confidence: calculateInitialConfidence(paper),

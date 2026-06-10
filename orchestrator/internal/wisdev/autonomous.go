@@ -28,7 +28,11 @@ type AutonomousLoop struct {
 	hypothesisExplorer *HypothesisExplorer
 }
 
-const optionalCritiqueRefinementLatencyBudget = 8 * time.Second
+const optionalCritiqueRefinementLatencyBudget = 15 * time.Second
+
+// assembleDossierMaxConcurrentExtractions bounds the per-paper LLM evidence
+// extraction fan-out in assembleDossier.
+const assembleDossierMaxConcurrentExtractions = 3
 
 func NewAutonomousLoop(reg *search.ProviderRegistry, llm *llm.Client) *AutonomousLoop {
 	var brainCaps *BrainCapabilities
@@ -57,6 +61,8 @@ func NewAutonomousLoop(reg *search.ProviderRegistry, llm *llm.Client) *Autonomou
 
 type LoopRequest struct {
 	Query                          string                    `json:"query"`
+	OriginalQuery                  string                    `json:"originalQuery,omitempty"`
+	DisableQueryEnhance            bool                      `json:"disableQueryEnhance,omitempty"`
 	SeedQueries                    []string                  `json:"seedQueries,omitempty"`
 	InitialPapers                  []search.Paper            `json:"initialPapers,omitempty"`
 	InitialQueryCoverage           map[string][]search.Paper `json:"initialQueryCoverage,omitempty"`
@@ -66,6 +72,7 @@ type LoopRequest struct {
 	Domain                         string                    `json:"domain"`
 	ProjectID                      string                    `json:"projectId"`
 	MaxIterations                  int                       `json:"maxIterations"`
+	MinIterations                  int                       `json:"minIterations,omitempty"`
 	MaxSearchTerms                 int                       `json:"maxSearchTerms,omitempty"`
 	BudgetCents                    int                       `json:"budgetCents"`
 	HitsPerSearch                  int                       `json:"hitsPerSearch,omitempty"`
@@ -103,6 +110,7 @@ type LoopResult struct {
 	DraftCritique    *LoopDraftCritique        `json:"draftCritique,omitempty"`
 	FinalizationGate *ResearchFinalizationGate `json:"finalizationGate,omitempty"`
 	StopReason       string                    `json:"stopReason,omitempty"`
+	SynthesisMode    string                    `json:"synthesisMode,omitempty"`
 	ReasoningGraph   *ReasoningGraph           `json:"reasoningGraph,omitempty"`
 	MemoryTiers      *MemoryTierState          `json:"memoryTiers,omitempty"`
 	WorkerReports    []ResearchWorkerState     `json:"workerReports,omitempty"`
@@ -153,8 +161,50 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 	if l == nil || l.searchReg == nil {
 		return nil, fmt.Errorf("autonomous loop: search registry is not initialized")
 	}
+	var emit func(PlanExecutionEvent)
+	if len(onEvent) > 0 {
+		emit = onEvent[0]
+	}
+	if emit != nil {
+		ctx = WithLoopProgress(ctx, &LoopProgressEmitter{Emit: emit, Req: req})
+	}
+	loopLLMClient := GlobalLLMClient
+	if l.llmClient != nil {
+		loopLLMClient = l.llmClient
+	}
+	researchQuery, originalQuery, queryPrep := resolveLoopResearchQuery(ctx, loopLLMClient, req)
+	if strings.TrimSpace(req.OriginalQuery) == "" {
+		req.OriginalQuery = originalQuery
+	}
+	req.Query = researchQuery
+	if queryPrep.Changed && researchQuery != originalQuery {
+		slog.Info("Query grammar corrected for autonomous loop",
+			"component", "wisdev.autonomous",
+			"operation", "run",
+			"stage", "query_prepared",
+			"original_query", originalQuery,
+			"corrected_query", researchQuery,
+		)
+		EmitLoopStage(ctx, "query_prepared", fmt.Sprintf("Query corrected: %s → %s", QueryPreview(originalQuery), QueryPreview(researchQuery)), map[string]any{
+			"original_query":  originalQuery,
+			"corrected_query": researchQuery,
+		})
+	}
 	plannedQueries := buildAutonomousResearchAgendaQueries(req.Query, req.Domain, req.Mode, req.ResearchPlane, req.SeedQueries)
 	initialAgendaQueries := append([]string(nil), plannedQueries...)
+	// Cross-session domain learning: when this domain has historically
+	// underperformed, widen retrieval up front instead of rediscovering the
+	// shortfall mid-run.
+	if historical := GlobalDomainOutcomes.HistoricalReward(req.Domain); historical < 0.45 {
+		if req.HitsPerSearch > 0 {
+			req.HitsPerSearch = minInt(req.HitsPerSearch+2, req.HitsPerSearch*2)
+		}
+		slog.Info("Domain warm start: widening retrieval for historically weak domain",
+			"component", "wisdev.domain_learning",
+			"domain", req.Domain,
+			"historicalReward", historical,
+			"hitsPerSearch", req.HitsPerSearch)
+	}
 	slog.Info("Starting autonomous research loop",
 		"component", "wisdev.autonomous",
 		"operation", "run",
@@ -162,6 +212,7 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 		"trace_id", strings.TrimSpace(req.TraceID),
 		"session_id", strings.TrimSpace(req.ProjectID),
 		"query", req.Query,
+		"original_query", req.OriginalQuery,
 		"mode", strings.TrimSpace(req.Mode),
 		"execution_mode", strings.TrimSpace(req.Mode),
 		"research_plane", string(req.ResearchPlane),
@@ -172,35 +223,23 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 		"seedQueryCount", maxInt(len(plannedQueries)-1, 0),
 		"bypass_search_cache", shouldBypassLoopSearchCache(req),
 	)
-	var emit func(PlanExecutionEvent)
-	if len(onEvent) > 0 {
-		emit = onEvent[0]
-	}
 	if emit != nil {
-		emit(PlanExecutionEvent{
-			Type:      EventProgress,
-			TraceID:   strings.TrimSpace(req.TraceID),
-			SessionID: strings.TrimSpace(req.ProjectID),
-			Message:   "autonomous loop started",
-			Payload: map[string]any{
-				"component":         "wisdev.autonomous",
-				"operation":         "research_loop",
-				"stage":             "loop_started",
-				"mode":              strings.TrimSpace(req.Mode),
-				"executionMode":     strings.TrimSpace(req.Mode),
-				"researchPlane":     string(req.ResearchPlane),
-				"maxSearchTerms":    req.MaxSearchTerms,
-				"hitsPerSearch":     req.HitsPerSearch,
-				"maxUniquePapers":   req.MaxUniquePapers,
-				"seedQueryCount":    maxInt(len(plannedQueries)-1, 0),
-				"dynamicProviders":  req.EnableDynamicProviderSelection,
-				"bypassSearchCache": shouldBypassLoopSearchCache(req),
-			},
-			CreatedAt: NowMillis(),
+		emitLoopProgress(emit, req, "loop_started", "autonomous loop started", map[string]any{
+			"mode":              strings.TrimSpace(req.Mode),
+			"executionMode":     strings.TrimSpace(req.Mode),
+			"query":             req.Query,
+			"original_query":    req.OriginalQuery,
+			"maxIterations":     req.MaxIterations,
+			"maxSearchTerms":    req.MaxSearchTerms,
+			"hitsPerSearch":     req.HitsPerSearch,
+			"maxUniquePapers":   req.MaxUniquePapers,
+			"seedQueryCount":    maxInt(len(plannedQueries)-1, 0),
+			"dynamicProviders":  req.EnableDynamicProviderSelection,
+			"bypassSearchCache": shouldBypassLoopSearchCache(req),
 		})
 	}
 
-	papers, _ := appendUniqueSearchPapersWithinBudget(nil, req.InitialPapers, maxInt(req.MaxUniquePapers, 0))
+	papers, _ := admitSearchPapersForQuery(nil, req.Query, req.InitialPapers, maxInt(req.MaxUniquePapers, 0))
 	iterations := 0
 	converged := false
 	executedQueries := normalizeLoopQueries("", req.InitialExecutedQueries)
@@ -256,6 +295,64 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 	var gapAnalysis *LoopGapState
 	var reasoningTrace []ReasoningTraceEntry
 	var completedBranches []ResearchBranch
+	branchPlans := researchBranchPlansFromQueries(req.Query, plannedQueries)
+	reasoningTrace = append(reasoningTrace, ReasoningTraceEntry{
+		Timestamp:    NowMillis(),
+		Phase:        "planning",
+		Decision:     "cot_plan_summary",
+		Reasoning:    fmt.Sprintf("Structured reasoning summary: decomposed the research goal into %d dependency-aware branch plans before retrieval.", len(branchPlans)),
+		Alternatives: researchBranchPlanQueries(branchPlans),
+	})
+
+	if shouldSeedPreRetrievalHypotheses(req) {
+		hypotheses = l.proposeLoopHypotheses(ctx, req.Query, plannedQueries, nil, queryCoverage, 0, req.DisableHypothesisGeneration)
+		hypothesisPlans := researchBranchPlansFromHypotheses(req.Query, hypotheses)
+		if len(hypothesisPlans) > 0 {
+			branchPlans = mergeResearchBranchPlans(req.Query, hypothesisPlans, branchPlans)
+			// Cap hypothesis-probe enqueues to half the search-term budget so the
+			// probes cannot crowd out the user's agenda/topic queries when
+			// MaxSearchTerms is small.
+			hypothesisProbeCap := maxInt(1, searchTermBudget/2)
+			hypothesisProbesEnqueued := 0
+			hypothesisProbesSkipped := 0
+			for planIndex := len(hypothesisPlans) - 1; planIndex >= 0; planIndex-- {
+				retrievalPlan := hypothesisPlans[planIndex].RetrievalPlan
+				for queryIndex := len(retrievalPlan) - 1; queryIndex >= 0; queryIndex-- {
+					if hypothesisProbesEnqueued >= hypothesisProbeCap {
+						hypothesisProbesSkipped++
+						continue
+					}
+					if queuePriorityCandidate(retrievalPlan[queryIndex]) {
+						hypothesisProbesEnqueued++
+					}
+				}
+			}
+			if hypothesisProbesSkipped > 0 {
+				slog.Info("autonomous loop capped hypothesis-probe enqueues to preserve agenda budget",
+					"component", "wisdev.autonomous",
+					"operation", "run",
+					"stage", "hypothesis_probe_budget_capped",
+					"enqueued", hypothesisProbesEnqueued,
+					"skipped", hypothesisProbesSkipped,
+					"cap", hypothesisProbeCap,
+				)
+			}
+			if l.beliefManager != nil {
+				l.beliefManager.BuildBeliefsFromHypotheses(toHypothesisPtrs(hypotheses), nil, nil, req.Query)
+			}
+			reasoningTrace = append(reasoningTrace, ReasoningTraceEntry{
+				Timestamp:    NowMillis(),
+				Phase:        "planning",
+				Decision:     "pre_retrieval_hypotheses",
+				Reasoning:    fmt.Sprintf("Seeded %d hypotheses before first retrieval and planned falsification-aware searches.", len(hypothesisPlans)),
+				Alternatives: researchBranchPlanQueries(hypothesisPlans),
+			})
+			EmitLoopStage(ctx, "pre_retrieval_hypotheses", fmt.Sprintf("Seeded %d falsification-aware hypothesis branches before retrieval", len(hypothesisPlans)), map[string]any{
+				"hypothesisCount": len(hypothesisPlans),
+				"queries":         researchBranchPlanQueries(hypothesisPlans),
+			})
+		}
+	}
 
 	steeringChan := req.SteeringChan
 	if steeringChan == nil {
@@ -299,14 +396,28 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 		})
 
 		if !decision.ShouldContinue {
-			slog.Info("belief-driven continuation stopped loop", "reason", decision.Reason)
-			if decision.Reason == "belief convergence" {
-				converged = true
+			if loopMinimumIterationsMet(req, iterations) {
+				slog.Info("belief-driven continuation stopped loop", "reason", decision.Reason)
+				if decision.Reason == "belief convergence" {
+					converged = true
+				}
+				break
 			}
-			break
+			slog.Info("deferring belief-driven stop until minimum iterations",
+				"component", "wisdev.autonomous",
+				"operation", "run",
+				"reason", decision.Reason,
+				"iterations", iterations,
+				"minIterations", req.MinIterations,
+			)
 		}
 		iterations++
 		remainingTerms := searchTermBudget - len(executedQueries)
+		EmitLoopStage(ctx, "loop_iteration", fmt.Sprintf("Loop iteration %d started", iterations), map[string]any{
+			"iteration":      iterations,
+			"remainingTerms": remainingTerms,
+			"paperCount":     len(papers),
+		})
 
 		// Consume belief-driven query strategy. Feedback queries are rooted in
 		// the original research task so follow-up searches stay comparable with
@@ -435,6 +546,14 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 				completedBranches = append(completedBranches, treeResult.Branches...)
 				reasoningTrace = append(reasoningTrace, treeResult.Trace...)
 				hypotheses = append(hypotheses, treeResult.SpawnedHypotheses...)
+				// Collapse near-duplicate branches so hypotheses iterate instead
+				// of accumulating across loop iterations.
+				hypotheses = MergeSimilarHypotheses(hypotheses)
+				// Keep the belief ledger consistent with the hypothesis ledger:
+				// merged/refuted hypotheses must not leave live beliefs behind.
+				if l.beliefManager != nil {
+					l.beliefManager.RetireBeliefsForInactiveHypotheses(hypotheses)
+				}
 				for _, branch := range treeResult.Branches {
 					for _, query := range branch.ExecutedQueries {
 						plannedQueries = appendUniqueLoopQuery(plannedQueries, query)
@@ -443,7 +562,7 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 				}
 				if treeResult.MergeCandidate != nil {
 					beforeTreeMerge := len(papers)
-					papers, _ = appendUniqueSearchPapersWithinBudget(papers, treeResult.MergeCandidate.Papers, maxUniquePapers)
+					papers, _ = admitSearchPapersForQuery(papers, req.Query, treeResult.MergeCandidate.Papers, maxUniquePapers)
 					newCount += len(papers) - beforeTreeMerge
 				}
 
@@ -459,10 +578,18 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 				// Belief-state convergence fast-path:
 				// If all active beliefs are already high-confidence, skip further iterations.
 				if l.beliefManager != nil && shouldConvergeByBeliefState(l.beliefManager.GetState()) {
-					slog.Info("Belief state convergence: all active beliefs high-confidence, stopping loop early",
-						"iteration", i+1)
-					converged = true
-					break
+					if shouldAllowLoopEarlyStop(req, iterations) {
+						slog.Info("Belief state convergence: all active beliefs high-confidence, stopping loop early",
+							"iteration", i+1)
+						converged = true
+						break
+					}
+					slog.Info("deferring belief convergence stop until minimum iterations",
+						"component", "wisdev.autonomous",
+						"operation", "run",
+						"iterations", iterations,
+						"minIterations", req.MinIterations,
+					)
 				}
 			}
 		}
@@ -472,9 +599,35 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 		if newCount == 0 {
 			batch := nextLoopQueryBatch(&pendingQueries, minInt(currentParallelism, remainingTerms))
 			if len(batch) == 0 {
-				break
+				if !shouldAllowLoopEarlyStop(req, iterations) {
+					if enqueueExhaustiveContinuationQueries(req, &pendingQueries, querySeen, executedQueries) {
+						batch = nextLoopQueryBatch(&pendingQueries, minInt(currentParallelism, remainingTerms))
+						slog.Info("exhaustive mode queued continuation queries",
+							"component", "wisdev.autonomous",
+							"operation", "run",
+							"iterations", iterations,
+							"minIterations", req.MinIterations,
+							"batchSize", len(batch),
+						)
+					}
+				}
+				if len(batch) == 0 {
+					break
+				}
 			}
 			slog.Info("Loop iteration (Phase 1)", "index", i+1, "queryCount", len(batch), "queries", batch)
+			reasoningTrace = append(reasoningTrace, ReasoningTraceEntry{
+				Timestamp:    NowMillis(),
+				Phase:        "retrieval",
+				Decision:     "react_action_retrieve",
+				Reasoning:    fmt.Sprintf("Action: retrieve evidence for %d queued branch query or queries selected from the DAG frontier.", len(batch)),
+				Alternatives: append([]string(nil), batch...),
+			})
+			EmitLoopStage(ctx, "search_batch_started", fmt.Sprintf("Searching %d queries", len(batch)), map[string]any{
+				"iteration":  iterations,
+				"queryCount": len(batch),
+				"queries":    batch,
+			})
 
 			batchResults := l.executeLoopSearchBatch(ctx, batch, searchOpts, currentParallelism)
 			phase1Findings := make([]EvidenceFinding, 0)
@@ -482,7 +635,7 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 				executedQueries = appendUniqueLoopQuery(executedQueries, batchResult.Query)
 				beforeCount := len(papers)
 				var acceptedPapers []search.Paper
-				papers, acceptedPapers = appendUniqueSearchPapersWithinBudget(papers, batchResult.Result.Papers, maxUniquePapers)
+				papers, acceptedPapers = admitSearchPapersForQuery(papers, req.Query, batchResult.Result.Papers, maxUniquePapers)
 				recordLoopQueryCoverage(queryCoverage, batchResult.Query, acceptedPapers)
 				newCount += len(papers) - beforeCount
 				slog.Info("autonomous loop search result admitted",
@@ -504,11 +657,18 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 					"providers", batchResult.Result.Providers,
 					"warning_count", len(batchResult.Result.Warnings),
 				)
+				EmitLoopStage(ctx, "search_result_admitted", fmt.Sprintf("Admitted %d papers for %s", len(acceptedPapers), QueryPreview(batchResult.Query)), map[string]any{
+					"query_preview":      QueryPreview(batchResult.Query),
+					"accepted_count":     len(acceptedPapers),
+					"new_unique_count":   len(papers) - beforeCount,
+					"total_unique_count": len(papers),
+					"providers":          batchResult.Result.Providers,
+				})
 				for _, p := range acceptedPapers {
 					phase1Findings = append(phase1Findings, EvidenceFinding{
 						ID:         stableWisDevID("p1finding", batchResult.Query, p.ID),
 						Claim:      p.Title,
-						Snippet:    p.Abstract,
+						Snippet:    evidenceTextFromPaper(p),
 						PaperTitle: p.Title,
 						SourceID:   p.ID,
 						Confidence: calculateInitialConfidence(p),
@@ -519,6 +679,12 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 					break
 				}
 			}
+			reasoningTrace = append(reasoningTrace, ReasoningTraceEntry{
+				Timestamp: NowMillis(),
+				Phase:     "retrieval",
+				Decision:  "react_observation_evidence",
+				Reasoning: fmt.Sprintf("Observation: retrieved %d new unique paper(s) and %d provisional evidence finding(s) from %d executed query or queries.", newCount, len(phase1Findings), len(batchResults)),
+			})
 
 			// Belief control plane: update confidence and detect contradictions from Phase 1 evidence.
 			if l.beliefManager != nil && len(phase1Findings) > 0 {
@@ -576,9 +742,18 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 				// Saturation detection runs after belief update so contradictions are handled first.
 				saturation := l.beliefManager.DetectEvidenceSaturation(phase1Findings)
 				if saturation.IsSaturated {
-					slog.Info("Evidence saturation detected, skipping remaining retrieval", "diversity", saturation.DiversityScore)
-					converged = true
-					break
+					if shouldAllowLoopEarlyStop(req, iterations) {
+						slog.Info("Evidence saturation detected, skipping remaining retrieval", "diversity", saturation.DiversityScore)
+						converged = true
+						break
+					}
+					slog.Info("deferring evidence saturation stop until minimum iterations",
+						"component", "wisdev.autonomous",
+						"operation", "run",
+						"iterations", iterations,
+						"minIterations", req.MinIterations,
+						"diversity", saturation.DiversityScore,
+					)
 				} else if saturation.Recommendation == "expand-diversity" {
 					slog.Info("Evidence concentrated, expanding diversity in next queries", "diversity", saturation.DiversityScore)
 					queueCandidate(req.Query + " alternative perspectives")
@@ -603,12 +778,20 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 		// Belief-driven finalization gate: if all active beliefs are high-confidence,
 		// override the sufficiency check outcome rather than burning an LLM call.
 		if l.beliefManager != nil && shouldConvergeByBeliefState(l.beliefManager.GetState()) {
-			slog.Info("Belief finalization gate: skipping LLM sufficiency check — all beliefs converged",
-				"iteration", i+1,
-				"avgConfidence", l.beliefManager.GetAverageConfidence(),
-				"contradictionPressure", l.beliefManager.GetContradictionPressure())
-			converged = true
-			break
+			if shouldAllowLoopEarlyStop(req, iterations) {
+				slog.Info("Belief finalization gate: skipping LLM sufficiency check — all beliefs converged",
+					"iteration", i+1,
+					"avgConfidence", l.beliefManager.GetAverageConfidence(),
+					"contradictionPressure", l.beliefManager.GetContradictionPressure())
+				converged = true
+				break
+			}
+			slog.Info("deferring belief finalization stop until minimum iterations",
+				"component", "wisdev.autonomous",
+				"operation", "run",
+				"iterations", iterations,
+				"minIterations", req.MinIterations,
+			)
 		}
 
 		// 2. Verification & Convergence Check
@@ -620,14 +803,49 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 		var err error
 		if budgetRatio > 0.8 && searchTermBudget > 10 {
 			analysis = heuristicsufficiencyAnalysisWithoutLLM(req.Query, papers)
+			EmitLoopDegraded(ctx, "evaluate_sufficiency", "Search budget nearly exhausted; using heuristic sufficiency", map[string]any{
+				"budgetRatio":      budgetRatio,
+				"searchTermBudget": searchTermBudget,
+				"paperCount":       len(papers),
+			})
 		} else {
 			analysis, err = l.evaluateSufficiency(ctx, req.Query, papers)
 		}
 		if err == nil {
 			lastAnalysis = analysis
-			if analysis.Sufficient || i == maxLoopIterations-1 || paperBudgetReached {
+			reasoningTrace = append(reasoningTrace, ReasoningTraceEntry{
+				Timestamp: NowMillis(),
+				Phase:     "evaluation",
+				Decision:  "react_reflect_sufficiency",
+				Reasoning: fmt.Sprintf("Reflection: sufficiency=%t confidence=%.2f. %s", analysis.Sufficient, analysis.Confidence, strings.TrimSpace(analysis.Reasoning)),
+			})
+			EmitLoopStage(ctx, "sufficiency_evaluated", fmt.Sprintf("Sufficiency confidence=%.2f sufficient=%v", analysis.Confidence, analysis.Sufficient), map[string]any{
+				"confidence":           analysis.Confidence,
+				"sufficient":           analysis.Sufficient,
+				"missing_aspect_count": len(analysis.MissingAspects),
+				"iteration":            iterations,
+			})
+			if i == maxLoopIterations-1 || paperBudgetReached {
 				converged = analysis.Sufficient
 				break
+			}
+			if analysis.Sufficient && loopMinimumIterationsMet(req, iterations) {
+				// Test-time compute on the convergence decision: a borderline
+				// "sufficient" verdict needs a second independent evaluation to
+				// agree before the loop is allowed to stop.
+				if l.confirmBorderlineSufficiency(ctx, req, analysis, papers) {
+					converged = true
+					break
+				}
+				analysis.Sufficient = false
+			}
+			if analysis.Sufficient {
+				slog.Info("deferring sufficiency stop until minimum iterations",
+					"component", "wisdev.autonomous",
+					"operation", "run",
+					"iterations", iterations,
+					"minIterations", req.MinIterations,
+				)
 			}
 
 			// Phase 4: Swarm Interjection (D2)
@@ -682,22 +900,33 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 			}
 
 			// 3. Refine query based on explicit and inferred gaps.
+			// LLM-proposed queries are evidence-conditioned replanning output, so
+			// they are enqueued alongside (not behind) the heuristic gap-ledger
+			// candidates; queueCandidate dedupes across both sources.
 			gapState := buildLoopGapState(plannedQueries, executedQueries, queryCoverage, papers, analysis, false, req.ResearchPlane)
 			enqueued := false
+			for _, candidate := range analysis.NextQueries {
+				if queueCandidate(candidate) {
+					enqueued = true
+				}
+			}
 			for _, candidate := range buildFollowUpQueriesFromLedger(req.Query, gapState.Ledger, 4) {
 				if queueCandidate(candidate) {
 					enqueued = true
 				}
 			}
 			if !enqueued {
-				for _, candidate := range analysis.NextQueries {
+				for _, candidate := range deriveLoopFollowUpQueries(req.Query, analysis, papers) {
 					if queueCandidate(candidate) {
 						enqueued = true
 					}
 				}
 			}
-			if !enqueued {
-				for _, candidate := range deriveLoopFollowUpQueries(req.Query, analysis, papers) {
+			// Mid-loop replanning: when even the heuristic follow-ups produced
+			// nothing, regenerate agenda queries from the gap state instead of
+			// letting the loop starve on the static query pool.
+			if len(pendingQueries) == 0 {
+				for _, candidate := range l.regenerateLoopAgenda(ctx, req, analysis, gapState, papers, executedQueries) {
 					if queueCandidate(candidate) {
 						enqueued = true
 					}
@@ -725,7 +954,15 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 				"missing_aspect_count", len(analysis.MissingAspects),
 				"missing_source_type_count", len(analysis.MissingSourceTypes),
 			)
-			if analysis.Sufficient || paperBudgetReached {
+			EmitLoopDegraded(ctx, "evaluate_sufficiency", "Sufficiency evaluation failed; using heuristic fallback", map[string]any{
+				"error":                     err.Error(),
+				"paperCount":                len(papers),
+				"confidence":                analysis.Confidence,
+				"sufficient":                analysis.Sufficient,
+				"missing_aspect_count":      len(analysis.MissingAspects),
+				"missing_source_type_count": len(analysis.MissingSourceTypes),
+			})
+			if paperBudgetReached || (analysis.Sufficient && loopMinimumIterationsMet(req, iterations)) {
 				slog.Info("autonomous loop stopping after heuristic sufficiency fallback",
 					"component", "wisdev.autonomous",
 					"operation", "research_loop",
@@ -737,8 +974,16 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 					"paper_budget_reached", paperBudgetReached,
 					"sufficient", analysis.Sufficient,
 				)
-				converged = true
+				converged = analysis.Sufficient || paperBudgetReached
 				break
+			}
+			if analysis.Sufficient {
+				slog.Info("deferring heuristic sufficiency stop until minimum iterations",
+					"component", "wisdev.autonomous",
+					"operation", "run",
+					"iterations", iterations,
+					"minIterations", req.MinIterations,
+				)
 			}
 		}
 	}
@@ -779,7 +1024,7 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 	serviceTier := ResolveLoopServiceTier(mode, false, req.ServiceTier)
 	session := &AgentSession{
 		SessionID:      strings.TrimSpace(req.ProjectID),
-		Query:          strings.TrimSpace(req.Query),
+		Query:          strings.TrimSpace(req.OriginalQuery),
 		CorrectedQuery: strings.TrimSpace(req.Query),
 		DetectedDomain: strings.TrimSpace(req.Domain),
 		Mode:           mode,
@@ -809,11 +1054,18 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 		Decision:  "draft",
 		Reasoning: fmt.Sprintf("Synthesizing draft from %d papers and %d evidence items", len(papers), len(evidenceItems)),
 	})
+	EmitLoopStage(ctx, "synthesis_started", fmt.Sprintf("Synthesizing draft from %d papers", len(papers)), map[string]any{
+		"paperCount":    len(papers),
+		"evidenceCount": len(evidenceItems),
+	})
 	structuredAnswer, err := l.synthesizeWithEvidence(ctx, req.Query, papers, evidenceItems)
 	if err != nil {
 		return nil, err
 	}
-	finalAnswer := structuredAnswer.RenderText()
+	finalAnswer := renderStructuredAnswerWithInlineCitations(req.Query, structuredAnswer, papers, evidenceItems, gapAnalysis)
+	if structuredAnswer != nil {
+		structuredAnswer.Text = finalAnswer
+	}
 	critique := l.critiqueDraft(ctx, req.Query, finalAnswer, papers, evidenceItems, gapAnalysis)
 	if critique != nil && critique.NeedsRevision {
 		reasoningTrace = append(reasoningTrace, ReasoningTraceEntry{
@@ -834,6 +1086,11 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 					"retry_after_ms", remaining.Milliseconds(),
 					"candidateCount", len(critiqueCandidates),
 				)
+				EmitLoopDegraded(ctx, "critique_retrieval", "Critique retrieval deferred during cooldown", map[string]any{
+					"retry_after_ms": remaining.Milliseconds(),
+					"candidateCount": len(critiqueCandidates),
+					"fallback":       "defer",
+				})
 			}
 			critiqueCandidates = nil
 		}
@@ -846,12 +1103,25 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 		if limit := resolveCritiqueFollowUpLimit(req.Mode, req.ResearchPlane); len(critiqueCandidates) > limit {
 			critiqueCandidates = critiqueCandidates[:limit]
 		}
+		if critiqueReplans := buildCritiqueReplanBranchPlans(req.Query, critique, critiqueCandidates); len(critiqueReplans) > 0 {
+			branchPlans = mergeResearchBranchPlans(req.Query, critiqueReplans, branchPlans)
+			reasoningTrace = append(reasoningTrace, ReasoningTraceEntry{
+				Timestamp:    NowMillis(),
+				Phase:        "replan",
+				Decision:     "critique_replan",
+				Reasoning:    fmt.Sprintf("Draft critique opened %d targeted retrieval branch(es). %s", len(critiqueReplans), strings.TrimSpace(critique.Reasoning)),
+				Alternatives: researchBranchPlanQueries(critiqueReplans),
+			})
+		}
 		currentSearchLimit := remainingLoopSearchLimit(len(papers), hitsPerSearch, maxUniquePapers)
 		if currentSearchLimit > 0 && len(critiqueCandidates) > 0 {
 			retrievalReopened = true
 		}
 		var batchResults []loopSearchBatchResult
 		if retrievalReopened {
+			EmitLoopStage(ctx, "critique_retrieval_started", fmt.Sprintf("Reopening retrieval for %d critique queries", len(critiqueCandidates)), map[string]any{
+				"candidateCount": len(critiqueCandidates),
+			})
 			batchResults = l.executeLoopSearchBatch(ctx, critiqueCandidates, search.SearchOpts{
 				Limit:            currentSearchLimit,
 				Domain:           req.Domain,
@@ -873,7 +1143,7 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 			)
 			beforeCount := len(papers)
 			var acceptedPapers []search.Paper
-			papers, acceptedPapers = appendUniqueSearchPapersWithinBudget(papers, batchResult.Result.Papers, maxUniquePapers)
+			papers, acceptedPapers = admitSearchPapersForQuery(papers, req.Query, batchResult.Result.Papers, maxUniquePapers)
 			recordLoopQueryCoverage(queryCoverage, candidate, acceptedPapers)
 			if len(papers) > beforeCount {
 				retrievedMore = true
@@ -882,7 +1152,24 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 		critique.RetrievalReopened = retrievalReopened
 		critique.AdditionalEvidenceFound = retrievedMore
 		if retrievedMore {
-			if analysis, err := l.evaluateSufficiency(ctx, req.Query, papers); err == nil {
+			// The post-critique sufficiency evaluation only feeds the converged
+			// flag and gap bookkeeping, while the re-synthesis leg depends only
+			// on papers and the re-assembled evidence. Run both legs
+			// concurrently and join before anything consumes either result —
+			// and before any return path, so the goroutine never leaks.
+			type postCritiqueSufficiencyOutcome struct {
+				analysis *sufficiencyAnalysis
+				err      error
+			}
+			sufficiencyCh := make(chan postCritiqueSufficiencyOutcome, 1)
+			go func() {
+				analysis, err := l.evaluateSufficiency(ctx, req.Query, papers)
+				sufficiencyCh <- postCritiqueSufficiencyOutcome{analysis: analysis, err: err}
+			}()
+			evidenceItems, _ = l.assembleDossier(ctx, req.Query, papers)
+			resynthesizedAnswer, resynthesisErr := l.synthesizeWithEvidence(ctx, req.Query, papers, evidenceItems)
+			sufficiencyOutcome := <-sufficiencyCh
+			if analysis, err := sufficiencyOutcome.analysis, sufficiencyOutcome.err; err == nil {
 				lastAnalysis = analysis
 				converged = analysis.Sufficient
 			} else if ctxErr := ctx.Err(); ctxErr != nil {
@@ -900,23 +1187,31 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 					"confidence", analysis.Confidence,
 					"sufficient", analysis.Sufficient,
 				)
+				EmitLoopDegraded(ctx, "post_critique_sufficiency", "Post-critique sufficiency evaluation failed; using heuristic fallback", map[string]any{
+					"error":      err.Error(),
+					"paperCount": len(papers),
+					"confidence": analysis.Confidence,
+					"sufficient": analysis.Sufficient,
+				})
 				if analysis.Sufficient || (maxUniquePapers > 0 && len(papers) >= maxUniquePapers) {
 					converged = true
 				}
 			}
 			gapAnalysis = buildLoopGapState(plannedQueries, executedQueries, queryCoverage, papers, lastAnalysis, converged, req.ResearchPlane)
-			evidenceItems, _ = l.assembleDossier(ctx, req.Query, papers)
 			findings, hypotheses = l.refreshLoopReasoning(ctx, req, papers, queryCoverage, gapAnalysis, "")
 			gapAnalysis = mergeHypothesisBranchLedger(gapAnalysis, req.Query, hypotheses)
 			if l.beliefManager != nil {
 				session.BeliefState = l.beliefManager.GetState()
 			}
 			UpdateSessionReasoningGraph(session, hypotheses, findings, papers...)
-			structuredAnswer, err = l.synthesizeWithEvidence(ctx, req.Query, papers, evidenceItems)
+			structuredAnswer, err = resynthesizedAnswer, resynthesisErr
 			if err != nil {
 				return nil, err
 			}
-			finalAnswer = structuredAnswer.RenderText()
+			finalAnswer = renderStructuredAnswerWithInlineCitations(req.Query, structuredAnswer, papers, evidenceItems, gapAnalysis)
+			if structuredAnswer != nil {
+				structuredAnswer.Text = finalAnswer
+			}
 			postRetrievalCritique := l.critiqueDraft(ctx, req.Query, finalAnswer, papers, evidenceItems, gapAnalysis)
 			if postRetrievalCritique != nil {
 				critique = mergePostRetrievalDraftCritique(critique, postRetrievalCritique, retrievalReopened, retrievedMore)
@@ -946,10 +1241,22 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 	gapAnalysis = mergeDraftCritiqueIntoGapState(gapAnalysis, critique, req.Query)
 
 	if emit != nil {
+		emitLoopProgress(emit, req, "loop_completed", "autonomous loop completed", map[string]any{
+			"iterations":  iterations,
+			"paperCount":  len(papers),
+			"converged":   converged,
+			"executedQueries": len(executedQueries),
+		})
 		emit(PlanExecutionEvent{
 			Type:      EventCompleted,
 			SessionID: strings.TrimSpace(req.ProjectID),
 			Message:   "autonomous loop completed",
+			Payload: map[string]any{
+				"stage":       "loop_completed",
+				"iterations":  iterations,
+				"paperCount":  len(papers),
+				"converged":   converged,
+			},
 			CreatedAt: NowMillis(),
 		})
 	}
@@ -966,6 +1273,8 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 	}
 
 	stopReason := determineAutonomousStopReason(&LoopResult{GapAnalysis: gapAnalysis, Converged: converged, Papers: papers})
+	// Fold this run's outcome into the domain history for future warm starts.
+	GlobalDomainOutcomes.Record(ctx, req.Domain, gapAnalysis.Confidence, len(papers))
 	reasoningTrace = append(reasoningTrace, ReasoningTraceEntry{
 		Timestamp: NowMillis(),
 		Phase:     "finalization",
@@ -973,16 +1282,21 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 		Reasoning: stopReason,
 	})
 
+	finalAnswer = renderStructuredAnswerWithInlineCitations(req.Query, structuredAnswer, papers, evidenceItems, gapAnalysis)
+	if structuredAnswer != nil {
+		structuredAnswer.Text = finalAnswer
+	}
+
 	return &LoopResult{
 		FinalAnswer:      finalAnswer,
 		StructuredAnswer: structuredAnswer,
-		Papers:           papers,
+		Papers:           search.SortPapersByPreferenceWithQuery(papers, req.Query),
 		Evidence:         findings,
 		Branches:         completedBranches,
 		Hypotheses:       hypotheses,
 		Iterations:       iterations,
 		Converged:        converged,
-		BranchPlans:      researchBranchPlansFromQueries(req.Query, plannedQueries),
+		BranchPlans:      applyResearchBranchPlanExecutionStatus(mergeResearchBranchPlans(req.Query, branchPlans, researchBranchPlansFromQueries(req.Query, plannedQueries)), executedQueries, queryCoverage),
 		ExecutedQueries:  executedQueries,
 		QueryCoverage:    queryCoverage,
 		GapAnalysis:      gapAnalysis,
@@ -994,6 +1308,7 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 		BeliefState:      beliefState, // R2: Include belief state
 		ReasoningTrace:   reasoningTrace,
 		StopReason:       stopReason,
+		SynthesisMode:    detectSynthesisMode(finalAnswer),
 	}, nil
 }
 
@@ -1124,6 +1439,58 @@ func remainingLoopSearchLimit(currentUniqueCount int, hitsPerSearch int, maxUniq
 		return remaining
 	}
 	return hitsPerSearch
+}
+
+func loopMinimumIterationsMet(req LoopRequest, completedIterations int) bool {
+	min := req.MinIterations
+	if min <= 0 {
+		return true
+	}
+	return completedIterations >= min
+}
+
+func loopExhaustiveMode(req LoopRequest) bool {
+	return req.MinIterations > 0 && req.MaxIterations > 0 && req.MinIterations >= req.MaxIterations
+}
+
+func shouldAllowLoopEarlyStop(req LoopRequest, completedIterations int) bool {
+	return loopMinimumIterationsMet(req, completedIterations)
+}
+
+func enqueueExhaustiveContinuationQueries(req LoopRequest, pending *[]string, seen map[string]struct{}, executed []string) bool {
+	if !loopExhaustiveMode(req) {
+		return false
+	}
+	clauses := queryTopicClauses(req.Query)
+	candidates := []string{
+		req.Query + " systematic review",
+		req.Query + " randomized controlled trial",
+		req.Query + " meta-analysis outcomes",
+		req.Query + " recent advances",
+		req.Query + " clinical outcomes long-term follow-up",
+	}
+	for _, clause := range clauses {
+		if strings.TrimSpace(clause) == "" {
+			continue
+		}
+		candidates = append(candidates,
+			clause+" systematic review",
+			clause+" clinical trial",
+		)
+	}
+	for _, seed := range req.SeedQueries {
+		candidates = append(candidates, seed)
+	}
+	for _, query := range executed {
+		candidates = append(candidates, query+" corroborating evidence")
+	}
+	queued := false
+	for _, candidate := range candidates {
+		if enqueueLoopQuery(pending, seen, candidate) {
+			queued = true
+		}
+	}
+	return queued
 }
 
 func resolveLoopSearchTermBudget(maxIterations int, maxSearchTerms int) int {
@@ -1396,6 +1763,12 @@ func (l *AutonomousLoop) executeLoopSearchBatch(ctx context.Context, queries []s
 		"skip_cache", opts.SkipCache,
 	)
 	slog.Info("wisdev search batch started", batchLogAttrs...)
+	EmitLoopStage(ctx, "search_batch_started", fmt.Sprintf("Provider batch started (%d queries)", len(queries)), map[string]any{
+		"query_count": len(queries),
+		"parallelism": parallelism,
+		"limit":       opts.Limit,
+		"domain":      opts.Domain,
+	})
 	results := make([]loopSearchBatchResult, len(queries))
 	sem := make(chan struct{}, parallelism)
 	var wg sync.WaitGroup
@@ -1410,7 +1783,8 @@ func (l *AutonomousLoop) executeLoopSearchBatch(ctx context.Context, queries []s
 				results[idx] = loopSearchBatchResult{Query: query}
 				return
 			}
-			result, err := retrieveCanonicalSearchResult(ctx, l.searchReg, query, opts)
+			searchQuery := prepareSearchQueryText(query)
+			result, err := retrieveCanonicalSearchResult(ctx, l.searchReg, searchQuery, opts)
 			if err != nil {
 				result.Warnings = append(result.Warnings, search.ProviderWarning{
 					Provider: "wisdev_core_mcp_tool",
@@ -1437,6 +1811,13 @@ func (l *AutonomousLoop) executeLoopSearchBatch(ctx context.Context, queries []s
 				"warning_count", len(result.Warnings),
 			)
 			slog.Info("wisdev search query completed", queryLogAttrs...)
+			EmitLoopStage(ctx, "query_completed", fmt.Sprintf("Query completed: %s (%d papers)", QueryPreview(query), len(result.Papers)), map[string]any{
+				"query_preview":      QueryPreview(query),
+				"final_count":        len(result.Papers),
+				"warning_count":      len(result.Warnings),
+				"latency_ms":         result.LatencyMs,
+				"provider_result_counts": result.Providers,
+			})
 			results[idx] = loopSearchBatchResult{Query: query, Result: result}
 		}(idx, query)
 	}
@@ -1490,7 +1871,7 @@ func (l *AutonomousLoop) advanceBranchSession(ctx context.Context, branch *Resea
 			finding := EvidenceFinding{
 				ID:         stableWisDevID("branchfinding", branch.ID, result.Query, paper.ID),
 				Claim:      paper.Title,
-				Snippet:    paper.Abstract,
+				Snippet:    evidenceTextFromPaper(paper),
 				PaperTitle: paper.Title,
 				SourceID:   paper.ID,
 				Confidence: calculateInitialConfidence(paper),
@@ -1611,7 +1992,7 @@ func (l *AutonomousLoop) closeRecursiveCoverageGaps(
 		for _, batchResult := range batchResults {
 			result.ExecutedQueries = appendUniqueLoopQuery(result.ExecutedQueries, batchResult.Query)
 			var acceptedPapers []search.Paper
-			result.Papers, acceptedPapers = appendUniqueSearchPapersWithinBudget(result.Papers, batchResult.Result.Papers, maxUniquePapers)
+			result.Papers, acceptedPapers = admitSearchPapersForQuery(result.Papers, req.Query, batchResult.Result.Papers, maxUniquePapers)
 			recordLoopQueryCoverage(result.QueryCoverage, batchResult.Query, acceptedPapers)
 		}
 		analysis, err := l.evaluateSufficiency(ctx, req.Query, result.Papers)
@@ -1633,6 +2014,12 @@ func (l *AutonomousLoop) closeRecursiveCoverageGaps(
 				"confidence", analysis.Confidence,
 				"sufficient", analysis.Sufficient,
 			)
+			EmitLoopDegraded(ctx, "recursive_gap_sufficiency", "Recursive gap sufficiency evaluation failed; using heuristic fallback", map[string]any{
+				"error":      err.Error(),
+				"paperCount": len(result.Papers),
+				"confidence": analysis.Confidence,
+				"sufficient": analysis.Sufficient,
+			})
 			if analysis.Sufficient || (maxUniquePapers > 0 && len(result.Papers) >= maxUniquePapers) {
 				result.Converged = true
 			}
@@ -1663,9 +2050,13 @@ func emitLoopProgress(emit func(PlanExecutionEvent), req LoopRequest, stage stri
 	payload["operation"] = "research_loop"
 	payload["stage"] = strings.TrimSpace(stage)
 	payload["researchPlane"] = strings.TrimSpace(string(req.ResearchPlane))
+	traceID := strings.TrimSpace(req.TraceID)
+	if traceID == "" {
+		traceID = NewTraceID()
+	}
 	emit(PlanExecutionEvent{
 		Type:            EventProgress,
-		TraceID:         NewTraceID(),
+		TraceID:         traceID,
 		SessionID:       strings.TrimSpace(req.ProjectID),
 		Message:         strings.TrimSpace(message),
 		Payload:         payload,
@@ -1734,7 +2125,7 @@ func normalizeLoopQueries(primary string, seeds []string) []string {
 	queries := make([]string, 0, len(seeds)+1)
 	seen := make(map[string]struct{}, len(seeds)+1)
 	for _, query := range append([]string{primary}, seeds...) {
-		trimmed := strings.TrimSpace(query)
+		trimmed := prepareSearchQueryText(query)
 		if trimmed == "" {
 			continue
 		}
@@ -1761,6 +2152,7 @@ func cloneMemoryTierState(tiers *MemoryTierState) *MemoryTierState {
 }
 
 func buildAutonomousResearchAgendaQueries(primary string, domain string, mode string, plane ResearchExecutionPlane, seeds []string) []string {
+	primary = prepareSearchQueryText(primary)
 	queries := normalizeLoopQueries(primary, seeds)
 	root := strings.TrimSpace(primary)
 	if root == "" {
@@ -1771,18 +2163,12 @@ func buildAutonomousResearchAgendaQueries(primary string, domain string, mode st
 		return queries
 	}
 
-	foci := []string{
-		"mechanism evidence map",
-		"systematic review meta analysis",
-		"replication benchmark",
-		"limitations contradictory evidence",
-		"citation graph source identity",
+	for _, focused := range BuildTopicFocusedQueries(root) {
+		queries = appendUniqueLoopQuery(queries, focused)
 	}
-	if trimmedDomain := strings.TrimSpace(domain); trimmedDomain != "" {
-		foci = append(foci, trimmedDomain+" primary evidence")
-	}
-	for _, focus := range foci {
-		queries = appendUniqueLoopQuery(queries, buildResearchWorkerQuery(root, focus))
+
+	for _, focus := range lookupAgendaQueries(root) {
+		queries = appendUniqueLoopQuery(queries, normalizeAgendaFocus(root, focus))
 	}
 	return queries
 }
@@ -1819,6 +2205,13 @@ func shouldBootstrapLoopHypotheses(req LoopRequest, hypotheses []Hypothesis, fin
 		return false
 	}
 	return shouldEnableBeliefFeedback(req, initialAgendaQueries, executedQueries)
+}
+
+func shouldSeedPreRetrievalHypotheses(req LoopRequest) bool {
+	if req.DisableHypothesisGeneration {
+		return false
+	}
+	return NormalizeWisDevMode(req.Mode) == WisDevModeYOLO
 }
 
 func shouldEnableBeliefFeedback(req LoopRequest, initialAgendaQueries []string, executedQueries []string) bool {
@@ -2079,6 +2472,11 @@ func (l *AutonomousLoop) proposeLoopHypotheses(ctx context.Context, primary stri
 				"query", strings.TrimSpace(primary),
 				"retry_after_ms", remaining.Milliseconds(),
 			)
+			EmitLoopDegraded(ctx, "propose_hypotheses", "Hypothesis proposal skipped during cooldown; using query fallback", map[string]any{
+				"query":          strings.TrimSpace(primary),
+				"retry_after_ms": remaining.Milliseconds(),
+				"fallback":       "query",
+			})
 		}
 		return buildAutonomousFallbackHypotheses(primary, seeds, findings, querySourceIndex, totalConfidence)
 	}
@@ -2104,6 +2502,11 @@ func (l *AutonomousLoop) buildCapabilityHypotheses(ctx context.Context, primary 
 				"query", query,
 				"error", fmt.Sprint(recovered),
 			)
+			EmitLoopDegraded(ctx, "propose_hypotheses", "Hypothesis proposal panicked; using query fallback", map[string]any{
+				"query":    query,
+				"error":    fmt.Sprint(recovered),
+				"fallback": "query",
+			})
 			hypotheses = nil
 		}
 	}()
@@ -2116,6 +2519,11 @@ func (l *AutonomousLoop) buildCapabilityHypotheses(ctx context.Context, primary 
 			"query", query,
 			"error", err.Error(),
 		)
+		EmitLoopDegraded(ctx, "propose_hypotheses", "Hypothesis proposal failed; using query fallback", map[string]any{
+			"query":    query,
+			"error":    err.Error(),
+			"fallback": "query",
+		})
 		return nil
 	}
 
@@ -2450,23 +2858,14 @@ func ReWeightEvidenceConfidence(findings []EvidenceFinding) []EvidenceFinding {
 			specificity = 1.0
 		}
 
-		recencyBoost := 0.0
-		if findings[i].Year > 0 {
-			recencyBoost = float64(findings[i].Year-2015) * 0.02
-			if recencyBoost < 0 {
-				recencyBoost = 0
-			}
-			if recencyBoost > 0.15 {
-				recencyBoost = 0.15
-			}
-		}
+		recencyBoost := search.RecencyNorm(findings[i].Year)
 
 		diversityPenalty := 0.0
 		if sourceIndex[sid] > 3 {
 			diversityPenalty = float64(sourceIndex[sid]-3) * 0.05
 		}
 
-		score := original*0.7 + specificity*0.15 + recencyBoost*0.15 - diversityPenalty
+		score := original*0.55 + specificity*0.10 + recencyBoost*0.30 - diversityPenalty
 		if score < 0 {
 			score = 0
 		}
@@ -2497,31 +2896,74 @@ func (l *AutonomousLoop) assembleDossier(ctx context.Context, query string, pape
 		topPapers = topPapers[:5]
 	}
 
-	evidence := make([]EvidenceItem, 0)
-
-	for _, p := range topPapers {
-		heuristicItems := buildEvidenceItemsFromPaper(p, 3)
-		heuristicItems = SanitizeEvidenceItemsForLLM(heuristicItems, "assembleDossier.heuristic")
-		if l.llmClient == nil {
+	// LLM unavailable: every paper degrades to heuristic extraction, in order.
+	if l.llmClient == nil {
+		evidence := make([]EvidenceItem, 0)
+		for _, p := range topPapers {
+			heuristicItems := buildEvidenceItemsFromPaper(p, 3)
+			heuristicItems = SanitizeEvidenceItemsForLLM(heuristicItems, "assembleDossier.heuristic")
 			evidence = append(evidence, heuristicItems...)
-			continue
 		}
-		if remaining := autonomousLLMCooldownRemaining(l); remaining > 0 {
-			if shouldLogWisDevCooldownFallback("wisdev.autonomous.assembleDossier", time.Now()) {
-				slog.Warn("assembleDossier: LLM extraction skipped during provider cooldown; using heuristic extraction",
-					"component", "wisdev.autonomous",
-					"operation", "assembleDossier",
-					"retry_after_ms", remaining.Milliseconds(),
-					"paperCount", len(topPapers),
-				)
-			}
-			for _, fallbackPaper := range topPapers {
-				evidence = append(evidence, SanitizeEvidenceItemsForLLM(buildEvidenceItemsFromPaper(fallbackPaper, 3), "assembleDossier.heuristic")...)
-			}
-			return evidence, nil
-		}
+		return evidence, nil
+	}
 
-		prompt := appendWisdevStructuredOutputInstruction(fmt.Sprintf(`Extract the top 2-3 most important factual claims from the following paper that directly address the research query.
+	// Cooldown pre-check runs once before the fan-out so the heuristic
+	// fallback path stays identical to the historical sequential behavior.
+	if remaining := autonomousLLMCooldownRemaining(l); remaining > 0 {
+		if shouldLogWisDevCooldownFallback("wisdev.autonomous.assembleDossier", time.Now()) {
+			slog.Warn("assembleDossier: LLM extraction skipped during provider cooldown; using heuristic extraction",
+				"component", "wisdev.autonomous",
+				"operation", "assembleDossier",
+				"retry_after_ms", remaining.Milliseconds(),
+				"paperCount", len(topPapers),
+			)
+			EmitLoopDegraded(ctx, "assemble_dossier", "Evidence extraction skipped during cooldown; using heuristic extraction", map[string]any{
+				"retry_after_ms": remaining.Milliseconds(),
+				"paperCount":     len(topPapers),
+			})
+		}
+		evidence := make([]EvidenceItem, 0)
+		for _, fallbackPaper := range topPapers {
+			evidence = append(evidence, SanitizeEvidenceItemsForLLM(buildEvidenceItemsFromPaper(fallbackPaper, 3), "assembleDossier.heuristic")...)
+		}
+		return evidence, nil
+	}
+
+	// Bounded fan-out: one LLM extraction per paper with at most
+	// assembleDossierMaxConcurrentExtractions in flight. Results are collected
+	// into an index-addressed slice so the flattened evidence ordering is
+	// identical to the historical sequential per-paper loop.
+	perPaper := make([][]EvidenceItem, len(topPapers))
+	extractionSlots := make(chan struct{}, assembleDossierMaxConcurrentExtractions)
+	var wg sync.WaitGroup
+	for idx := range topPapers {
+		wg.Add(1)
+		go func(slot int, paper search.Paper) {
+			defer wg.Done()
+			extractionSlots <- struct{}{}
+			defer func() { <-extractionSlots }()
+			perPaper[slot] = l.extractDossierEvidenceForPaper(ctx, query, paper)
+		}(idx, topPapers[idx])
+	}
+	wg.Wait()
+
+	evidence := make([]EvidenceItem, 0)
+	for _, items := range perPaper {
+		evidence = append(evidence, items...)
+	}
+	return evidence, nil
+}
+
+// extractDossierEvidenceForPaper performs the per-paper LLM evidence
+// extraction for assembleDossier, preserving the sequential loop's fallback
+// semantics: any transport error, JSON parse failure, or empty extraction
+// degrades to the paper's heuristic extraction, and unsafe extracted items
+// are dropped.
+func (l *AutonomousLoop) extractDossierEvidenceForPaper(ctx context.Context, query string, p search.Paper) []EvidenceItem {
+	heuristicItems := buildEvidenceItemsFromPaper(p, 3)
+	heuristicItems = SanitizeEvidenceItemsForLLM(heuristicItems, "assembleDossier.heuristic")
+
+	prompt := appendWisdevStructuredOutputInstruction(fmt.Sprintf(`Extract the top 2-3 most important factual claims from the following paper that directly address the research query.
 Query: %s
 Paper Title: %s
 Abstract: %s
@@ -2529,70 +2971,67 @@ Abstract: %s
 Each item must include claim, snippet, and confidence between 0 and 1.
 `, query, p.Title, p.Abstract))
 
-		reqCtx, cancel := wisdevRecoverableStructuredContext(ctx)
-		resp, err := l.llmClient.StructuredOutput(reqCtx, applyWisdevRecoverableStructuredPolicy(&llmv1.StructuredRequest{
-			Prompt:     prompt,
-			Model:      llm.ResolveStandardModel(),
-			JsonSchema: `{"type":"array","items":{"type":"object","required":["claim","snippet","confidence"],"properties":{"claim":{"type":"string"},"snippet":{"type":"string"},"confidence":{"type":"number"}}}}`,
-		}))
-		cancel()
-		if err != nil {
-			slog.Warn("assembleDossier: LLM extraction failed for paper",
-				"component", "wisdev.autonomous",
-				"operation", "assembleDossier",
-				"paper_id", p.ID,
-				"paper_title_preview", func() string {
-					if len(p.Title) > 60 {
-						return p.Title[:60]
-					}
-					return p.Title
-				}(),
-				"error", err.Error(),
-			)
-			evidence = append(evidence, heuristicItems...)
-			continue
-		}
-
-		var items []struct {
-			Claim      string  `json:"claim"`
-			Snippet    string  `json:"snippet"`
-			Confidence float64 `json:"confidence"`
-		}
-		if err := json.Unmarshal([]byte(resp.JsonResult), &items); err != nil {
-			slog.Warn("assembleDossier: JSON parse failed for paper extraction — skipping paper",
-				"component", "wisdev.autonomous",
-				"operation", "assembleDossier",
-				"paper_id", p.ID,
-				"error", err.Error(),
-			)
-			evidence = append(evidence, heuristicItems...)
-			continue
-		}
-		if len(items) == 0 {
-			evidence = append(evidence, heuristicItems...)
-			continue
-		}
-		for _, item := range items {
-			if safe, reason := IsSafeRetrievedLLMInput(item.Claim, item.Snippet); !safe {
-				slog.Warn("assembleDossier: dropping extracted evidence due to suspicious content",
-					"component", "wisdev.autonomous",
-					"operation", "assembleDossier",
-					"paper_id", p.ID,
-					"reason", reason,
-				)
-				continue
-			}
-			evidence = append(evidence, EvidenceItem{
-				Claim:      item.Claim,
-				Snippet:    item.Snippet,
-				PaperTitle: p.Title,
-				PaperID:    p.ID,
-				Status:     "verified",
-				Confidence: item.Confidence,
-			})
-		}
+	reqCtx, cancel := wisdevRecoverableStructuredContext(ctx)
+	resp, err := l.llmClient.StructuredOutput(reqCtx, applyWisdevRecoverableStructuredPolicy(&llmv1.StructuredRequest{
+		Prompt:     prompt,
+		Model:      llm.ResolveStandardModel(),
+		JsonSchema: `{"type":"array","items":{"type":"object","required":["claim","snippet","confidence"],"properties":{"claim":{"type":"string"},"snippet":{"type":"string"},"confidence":{"type":"number"}}}}`,
+	}))
+	cancel()
+	if err != nil {
+		slog.Warn("assembleDossier: LLM extraction failed for paper",
+			"component", "wisdev.autonomous",
+			"operation", "assembleDossier",
+			"paper_id", p.ID,
+			"paper_title_preview", func() string {
+				if len(p.Title) > 60 {
+					return p.Title[:60]
+				}
+				return p.Title
+			}(),
+			"error", err.Error(),
+		)
+		return heuristicItems
 	}
-	return evidence, nil
+
+	var items []struct {
+		Claim      string  `json:"claim"`
+		Snippet    string  `json:"snippet"`
+		Confidence float64 `json:"confidence"`
+	}
+	if err := json.Unmarshal([]byte(resp.JsonResult), &items); err != nil {
+		slog.Warn("assembleDossier: JSON parse failed for paper extraction — skipping paper",
+			"component", "wisdev.autonomous",
+			"operation", "assembleDossier",
+			"paper_id", p.ID,
+			"error", err.Error(),
+		)
+		return heuristicItems
+	}
+	if len(items) == 0 {
+		return heuristicItems
+	}
+	extracted := make([]EvidenceItem, 0, len(items))
+	for _, item := range items {
+		if safe, reason := IsSafeRetrievedLLMInput(item.Claim, item.Snippet); !safe {
+			slog.Warn("assembleDossier: dropping extracted evidence due to suspicious content",
+				"component", "wisdev.autonomous",
+				"operation", "assembleDossier",
+				"paper_id", p.ID,
+				"reason", reason,
+			)
+			continue
+		}
+		extracted = append(extracted, EvidenceItem{
+			Claim:      item.Claim,
+			Snippet:    item.Snippet,
+			PaperTitle: p.Title,
+			PaperID:    p.ID,
+			Status:     "verified",
+			Confidence: item.Confidence,
+		})
+	}
+	return extracted
 }
 
 func (l *AutonomousLoop) evaluateSufficiency(ctx context.Context, originalQuery string, papers []search.Paper) (*sufficiencyAnalysis, error) {
@@ -2605,6 +3044,9 @@ func (l *AutonomousLoop) evaluateSufficiency(ctx context.Context, originalQuery 
 		}, papers), nil
 	}
 	if l.llmClient == nil {
+		EmitLoopDegraded(ctx, "evaluate_sufficiency", "LLM unavailable; using heuristic sufficiency", map[string]any{
+			"paperCount": len(papers),
+		})
 		return heuristicsufficiencyAnalysisWithoutLLM(originalQuery, papers), nil
 	}
 	if remaining := autonomousLLMCooldownRemaining(l); remaining > 0 {
@@ -2615,6 +3057,10 @@ func (l *AutonomousLoop) evaluateSufficiency(ctx context.Context, originalQuery 
 				"retry_after_ms", remaining.Milliseconds(),
 				"paperCount", len(papers),
 			)
+			EmitLoopDegraded(ctx, "evaluate_sufficiency", "Sufficiency evaluation skipped during cooldown; using heuristic fallback", map[string]any{
+				"retry_after_ms": remaining.Milliseconds(),
+				"paperCount":     len(papers),
+			})
 		}
 		return heuristicsufficiencyAnalysisWithoutLLM(originalQuery, papers), nil
 	}
@@ -2743,6 +3189,10 @@ func (l *AutonomousLoop) synthesizeWithEvidence(ctx context.Context, query strin
 	papers = SanitizeRetrievedPapersForLLM(papers, "synthesizeWithEvidence")
 	evidence = SanitizeEvidenceItemsForLLM(evidence, "synthesizeWithEvidence")
 	if l.llmClient == nil || l.brainCaps == nil {
+		EmitLoopDegraded(ctx, "synthesize_with_evidence", "LLM unavailable; using heuristic synthesis", map[string]any{
+			"paperCount":    len(papers),
+			"evidenceCount": len(evidence),
+		})
 		return heuristicStructuredSynthesisWithoutLLM(query, papers, evidence), nil
 	}
 	if remaining := autonomousLLMCooldownRemaining(l); remaining > 0 {
@@ -2754,6 +3204,11 @@ func (l *AutonomousLoop) synthesizeWithEvidence(ctx context.Context, query strin
 				"paperCount", len(papers),
 				"evidenceCount", len(evidence),
 			)
+			EmitLoopDegraded(ctx, "synthesize_with_evidence", "Synthesis skipped during cooldown; using heuristic synthesis", map[string]any{
+				"retry_after_ms": remaining.Milliseconds(),
+				"paperCount":     len(papers),
+				"evidenceCount":  len(evidence),
+			})
 		}
 		return heuristicStructuredSynthesisWithoutLLM(query, papers, evidence), nil
 	}
@@ -2779,9 +3234,19 @@ func (l *AutonomousLoop) synthesizeWithEvidence(ctx context.Context, query strin
 				"paperCount", len(papers),
 				"evidenceCount", len(evidence),
 			)
+			EmitLoopDegraded(ctx, "synthesize_with_evidence", "Structured synthesis rate limited; using heuristic synthesis", map[string]any{
+				"error":         err.Error(),
+				"paperCount":    len(papers),
+				"evidenceCount": len(evidence),
+				"fallback":      "rate_limit",
+			})
 			return heuristicStructuredSynthesisWithoutLLM(query, papers, evidence), nil
 		}
 		if strings.Contains(strings.ToLower(err.Error()), "llm client is not configured") {
+			EmitLoopDegraded(ctx, "synthesize_with_evidence", "LLM not configured; using heuristic synthesis", map[string]any{
+				"paperCount":    len(papers),
+				"evidenceCount": len(evidence),
+			})
 			return heuristicStructuredSynthesisWithoutLLM(query, papers, evidence), nil
 		}
 		fallbackText, fallbackErr := l.synthesizePlainTextFallback(ctx, query, papers, evidence)
@@ -2800,6 +3265,12 @@ func (l *AutonomousLoop) synthesizeWithEvidence(ctx context.Context, query strin
 				"paperCount", len(papers),
 				"evidenceCount", len(evidence),
 			)
+			EmitLoopDegraded(ctx, "synthesize_with_evidence", "Synthesis LLM fallback failed; using heuristic synthesis", map[string]any{
+				"structured_error": err.Error(),
+				"fallback_error":   fallbackErr.Error(),
+				"paperCount":       len(papers),
+				"evidenceCount":    len(evidence),
+			})
 			return heuristicStructuredSynthesisWithoutLLM(query, papers, evidence), nil
 		}
 		return &rag.StructuredAnswer{
@@ -2841,19 +3312,34 @@ func (l *AutonomousLoop) synthesizePlainTextFallback(ctx context.Context, query 
 				"paperCount", len(papers),
 				"evidenceCount", len(evidence),
 			)
+			EmitLoopDegraded(ctx, "synthesize_plain_text", "Plain-text synthesis skipped during cooldown; using heuristic synthesis", map[string]any{
+				"retry_after_ms": remaining.Milliseconds(),
+				"paperCount":     len(papers),
+				"evidenceCount":  len(evidence),
+			})
 		}
 		return heuristicSynthesisWithoutLLM(query, papers, evidence), nil
 	}
 	var sourceText strings.Builder
 	for _, p := range papers {
-		sourceText.WriteString(fmt.Sprintf("- [%s] %s: %s\n", p.ID, p.Title, p.Abstract))
+		summary := strings.TrimSpace(firstNonEmpty(p.Abstract, p.FullText, p.Venue))
+		sourceText.WriteString(fmt.Sprintf("- [%s] %s%s: %s\n", p.ID, p.Title, formatSynthesisPaperMeta(p), summary))
 	}
 	var evidenceText strings.Builder
 	for _, item := range evidence {
 		evidenceText.WriteString(fmt.Sprintf("- [%s] %s: %s\n", item.PaperID, item.Claim, item.Snippet))
 	}
 	prompt := fmt.Sprintf(`Synthesize a comprehensive research report for the query: "%s"
-Based on %d sources found.
+Based on %d sources found. Write for working researchers: explanatory, insight-driven, and critical rather than encyclopedic.
+
+Requirements:
+- Ground every factual claim in the Sources and Verified Evidence lists only. Do not invent studies, statistics, or author names.
+- Use inline citations in author-year form (e.g., Smith et al., 2021) whenever attributing a finding.
+- Include citation counts when available.
+- If evidence is insufficient for a claim, say so explicitly instead of guessing.
+- Do not end sentences or bullets with ellipsis ("..."); write complete thoughts.
+- Structure with headings: Research landscape, Synthesis, Key literature, Grounded evidence, Implications for researchers, Questions worth investigating.
+- End with a short methodological note on evidence limits.
 
 Sources:
 %s
@@ -2881,77 +3367,240 @@ func evidenceItemIDs(evidence []EvidenceItem) []string {
 }
 
 func heuristicSynthesisWithoutLLM(query string, papers []search.Paper, evidence []EvidenceItem) string {
-	lines := []string{
-		fmt.Sprintf("Provisional research synthesis for %q based on %d retrieved source(s).", strings.TrimSpace(query), len(papers)),
+	relevantEvidence := filterEvidenceByQueryRelevance(query, evidence)
+	relevantPapers := filterPapersByQueryRelevance(query, papers)
+	clauses := queryTopicClauses(query)
+	landscape := buildSynthesisLandscape(query, relevantPapers, papers)
+	registry := buildCitationRegistry(relevantPapers)
+
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("# Provisional Research Synthesis: %s\n\n", strings.TrimSpace(query)))
+	sb.WriteString("> Heuristic synthesis (LLM unavailable or degraded). Numbered references [n] map to the bibliography below — verify claims against primary sources before citing. Set WISDEV_LLM_PROVIDER=ollama|cloud|hybrid, run Ollama, configure Vertex, or start the orchestrator sidecar for LLM prose.\n\n")
+
+	sb.WriteString("## Research landscape\n")
+	sb.WriteString(formatSynthesisLandscape(landscape))
+	sb.WriteString("\n\n")
+
+	sb.WriteString("## Executive takeaway\n")
+	for _, line := range buildSynthesisExecutiveTakeaway(query, relevantPapers, relevantEvidence, registry) {
+		sb.WriteString("- " + line + "\n")
 	}
-	for i, item := range evidence {
-		if i >= 4 {
-			break
-		}
-		title := strings.TrimSpace(firstNonEmpty(item.PaperTitle, item.PaperID, fmt.Sprintf("source %d", i+1)))
-		claim := strings.TrimSpace(firstNonEmpty(item.Claim, item.Snippet))
-		snippet := strings.TrimSpace(item.Snippet)
-		if claim == "" && snippet == "" {
-			continue
-		}
-		if snippet != "" && snippet != claim {
-			lines = append(lines, fmt.Sprintf("[%s] supports the working claim %q with evidence: %s", title, claim, snippet))
-		} else {
-			lines = append(lines, fmt.Sprintf("[%s] supports the working claim: %s", title, claim))
-		}
+	sb.WriteString("\n")
+
+	if mix := buildSynthesisEvidenceMix(relevantPapers); mix != "" {
+		sb.WriteString("## Evidence mix\n")
+		sb.WriteString(mix)
+		sb.WriteString("\n\n")
 	}
-	if len(lines) == 1 {
-		for i, paper := range papers {
-			if i >= 4 {
-				break
-			}
-			title := strings.TrimSpace(firstNonEmpty(paper.Title, paper.ID, fmt.Sprintf("source %d", i+1)))
-			summary := strings.TrimSpace(firstNonEmpty(paper.Abstract, paper.FullText, paper.Venue))
-			if summary == "" {
+
+	if themes := extractSynthesisThemes(query, relevantPapers, 5); len(themes) > 0 {
+		sb.WriteString("## Emerging themes\n")
+		for _, theme := range themes {
+			sb.WriteString("- " + theme + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("## Synthesis\n")
+	sb.WriteString(buildSynthesisNarrative(query, relevantPapers, clauses, registry))
+	sb.WriteString("\n\n")
+	if corroboration := buildSynthesisCorroboration(query, relevantPapers, registry); corroboration != "" {
+		sb.WriteString(corroboration)
+		sb.WriteString("\n\n")
+	}
+
+	if len(clauses) > 0 {
+		sb.WriteString("## Thematic threads\n")
+		for _, clause := range clauses {
+			sb.WriteString(fmt.Sprintf("- **%s**: Literature admitted for this thread should be read for mechanisms, endpoints, and limitations specific to %s.\n", titleCasePhrase(clause), clause))
+		}
+		sb.WriteString("\n")
+	}
+
+	orderedSections := synthesisOrderedTopicSections(query, relevantPapers)
+	if bridge := buildSynthesisCrossThemeBridge(clauses, orderedSections); bridge != "" {
+		sb.WriteString("## Cross-theme bridge\n")
+		sb.WriteString(bridge)
+		sb.WriteString("\n\n")
+	}
+
+	sb.WriteString("## Key literature\n")
+	if len(orderedSections) > 1 {
+		for _, section := range orderedSections {
+			if len(section.Papers) == 0 {
 				continue
 			}
-			lines = append(lines, fmt.Sprintf("[%s] was retrieved as relevant evidence: %s", title, trimEvidenceText(summary, 220)))
+			sb.WriteString(fmt.Sprintf("### %s\n", section.Label))
+			for _, bullet := range formatSynthesisPaperBullets(query, section.Papers, relevantEvidence, 3, registry) {
+				sb.WriteString(bullet + "\n")
+			}
+			sb.WriteString("\n")
+		}
+	} else {
+		for _, bullet := range formatSynthesisPaperBullets(query, relevantPapers, relevantEvidence, 6, registry) {
+			sb.WriteString(bullet + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	evidenceLines := formatSynthesisEvidenceBullets(relevantEvidence, relevantPapers, 6, registry)
+	if len(evidenceLines) > 0 {
+		sb.WriteString("## Grounded evidence claims\n")
+		sb.WriteString("Extracted snippets with numbered inline citations (author, year, citations where available):\n")
+		for _, line := range evidenceLines {
+			sb.WriteString(line + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("## Corroboration & tensions\n")
+	sb.WriteString(buildSynthesisConsensusNote(relevantPapers, relevantEvidence))
+	sb.WriteString("\n")
+	for _, line := range buildSynthesisTensions(query, relevantPapers) {
+		sb.WriteString("- " + line + "\n")
+	}
+	sb.WriteString("\n")
+
+	sb.WriteString("## Retrieval gaps to address\n")
+	for _, line := range buildSynthesisRetrievalGaps(query, relevantPapers, papers, relevantEvidence) {
+		sb.WriteString("- " + line + "\n")
+	}
+	sb.WriteString("\n")
+
+	sb.WriteString("## Implications for researchers\n")
+	for _, line := range buildSynthesisImplications(query, relevantPapers, relevantEvidence) {
+		sb.WriteString("- " + line + "\n")
+	}
+	sb.WriteString("\n")
+
+	sb.WriteString("## Questions worth investigating\n")
+	for idx, prompt := range buildSynthesisResearchPrompts(query, clauses, relevantPapers) {
+		sb.WriteString(fmt.Sprintf("%d. %s\n", idx+1, prompt))
+	}
+	sb.WriteString("\n")
+
+	bibLines := formatSynthesisBibliography(relevantPapers, 8, registry)
+	if len(bibLines) > 0 {
+		sb.WriteString("## References cited in this synthesis\n")
+		for _, line := range bibLines {
+			sb.WriteString(line + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("## Methodological note\n")
+	if len(relevantPapers) > 0 && len(relevantPapers) < len(papers) {
+		sb.WriteString(fmt.Sprintf("- Filtered %d off-topic source(s) to keep synthesis focused.\n", len(papers)-len(relevantPapers)))
+	}
+	sb.WriteString("- Press `E` in the TUI to re-run with deeper retrieval, or increase max iterations in configuration.\n")
+
+	return polishSynthesisText(sb.String())
+}
+
+func synthesisTopicSections(query string, papers []search.Paper) map[string][]search.Paper {
+	clauses := queryTopicClauses(query)
+	if len(clauses) < 2 || len(papers) == 0 {
+		return nil
+	}
+	sections := make(map[string][]search.Paper, len(clauses))
+	for _, clause := range clauses {
+		label := synthesisSectionLabel(clause)
+		for _, paper := range papers {
+			if paperMatchesSingleTopicRelevance(clause, paper) {
+				sections[label] = append(sections[label], paper)
+			}
+		}
+		if len(sections[label]) > 0 {
+			sections[label] = search.SortPapersByPreferenceWithQuery(sections[label], query)
 		}
 	}
-	if len(lines) == 1 {
-		lines = append(lines, "No grounded evidence snippets were available for synthesis.")
+	if len(sections) < 2 {
+		return nil
 	}
-	return strings.Join(lines, "\n\n")
+	return sections
 }
 
 func heuristicStructuredSynthesisWithoutLLM(query string, papers []search.Paper, evidence []EvidenceItem) *rag.StructuredAnswer {
 	plain := heuristicSynthesisWithoutLLM(query, papers, evidence)
-	evidenceIDs := evidenceItemIDs(evidence)
-	unsupported := len(evidenceIDs) == 0
-	sections := []rag.AnswerSection{
-		{
-			Heading: "Evidence Summary",
-			Sentences: []rag.AnswerClaim{{
-				Text:        fmt.Sprintf("The query %q is grounded in %d retrieved source(s).", strings.TrimSpace(query), len(papers)),
-				EvidenceIDs: evidenceIDs,
-				Unsupported: unsupported,
-				Confidence:  0.65,
-			}},
-		},
-		{
-			Heading: "Key Findings",
-			Sentences: []rag.AnswerClaim{{
-				Text:        firstNonEmpty(firstEvidenceClaim(evidence), "No verified evidence claim was assembled."),
-				EvidenceIDs: evidenceIDs,
-				Unsupported: unsupported,
-				Confidence:  0.62,
-			}},
-		},
-		{
-			Heading: "Coverage Notes",
-			Sentences: []rag.AnswerClaim{{
-				Text:        "Additional retrieval should focus on unresolved contradictions, missing source families, and citation precision.",
-				EvidenceIDs: evidenceIDs,
-				Unsupported: unsupported,
-				Confidence:  0.55,
-			}},
-		},
+	relevantPapers := filterPapersByQueryRelevance(query, papers)
+	relevantEvidence := filterEvidenceByQueryRelevance(query, evidence)
+	registry := buildCitationRegistry(relevantPapers)
+
+	sections := []rag.AnswerSection{{
+		Heading: "Research landscape",
+		Sentences: []rag.AnswerClaim{{
+			Text:       formatSynthesisLandscape(buildSynthesisLandscape(query, relevantPapers, papers)),
+			Confidence: 0.65,
+		}},
+	}}
+
+	takeaway := rag.AnswerSection{Heading: "Executive takeaway"}
+	for _, line := range buildSynthesisExecutiveTakeaway(query, relevantPapers, relevantEvidence, registry) {
+		takeaway.Sentences = append(takeaway.Sentences, rag.AnswerClaim{
+			Text:       line,
+			Confidence: 0.7,
+		})
 	}
+	if len(takeaway.Sentences) > 0 {
+		sections = append(sections, takeaway)
+	}
+
+	if mix := buildSynthesisEvidenceMix(relevantPapers); mix != "" {
+		sections = append(sections, rag.AnswerSection{
+			Heading: "Evidence mix",
+			Sentences: []rag.AnswerClaim{{
+				Text:       mix,
+				Confidence: 0.6,
+			}},
+		})
+	}
+
+	narrative := buildSynthesisNarrative(query, relevantPapers, queryTopicClauses(query), registry)
+	if corroboration := buildSynthesisCorroboration(query, relevantPapers, registry); corroboration != "" {
+		narrative += " " + corroboration
+	}
+	sections = append(sections, rag.AnswerSection{
+		Heading: "Synthesis",
+		Sentences: []rag.AnswerClaim{{
+			Text:       narrative,
+			Confidence: 0.68,
+		}},
+	})
+
+	literature := rag.AnswerSection{Heading: "Key literature"}
+	topPapers := search.SortPapersByPreferenceWithQuery(relevantPapers, query)
+	for idx, paper := range topPapers {
+		if idx >= 4 {
+			break
+		}
+		bullets := formatSynthesisPaperBullets(query, []search.Paper{paper}, relevantEvidence, 1, registry)
+		if len(bullets) == 0 {
+			continue
+		}
+		text := strings.TrimPrefix(strings.TrimSpace(bullets[0]), "- ")
+		paperID := strings.TrimSpace(paper.ID)
+		literature.Sentences = append(literature.Sentences, rag.AnswerClaim{
+			Text:        text,
+			EvidenceIDs: []string{paperID},
+			Confidence:  0.62,
+		})
+	}
+	if len(literature.Sentences) > 0 {
+		sections = append(sections, literature)
+	}
+
+	if claim := firstEvidenceClaim(relevantEvidence); claim != "" {
+		sections = append(sections, rag.AnswerSection{
+			Heading: "Grounded evidence",
+			Sentences: []rag.AnswerClaim{{
+				Text:        claim,
+				EvidenceIDs: evidenceItemIDs(relevantEvidence),
+				Confidence:  0.7,
+			}},
+		})
+	}
+
 	return &rag.StructuredAnswer{Text: plain, Sections: sections}
 }
 
@@ -2973,6 +3622,7 @@ func (l *AutonomousLoop) refineDraftWithCritique(ctx context.Context, query stri
 		return draft, nil
 	}
 	if l.llmClient == nil {
+		EmitLoopDegraded(ctx, "refine_draft", "LLM unavailable; using heuristic draft refinement", nil)
 		return heuristicRefinedDraftWithoutLLM(query, draft, critique), nil
 	}
 	if remaining := autonomousLLMCooldownRemaining(l); remaining > 0 {
@@ -2983,6 +3633,10 @@ func (l *AutonomousLoop) refineDraftWithCritique(ctx context.Context, query stri
 				"stage", "cooldown_fallback",
 				"retry_after_ms", remaining.Milliseconds(),
 			)
+			EmitLoopDegraded(ctx, "refine_draft", "Draft refinement skipped during cooldown; using heuristic refinement", map[string]any{
+				"retry_after_ms": remaining.Milliseconds(),
+				"fallback":       "cooldown",
+			})
 		}
 		return heuristicRefinedDraftWithoutLLM(query, draft, critique), nil
 	}
@@ -3007,8 +3661,9 @@ Verified Evidence:
 Instructions:
 1. Remove or qualify unsupported claims.
 2. Explicitly mark unresolved gaps and contradictions.
-3. Preserve source-grounded claims using [Title] citations.
-4. Do not invent new evidence beyond the verified evidence list.
+3. Every paragraph MUST end with numbered inline citations [n] (Author, Year; citations) tied to the verified evidence list.
+4. Do not end sentences with ellipsis ("...") or stray "   ." artifacts; write complete thoughts.
+5. Do not invent new evidence beyond the verified evidence list.
 `, query, draft, critique.Reasoning, strings.Join(critique.MissingAspects, "; "), strings.Join(critique.MissingSourceTypes, "; "), strings.Join(critique.Contradictions, "; "), evidenceText)
 	refineCtx, cancel := context.WithTimeout(ctx, optionalCritiqueRefinementLatencyBudget)
 	defer cancel()
@@ -3029,12 +3684,17 @@ Instructions:
 				"stage", "timeout_fallback",
 				"latency_budget_ms", req.GetLatencyBudgetMs(),
 			)
+			EmitLoopDegraded(ctx, "refine_draft", "Draft refinement timed out; using heuristic refinement", map[string]any{
+				"latency_budget_ms": req.GetLatencyBudgetMs(),
+				"fallback":          "timeout",
+			})
 			return heuristicRefinedDraftWithoutLLM(query, draft, critique), nil
 		}
 		if shouldAbortAutonomousLoop(err) {
 			return "", err
 		}
 		if strings.Contains(strings.ToLower(err.Error()), "llm client is not configured") {
+			EmitLoopDegraded(ctx, "refine_draft", "LLM not configured; using heuristic draft refinement", nil)
 			return heuristicRefinedDraftWithoutLLM(query, draft, critique), nil
 		}
 		if llm.IsProviderRateLimitError(err) {
@@ -3044,6 +3704,10 @@ Instructions:
 				"stage", "rate_limit_fallback",
 				"error", err.Error(),
 			)
+			EmitLoopDegraded(ctx, "refine_draft", "Draft refinement rate limited; using heuristic refinement", map[string]any{
+				"error":    err.Error(),
+				"fallback": "rate_limit",
+			})
 			return heuristicRefinedDraftWithoutLLM(query, draft, critique), nil
 		}
 		slog.Warn("draft critique refinement LLM failed; using heuristic refinement",
@@ -3051,6 +3715,9 @@ Instructions:
 			"operation", "refineDraftWithCritique",
 			"error", err.Error(),
 		)
+		EmitLoopDegraded(ctx, "refine_draft", "Draft refinement LLM failed; using heuristic refinement", map[string]any{
+			"error": err.Error(),
+		})
 		return heuristicRefinedDraftWithoutLLM(query, draft, critique), nil
 	}
 	if resp == nil || strings.TrimSpace(resp.GetText()) == "" {
@@ -3449,12 +4116,15 @@ func calculateInitialConfidence(p search.Paper) float64 {
 		conf += 0.05
 	}
 
-	// Recency (newer = slight boost for evolving fields)
+	// Recency (newer publications preferred for fast-moving fields)
 	currentYear := time.Now().Year()
-	if p.Year >= currentYear-2 {
-		conf += 0.05
-	} else if p.Year < currentYear-10 && p.Year > 1900 {
-		conf -= 0.05
+	switch {
+	case p.Year >= currentYear-3:
+		conf += 0.12
+	case p.Year >= currentYear-8:
+		conf += 0.04
+	case p.Year > 1900 && p.Year < currentYear-12:
+		conf -= 0.10
 	}
 
 	// Query relevance

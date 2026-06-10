@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/go-redis/redismock/v9"
@@ -456,6 +457,17 @@ func TestParallelSearchHelpers(t *testing.T) {
 	})
 
 	t.Run("type helpers and query utilities", func(t *testing.T) {
+		preparedQueryCache = sync.Map{}
+		storePreparedQuery(PreparedResearchQuery{
+			Original:  "clinical treatment for disease",
+			Corrected: "clinical treatment for disease",
+			Domain:    "medicine",
+		})
+		storePreparedQuery(PreparedResearchQuery{
+			Original:  "computer vision",
+			Corrected: "computer vision",
+			Domain:    "cs",
+		})
 		assert.True(t, isMedicalQuery("clinical treatment for disease"))
 		assert.False(t, isMedicalQuery("computer vision"))
 		assert.Equal(t, "alpha", firstNonEmptyString([]string{"", " alpha ", "beta"}))
@@ -538,5 +550,20 @@ func TestExecuteWithResilienceBranches(t *testing.T) {
 		})
 		assert.Error(t, err)
 		assert.Zero(t, out)
+	})
+
+	t.Run("retries count as one breaker failure", func(t *testing.T) {
+		sem := semaphore.NewWeighted(1)
+		cb := NewCircuitBreaker("test-retry", WithFailureThreshold(2))
+		attempts := 0
+
+		out, err := executeWithResilience(context.Background(), "test", cb, sem, func() (int, error) {
+			attempts++
+			return 0, errors.New("upstream 503 timeout")
+		})
+		assert.Error(t, err)
+		assert.Zero(t, out)
+		assert.GreaterOrEqual(t, attempts, 2)
+		assert.True(t, cb.Allow(), "single exhausted request should not open breaker at threshold 2")
 	})
 }

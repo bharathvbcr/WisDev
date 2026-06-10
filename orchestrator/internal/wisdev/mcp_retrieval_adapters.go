@@ -9,6 +9,7 @@ import (
 )
 
 func retrieveCanonicalSearchPapers(ctx context.Context, registry *search.ProviderRegistry, query string, opts search.SearchOpts) ([]search.Paper, map[string]any, error) {
+	query = prepareSearchQueryText(query)
 	sources, payload, err := RetrieveCanonicalPapersWithOptions(ctx, nil, registry, query, SearchOptions{
 		Limit:       opts.Limit,
 		Domain:      opts.Domain,

@@ -3,6 +3,8 @@ package wisdev
 import (
 	"context"
 	"iter"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
 	"google.golang.org/adk/agent"
 	adkmemory "google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
@@ -77,11 +80,15 @@ func TestADKRuntime_Bind_ErrorPaths(t *testing.T) {
 	oldProjectResolver := resolveADKProjectID
 	oldKeyResolver := resolveADKGoogleAPIKey
 	oldModelFactory := newGeminiModel
+	oldLocalConfig := resolveADKLocalLLMConfig
 	t.Cleanup(func() {
 		resolveADKProjectID = oldProjectResolver
 		resolveADKGoogleAPIKey = oldKeyResolver
 		newGeminiModel = oldModelFactory
+		resolveADKLocalLLMConfig = oldLocalConfig
 	})
+
+	resolveADKLocalLLMConfig = func() (string, string, string, bool) { return "", "", "", false }
 
 	resolveADKProjectID = func(context.Context) (string, string) { return "", "none" }
 	resolveADKGoogleAPIKey = func(context.Context, string) (string, string, error) { return "", "", nil }
@@ -98,15 +105,62 @@ func TestADKRuntime_Bind_ErrorPaths(t *testing.T) {
 	assert.Contains(t, r.InitError, "no GOOGLE_API_KEY or GEMINI_API_KEY credential")
 }
 
-func TestADKRuntime_Bind_UsesResolvedAPIKey(t *testing.T) {
+func TestADKRuntime_Bind_UsesLocalOpenAICompatibleWhenConfigured(t *testing.T) {
 	oldProjectResolver := resolveADKProjectID
 	oldKeyResolver := resolveADKGoogleAPIKey
 	oldModelFactory := newGeminiModel
+	oldLocalConfig := resolveADKLocalLLMConfig
+	oldLocalClient := newADKOpenAICompatibleClient
+	oldLocalModel := newADKOpenAICompatibleModel
 	t.Cleanup(func() {
 		resolveADKProjectID = oldProjectResolver
 		resolveADKGoogleAPIKey = oldKeyResolver
 		newGeminiModel = oldModelFactory
+		resolveADKLocalLLMConfig = oldLocalConfig
+		newADKOpenAICompatibleClient = oldLocalClient
+		newADKOpenAICompatibleModel = oldLocalModel
 	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(server.Close)
+
+	resolveADKProjectID = func(context.Context) (string, string) { return "", "none" }
+	resolveADKLocalLLMConfig = func() (string, string, string, bool) {
+		return server.URL + "/v1", "llama3.1", "", true
+	}
+	newADKOpenAICompatibleClient = llm.NewOpenAICompatibleClient
+	newADKOpenAICompatibleModel = func(client *llm.OpenAICompatibleClient) (model.LLM, error) {
+		return &mockADKLLM{}, nil
+	}
+
+	r := &ADKRuntime{Config: DefaultADKRuntimeConfig()}
+	gateway := &AgentGateway{Registry: NewToolRegistry()}
+	r.Bind(context.Background(), gateway)
+
+	assert.Equal(t, "openai_compatible", r.ModelBackend)
+	assert.Contains(t, r.CredentialSource, server.URL)
+	assert.Contains(t, r.InitError, "requires a *PlanExecutor")
+}
+
+func TestADKRuntime_Bind_UsesResolvedAPIKey(t *testing.T) {
+	oldProjectResolver := resolveADKProjectID
+	oldKeyResolver := resolveADKGoogleAPIKey
+	oldModelFactory := newGeminiModel
+	oldLocalConfig := resolveADKLocalLLMConfig
+	t.Cleanup(func() {
+		resolveADKProjectID = oldProjectResolver
+		resolveADKGoogleAPIKey = oldKeyResolver
+		newGeminiModel = oldModelFactory
+		resolveADKLocalLLMConfig = oldLocalConfig
+	})
+
+	resolveADKLocalLLMConfig = func() (string, string, string, bool) { return "", "", "", false }
 
 	resolveADKProjectID = func(context.Context) (string, string) { return "", "none" }
 	resolveADKGoogleAPIKey = func(context.Context, string) (string, string, error) {

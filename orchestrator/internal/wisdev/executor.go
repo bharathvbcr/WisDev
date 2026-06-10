@@ -3,6 +3,7 @@ package wisdev
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -460,6 +461,29 @@ func executorContext(ctx context.Context) context.Context {
 	return ctx
 }
 
+// isRetryablePythonExecutionError reports whether a sidecar execution error is
+// plausibly transient (network failure, timeout, 5xx) rather than deterministic
+// (guardrail block, unknown action, cancelled request).
+func isRetryablePythonExecutionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "context canceled"),
+		strings.Contains(msg, "context deadline exceeded"),
+		strings.Contains(msg, "guardrail_blocked"),
+		strings.Contains(msg, "unknown action"),
+		strings.Contains(msg, "not initialised"),
+		strings.Contains(msg, "not implemented"):
+		return false
+	}
+	return true
+}
+
 func (e *PlanExecutor) executePythonStep(
 	ctx context.Context,
 	session *AgentSession,
@@ -480,9 +504,32 @@ func (e *PlanExecutor) executePythonStep(
 		return nil, nil, 0, fmt.Errorf("python executor not configured")
 	}
 
-	result, err := e.pythonExecute(ctx, step.Action, payload, session)
-	if err != nil {
-		return nil, nil, 0, err
+	// Bounded retry with backoff: a transient sidecar failure must not kill the
+	// whole research loop. Deterministic failures (guardrails, unknown actions,
+	// cancelled contexts) fail immediately.
+	const maxPythonAttempts = 3
+	var result map[string]any
+	var err error
+	for attempt := 1; attempt <= maxPythonAttempts; attempt++ {
+		result, err = e.pythonExecute(ctx, step.Action, payload, session)
+		if err == nil {
+			break
+		}
+		if !isRetryablePythonExecutionError(err) || attempt == maxPythonAttempts {
+			return nil, nil, 0, err
+		}
+		backoff := time.Duration(attempt) * 250 * time.Millisecond
+		slog.Warn("python step execution failed; retrying",
+			"action", step.Action,
+			"attempt", attempt,
+			"maxAttempts", maxPythonAttempts,
+			"backoff", backoff,
+			"error", err)
+		select {
+		case <-ctx.Done():
+			return nil, nil, 0, ctx.Err()
+		case <-time.After(backoff):
+		}
 	}
 	result = ensureExecutionResultMap(result)
 
@@ -942,7 +989,7 @@ func shouldBypassConfirmationForAutonomousMode(session *AgentSession, step PlanS
 	if step.ExecutionTarget == ExecutionTargetPythonSandbox {
 		return false
 	}
-	action := strings.TrimSpace(step.Action)
+	action := CanonicalizeWisdevAction(step.Action)
 	return strings.HasPrefix(action, "research.")
 }
 

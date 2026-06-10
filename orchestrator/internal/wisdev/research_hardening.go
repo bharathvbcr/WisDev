@@ -1315,12 +1315,36 @@ func splitEvidenceSentences(text string, limit int) []string {
 	return out
 }
 
+func cleanAbstractLeadIn(text string) string {
+	text = strings.TrimSpace(text)
+	for {
+		changed := false
+		for _, prefix := range []string{
+			"BACKGROUND:", "Background:", "BACKGROUND ", "Background ",
+			"ABSTRACT:", "Abstract:", "OBJECTIVE:", "Objective:",
+			"METHODS:", "Methods:", "RESULTS:", "Results:",
+			"CONCLUSION:", "Conclusion:", "CONCLUSIONS:", "Conclusions:",
+			"PURPOSE:", "Purpose:", "INTRODUCTION:", "Introduction:",
+		} {
+			if strings.HasPrefix(text, prefix) {
+				text = strings.TrimSpace(strings.TrimPrefix(text, prefix))
+				changed = true
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	return text
+}
+
 func firstEvidenceSentence(text string) string {
+	text = cleanAbstractLeadIn(text)
 	sentences := splitEvidenceSentences(text, 1)
 	if len(sentences) == 0 {
 		return trimEvidenceText(text, 320)
 	}
-	return sentences[0]
+	return cleanAbstractLeadIn(sentences[0])
 }
 
 func trimEvidenceText(text string, limit int) string {
@@ -1328,10 +1352,17 @@ func trimEvidenceText(text string, limit int) string {
 	if trimmed == "" {
 		return ""
 	}
-	if limit > 0 && len(trimmed) > limit {
-		return strings.TrimSpace(trimmed[:limit]) + "..."
+	if limit <= 0 || len(trimmed) <= limit {
+		return trimmed
 	}
-	return trimmed
+	cut := trimmed[:limit]
+	if idx := strings.LastIndexAny(cut, ".!?"); idx >= limit/2 {
+		return strings.TrimSpace(cut[:idx+1])
+	}
+	if idx := strings.LastIndexByte(cut, ' '); idx >= limit/2 {
+		return strings.TrimSpace(cut[:idx])
+	}
+	return strings.TrimSpace(cut)
 }
 
 func optionalAnyString(value any) string {

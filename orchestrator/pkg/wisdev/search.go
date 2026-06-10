@@ -125,6 +125,35 @@ func toInternalPapers(papers []Paper) []search.Paper {
 	return converted
 }
 
+// PreferCitedPapers returns only papers with a positive citation count when any
+// exist; otherwise it returns the input unchanged (e.g. offline stubs).
+func PreferCitedPapers(papers []Paper) []Paper {
+	if len(papers) == 0 {
+		return papers
+	}
+	cited := make([]Paper, 0, len(papers))
+	for _, paper := range papers {
+		if paper.CitationCount > 0 {
+			cited = append(cited, paper)
+		}
+	}
+	if len(cited) == 0 {
+		return papers
+	}
+	return cited
+}
+
+// SortPapersByCitations returns papers ordered by a preference score that favors
+// recent publications while still rewarding citation impact and retrieval relevance.
+func SortPapersByCitations(papers []Paper) []Paper {
+	if len(papers) < 2 {
+		return papers
+	}
+	internal := toInternalPapers(papers)
+	sorted := search.SortPapersByPreference(internal)
+	return fromInternalPapers(sorted)
+}
+
 func fromInternalPapers(papers []search.Paper) []Paper {
 	if len(papers) == 0 {
 		return nil

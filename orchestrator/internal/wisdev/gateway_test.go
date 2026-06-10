@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -110,7 +111,11 @@ func TestAgentGateway_DefaultPythonExecutor(t *testing.T) {
 	})
 
 	t.Run("query.enhanceAcademic", func(t *testing.T) {
-		mockLLM.On("Generate", mock.Anything, mock.Anything).Return(&llmv1.GenerateResponse{Text: "enhanced"}, nil).Once()
+		preparedQueryCache = sync.Map{}
+		mockLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
+			return req != nil && strings.Contains(req.Prompt, "Prepare this academic research query")
+		})).Return(&llmv1.StructuredResponse{JsonResult: `{"corrected_query":"corrected","search_query":"enhanced","domain":"","intent":"academic","keywords":[],"synonyms":[],"seed_queries":[],"agenda_queries":[]}`}, nil).Once()
+
 		res, err := gw.defaultPythonExecutor(ctx, "query.enhanceAcademic", map[string]any{"query": "test"}, nil)
 		assert.NoError(t, err)
 		assert.Equal(t, "enhanced", res["enhanced_query"])
@@ -433,7 +438,14 @@ func TestAgentGateway_DefaultPythonExecutor_AskFollowUpBypassesSlowVertexDirectA
 }
 
 func TestAgentGateway_SessionManagement(t *testing.T) {
+	preparedQueryCache = sync.Map{}
+	originalGlobalLLM := GlobalLLMClient
+	defer func() { GlobalLLMClient = originalGlobalLLM }()
 	gw := NewAgentGateway(nil, nil, nil)
+	// NewAgentGateway wires real direct providers when credentials exist;
+	// this test asserts offline query prep, so detach the LLM entirely.
+	gw.LLMClient = nil
+	GlobalLLMClient = nil
 	ctx := context.Background()
 
 	sess, err := gw.CreateSession(ctx, "u1", "  query  ")
@@ -522,7 +534,7 @@ func TestAgentGateway_ExecuteADKAction_GoNativeSynthesisAndBatchVerifier(t *test
 		return req != nil &&
 			req.Model != "" &&
 			req.JsonSchema != "" &&
-			strings.Contains(req.Prompt, "Synthesize a comprehensive research report") &&
+			strings.Contains(req.Prompt, "Synthesize a highly explanatory, comprehensive, and learning-oriented research report") &&
 			strings.Contains(req.Prompt, "sleep memory") &&
 			strings.Contains(req.Prompt, "Sleep Study")
 	})).Return(&llmv1.StructuredResponse{JsonResult: `{"sections":[{"heading":"Answer","sentences":[{"text":"sleep supports memory consolidation","evidenceIds":["p1"]}]}]}`}, nil).Once()
@@ -537,7 +549,7 @@ func TestAgentGateway_ExecuteADKAction_GoNativeSynthesisAndBatchVerifier(t *test
 		},
 	}, session)
 	require.NoError(t, err)
-	assert.Equal(t, "## Answer\n\nsleep supports memory consolidation", synthesis["text"])
+	assert.Equal(t, "## Answer\n\nsleep supports memory consolidation. (Sleep Study)", synthesis["text"])
 	assert.NotNil(t, synthesis["structuredAnswer"])
 
 	mockLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {

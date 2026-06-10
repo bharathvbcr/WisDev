@@ -230,6 +230,10 @@ func TestStackConfigSanity(t *testing.T) {
 	Manifest.Overlays["local"] = overlay
 
 	t.Setenv("INTERNAL_SERVICE_KEY", "")
+	t.Setenv("PYTHON_SIDECAR_HTTP_URL", "")
+	t.Setenv("PYTHON_SIDECAR_LLM_TRANSPORT", "")
+	t.Setenv("PYTHON_SIDECAR_GRPC_ADDR", "")
+	t.Setenv("GO_INTERNAL_GRPC_ADDR", "")
 	err := ValidateService("go_orchestrator")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "PYTHON_SIDECAR_HTTP_URL")

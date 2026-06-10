@@ -80,7 +80,7 @@ func TestAutonomousLoop_Extra(t *testing.T) {
 		assert.NoError(t, err)
 		assert.False(t, res.Converged)
 		assert.Equal(t, 0, res.Iterations)
-		assert.Equal(t, "Empty Result", res.FinalAnswer)
+		assert.Contains(t, res.FinalAnswer, "Empty Result")
 	})
 
 	t.Run("Run - Max Iterations reached", func(t *testing.T) {
@@ -432,7 +432,7 @@ func TestAutonomousLoop_Extra(t *testing.T) {
 			MaxUniquePapers: 2,
 		})
 		assert.NoError(t, err)
-		assert.Equal(t, "Budgeted Final", res.FinalAnswer)
+		assert.Contains(t, res.FinalAnswer, "Budgeted Final")
 		assert.Equal(t, []int{2}, searchLimits)
 		assert.Len(t, res.Papers, 2)
 		assert.Equal(t, []string{"budget query"}, res.ExecutedQueries)
@@ -529,7 +529,7 @@ func TestAutonomousLoop_Extra(t *testing.T) {
 			MaxIterations: 1,
 		})
 		assert.NoError(t, err)
-		assert.Equal(t, "Gap-focused synthesis", res.FinalAnswer)
+		assert.Contains(t, res.FinalAnswer, "Gap-focused synthesis")
 		assert.NotNil(t, res.DraftCritique)
 		assert.False(t, res.DraftCritique.NeedsRevision)
 		assert.NotEmpty(t, strings.TrimSpace(res.DraftCritique.Reasoning))

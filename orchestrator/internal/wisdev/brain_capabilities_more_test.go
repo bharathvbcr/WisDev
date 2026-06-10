@@ -95,15 +95,16 @@ func TestBrainCapabilities_Errors(t *testing.T) {
 	})
 
 	t.Run("EnhanceAcademicQuery Error", func(t *testing.T) {
-		mockLLM.On("Generate", mock.Anything, mock.Anything).Return(nil, llmErr).Once()
+		mockLLM.On("StructuredOutput", mock.Anything, mock.Anything).Return(nil, llmErr).Once()
 		_, err := caps.EnhanceAcademicQuery(ctx, "q", "")
 		assert.Error(t, err)
 	})
 
 	t.Run("EnhanceAcademicQuery Empty", func(t *testing.T) {
-		mockLLM.On("Generate", mock.Anything, mock.Anything).Return(&llmv1.GenerateResponse{Text: "   "}, nil).Once()
-		_, err := caps.EnhanceAcademicQuery(ctx, "q", "")
-		assert.Error(t, err)
+		mockLLM.On("StructuredOutput", mock.Anything, mock.Anything).Return(&llmv1.StructuredResponse{JsonResult: `{"corrected_query": " ", "search_query": " "}`}, nil).Once()
+		enhanced, err := caps.EnhanceAcademicQuery(ctx, "q", "")
+		assert.NoError(t, err)
+		assert.Equal(t, "q", enhanced)
 	})
 
 	t.Run("SelectPrimarySource Error", func(t *testing.T) {

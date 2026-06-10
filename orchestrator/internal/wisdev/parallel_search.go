@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	internalsearch "github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/telemetry"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"regexp"
@@ -278,7 +280,7 @@ func buildRetrievalTrace(result internalsearch.SearchResult) []map[string]any {
 }
 
 func normalizeSearchQuery(query string) string {
-	return strings.Join(strings.Fields(strings.TrimSpace(query)), " ")
+	return prepareSearchQueryText(query)
 }
 
 func normalizeStringList(values []string) []string {
@@ -437,13 +439,12 @@ func setCache(rdb redis.UniversalClient, key string, result *MultiSourceResult) 
 // ==========================================
 
 func adaptiveExpansionTargetAPIs(query string) []string {
-	lower := strings.ToLower(query)
-	switch {
-	case isMedicalQuery(lower):
+	switch InferResearchDomain(query) {
+	case "medicine":
 		return []string{"pubmed", "europe_pmc", "semantic_scholar", "openalex"}
-	case containsAny(lower, "quantum", "gravity", "particle", "cosmology", "galaxy", "astrophysics"):
+	case "physics":
 		return []string{"arxiv", "nasa_ads", "semantic_scholar", "openalex"}
-	case containsAny(lower, "algorithm", "software", "neural", "network", "database", "security"):
+	case "cs":
 		return []string{"dblp", "arxiv", "semantic_scholar", "openalex"}
 	default:
 		return []string{"semantic_scholar", "openalex", "arxiv", "crossref"}
@@ -451,7 +452,7 @@ func adaptiveExpansionTargetAPIs(query string) []string {
 }
 
 func selectAdaptiveExpansion(ctx context.Context, query string) (EnhancedQuery, error) {
-	base := ExpandQuery(query)
+	base := ExpandQueryWithContext(ctx, query, GlobalLLMClient)
 	if strings.TrimSpace(base.Original) == "" {
 		base.Original = strings.TrimSpace(query)
 	}
@@ -503,14 +504,7 @@ var expandQueryAnalysis = func(ctx context.Context, query string) (EnhancedQuery
 }
 
 func isMedicalQuery(query string) bool {
-	lower := strings.ToLower(query)
-	medicalTerms := []string{"clinical", "patient", "disease", "treatment", "therapy", "medical"}
-	for _, term := range medicalTerms {
-		if strings.Contains(lower, term) {
-			return true
-		}
-	}
-	return false
+	return InferResearchDomain(query) == "medicine"
 }
 
 // ==========================================
@@ -562,11 +556,8 @@ func executeWithResilience[T any](ctx context.Context, name string, cb *CircuitB
 			}
 			return result, nil
 		}
-		if cb != nil {
-			cb.RecordFailure()
-		}
 
-		if attempt == maxRetries || ctx.Err() != nil {
+		if attempt == maxRetries || ctx.Err() != nil || !resilience.IsRetriableProviderError(err) {
 			break
 		}
 
@@ -579,6 +570,9 @@ func executeWithResilience[T any](ctx context.Context, name string, cb *CircuitB
 			return empty, ctx.Err()
 		case <-time.After(sleep):
 		}
+	}
+	if cb != nil {
+		cb.RecordFailureFor(err)
 	}
 	return empty, err
 }
@@ -1182,30 +1176,50 @@ type IterationLog struct {
 	PRMReward     float64  `json:"prmReward"`
 }
 
+// callPRM scores one research iteration. When the caller supplies the research
+// question and retrieved papers, an LLM judge scores topical relevance, aspect
+// coverage, and grounding (see prm.go); otherwise — or whenever the judge is
+// unavailable — the deterministic heuristic formula is used.
 func callPRM(ctx context.Context, sessionID string, output map[string]any) (float64, error) {
-	_ = ctx
-	_ = sessionID
-
-	paperCount := intFromAny(output["paperCount"])
-	searchSuccess := clampFloat64(floatFromAny(output["searchSuccess"]), 0, 1)
-	citationVerifiedRatio := clampFloat64(floatFromAny(output["citationVerifiedRatio"]), 0, 1)
-	coverageScore := clampFloat64(floatFromAny(output["coverageScore"]), 0, 1)
-	success := boolFromAny(output["success"])
-
-	if paperCount == 0 {
+	if output == nil {
 		return 0, nil
 	}
 
-	reward := 0.15 + (0.35 * searchSuccess) + (0.35 * citationVerifiedRatio) + (0.15 * coverageScore)
-	if success {
-		reward += 0.05
+	query := strings.TrimSpace(AsOptionalString(output["query"]))
+	papers := prmPapersFromAny(output["papers"])
+	queries, _ := output["queries"].([]string)
+	iteration := intFromAny(output["iteration"])
+	if ctx != nil && query != "" && len(papers) > 0 {
+		if reward, err := scoreResearchStepWithLLM(ctx, query, queries, papers, iteration); err == nil {
+			appendPRMRewardRecord(PRMRewardRecord{
+				Kind:       "step",
+				Source:     "judge",
+				SessionID:  sessionID,
+				Query:      query,
+				Iteration:  iteration,
+				Queries:    queries,
+				PaperCount: len(papers),
+				Reward:     reward,
+			})
+			return reward, nil
+		} else {
+			slog.Debug("PRM judge unavailable; using heuristic reward",
+				"component", "wisdev.prm",
+				"error", err)
+		}
 	}
-	if reward > 1 {
-		reward = 1
-	}
-	if reward < 0 {
-		reward = 0
-	}
+
+	reward := heuristicProcessReward(output)
+	appendPRMRewardRecord(PRMRewardRecord{
+		Kind:       "step",
+		Source:     "heuristic",
+		SessionID:  sessionID,
+		Query:      query,
+		Iteration:  iteration,
+		Queries:    queries,
+		PaperCount: intFromAny(output["paperCount"]),
+		Reward:     reward,
+	})
 	return reward, nil
 }
 
@@ -1259,6 +1273,12 @@ var IterativeResearch = func(
 			"citationVerifiedRatio": clampFloat64(float64(verifiedCount)/float64(MaxInt(len(allPapers), 1)), 0, 1),
 			"coverageScore":         clampFloat64(coverageScore, 0, 1),
 			"success":               len(allPapers) >= MaxInt(4, len(queries)*2),
+			// Context for the LLM process-reward judge (prm.go); the heuristic
+			// formula above remains the fallback when the judge can't run.
+			"query":     firstNonEmpty(queries...),
+			"queries":   workingQueries,
+			"papers":    allPapers,
+			"iteration": i,
 		}
 
 		reward, _ := callPRM(ctx, sessionID, prmOutput)
@@ -1288,6 +1308,18 @@ var IterativeResearch = func(
 		finalCoverage = last.CoverageScore
 		finalReward = last.PRMReward
 	}
+	// Run-level outcome record pairs with the per-step records above to form
+	// (step context, scores, outcome) triples for reward-model calibration.
+	appendPRMRewardRecord(PRMRewardRecord{
+		Kind:       "outcome",
+		Source:     "loop",
+		SessionID:  sessionID,
+		Query:      firstNonEmpty(queries...),
+		Iteration:  len(iterationLogs),
+		PaperCount: len(allPapers),
+		Reward:     finalReward,
+		Coverage:   finalCoverage,
+	})
 	return &IterativeResearchResult{
 		Papers:        allPapers,
 		Iterations:    iterationLogs,

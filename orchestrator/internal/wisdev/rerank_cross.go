@@ -11,6 +11,7 @@ import (
 
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
 )
 
 var (
@@ -87,10 +88,11 @@ func rerankPapersStage2(ctx context.Context, query string, papers []Source, doma
 			llmScore = lexicalRelevance(query, paper)
 		}
 		qualitySignal := computePaperQualitySignal(paper)
+		recencySignal := search.RecencyNorm(paper.Year)
 		negationPenalty := computeNegationPenalty(paper)
 		domainBoost := computeDomainBoost(domain, paper)
 
-		combined := (0.65 * llmScore) + (0.25 * qualitySignal) + (0.10 * domainBoost) - negationPenalty
+		combined := (0.50 * llmScore) + (0.18 * qualitySignal) + (0.22 * recencySignal) + (0.10 * domainBoost) - negationPenalty
 		combined = ClampFloat(combined, 0.0, 1.0)
 
 		updated := paper
@@ -100,7 +102,10 @@ func rerankPapersStage2(ctx context.Context, query string, papers []Source, doma
 
 	sort.SliceStable(scored, func(i, j int) bool {
 		if scored[i].Score == scored[j].Score {
-			return scored[i].Paper.Title < scored[j].Paper.Title
+			if scored[i].Paper.Year == scored[j].Paper.Year {
+				return scored[i].Paper.CitationCount > scored[j].Paper.CitationCount
+			}
+			return scored[i].Paper.Year > scored[j].Paper.Year
 		}
 		return scored[i].Score > scored[j].Score
 	})

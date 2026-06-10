@@ -189,6 +189,7 @@ func resolveRetrievePapersSearchOptions(payload map[string]any, session *AgentSe
 		domain = strings.TrimSpace(session.DetectedDomain)
 	}
 
+	query = prepareSearchQueryText(query)
 	return query, SearchOptions{
 		Limit:               limit,
 		ExpandQuery:         retrievalStrategyEnabled(strategies, RetrievalStrategySemanticFocus),

@@ -121,9 +121,12 @@ type adkToolResult struct {
 }
 
 var (
-	newGeminiModel         = gemini.NewModel
-	resolveADKProjectID    = resilience.ResolveGoogleCloudProjectIDWithSource
-	resolveADKGoogleAPIKey = llm.ResolveGoogleAPIKey
+	newGeminiModel               = gemini.NewModel
+	newADKOpenAICompatibleModel  = llm.NewADKOpenAICompatibleModel
+	newADKOpenAICompatibleClient = llm.NewOpenAICompatibleClient
+	resolveADKLocalLLMConfig     = llm.ResolveOpenAICompatibleConfig
+	resolveADKProjectID          = resilience.ResolveGoogleCloudProjectIDWithSource
+	resolveADKGoogleAPIKey       = llm.ResolveGoogleAPIKey
 )
 
 const officialADKModule = "google.golang.org/adk"
@@ -772,6 +775,47 @@ func adkEventText(event *session.Event) string {
 	return ""
 }
 
+func (r *ADKRuntime) bindLocalADKModel(ctx context.Context) (model.LLM, string, error) {
+	if llm.ResolveLLMProviderMode() == llm.LLMProviderModeHybrid {
+		return nil, "", nil
+	}
+	baseURL, modelName, apiKey, localConfigured := resolveADKLocalLLMConfig()
+	if !localConfigured {
+		return nil, "", nil
+	}
+	client := newADKOpenAICompatibleClient(baseURL, modelName, apiKey)
+	probeCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	if err := client.HealthCheck(probeCtx); err != nil {
+		if llm.LocalLLMProviderForced() {
+			return nil, "", fmt.Errorf("adk local llm unavailable: %w", err)
+		}
+		slog.Warn("adk local llm health check failed; falling back to managed model",
+			"component", "wisdev.adk_runtime",
+			"operation", "bind_local_model",
+			"base_url", baseURL,
+			"error", err,
+		)
+		return nil, "", nil
+	}
+	adkModel, err := newADKOpenAICompatibleModel(client)
+	if err != nil {
+		if llm.LocalLLMProviderForced() {
+			return nil, "", fmt.Errorf("adk local llm init failed: %w", err)
+		}
+		slog.Warn("adk local llm init failed; falling back to managed model",
+			"component", "wisdev.adk_runtime",
+			"operation", "bind_local_model",
+			"error", err,
+		)
+		return nil, "", nil
+	}
+	if r != nil {
+		r.ModelBackend = client.BackendName()
+	}
+	return adkModel, client.CredentialSource(), nil
+}
+
 func (r *ADKRuntime) Bind(ctx context.Context, gateway *AgentGateway) {
 	if r == nil || gateway == nil || gateway.Registry == nil {
 		return
@@ -795,6 +839,21 @@ func (r *ADKRuntime) Bind(ctx context.Context, gateway *AgentGateway) {
 		credentialSource string
 		vertexInitErr    error
 	)
+
+	if adkModel, credentialSource, err = r.bindLocalADKModel(ctx); err != nil {
+		r.InitError = err.Error()
+		return
+	}
+	if adkModel != nil {
+		r.CredentialSource = credentialSource
+		slog.Info("adk model initialized",
+			"credential_source", credentialSource,
+			"model_backend", r.ModelBackend,
+			"project_id", projectID,
+			"location", location,
+		)
+		goto bindTools
+	}
 
 	if projectID != "" {
 		vertexCfg := &genai.ClientConfig{
@@ -844,8 +903,14 @@ func (r *ADKRuntime) Bind(ctx context.Context, gateway *AgentGateway) {
 	}
 	r.CredentialSource = credentialSource
 
-	slog.Info("adk model initialized", "credential_source", credentialSource, "project_id", projectID, "location", location)
+	slog.Info("adk model initialized",
+		"credential_source", credentialSource,
+		"model_backend", r.ModelBackend,
+		"project_id", projectID,
+		"location", location,
+	)
 
+bindTools:
 	// 3. Wrap Registry Tools as ADK FunctionTools
 	tools := make([]adktool.Tool, 0, len(gateway.Registry.List()))
 	for _, toolDef := range gateway.Registry.List() {

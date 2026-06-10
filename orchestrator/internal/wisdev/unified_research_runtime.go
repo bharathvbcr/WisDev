@@ -267,9 +267,23 @@ func (rt *UnifiedResearchRuntime) RunLoop(
 	if rt == nil || rt.loop == nil {
 		return nil, fmt.Errorf("unified research runtime is not initialized")
 	}
-	query := strings.TrimSpace(req.Query)
-	if query == "" {
+	rawQuery := strings.TrimSpace(firstNonEmpty(req.OriginalQuery, req.Query))
+	if rawQuery == "" {
 		return nil, fmt.Errorf("query is required")
+	}
+	prep := EarlyPrepareResearchQuery(ctx, rawQuery, rt.llmClient, req.DisableQueryEnhance)
+	originalQuery := strings.TrimSpace(firstNonEmpty(req.OriginalQuery, prep.Original, rawQuery))
+	query := strings.TrimSpace(firstNonEmpty(prep.SearchQuery, prep.Corrected, req.Query, rawQuery))
+	req.OriginalQuery = originalQuery
+	req.Query = query
+	if prep.Changed && query != originalQuery {
+		slog.Info("Query grammar corrected before unified research runtime",
+			"component", "wisdev.unified_research_runtime",
+			"operation", "run_loop",
+			"stage", "query_prepared",
+			"original_query", originalQuery,
+			"corrected_query", query,
+		)
 	}
 
 	state := newResearchSessionState(query, req.Domain, firstNonEmpty(req.ProjectID, NewTraceID()), plane)
@@ -279,7 +293,7 @@ func (rt *UnifiedResearchRuntime) RunLoop(
 	state.DurableJob = newResearchDurableJobState(state, req)
 	session := &AgentSession{
 		SessionID:      state.SessionID,
-		Query:          query,
+		Query:          originalQuery,
 		CorrectedQuery: query,
 		DetectedDomain: strings.TrimSpace(req.Domain),
 		Mode:           NormalizeWisDevMode(req.Mode),
@@ -873,6 +887,7 @@ func (rt *UnifiedResearchRuntime) RunAnswer(ctx context.Context, req UnifiedRese
 	startedAt := time.Now()
 	loopReq := LoopRequest{
 		Query:                       req.Query,
+		OriginalQuery:               strings.TrimSpace(req.Query),
 		SeedQueries:                 req.SeedQueries,
 		Domain:                      req.Domain,
 		ProjectID:                   req.ProjectID,

@@ -635,6 +635,7 @@ func (rt *ResearchQuestRuntime) defaultRetrieve(ctx context.Context, quest *Rese
 	}
 	runtimeResult, err := questRunUnifiedResearchLoop(ctx, runtime, LoopRequest{
 		Query:           query,
+		OriginalQuery:   strings.TrimSpace(quest.Query),
 		SeedQueries:     followUpQueries,
 		Domain:          strings.TrimSpace(firstNonEmpty(quest.Domain, quest.DetectedDomain)),
 		ProjectID:       firstNonEmpty(quest.SessionID, quest.QuestID, NewTraceID()),

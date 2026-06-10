@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
 )
 
 // ResearchBranchPlan is the durable form of a tree/MCTS research branch. Query
@@ -19,6 +21,7 @@ type ResearchBranchPlan struct {
 	FalsifiabilityCondition string   `json:"falsifiabilityCondition,omitempty"`
 	ClosureCondition        string   `json:"closureCondition,omitempty"`
 	ParentID                string   `json:"parentId,omitempty"`
+	DependsOnPlanIDs        []string `json:"dependsOnPlanIds,omitempty"`
 	Depth                   int      `json:"depth,omitempty"`
 	SearchWeight            float64  `json:"searchWeight,omitempty"`
 	Status                  string   `json:"status,omitempty"`
@@ -153,6 +156,7 @@ func branchPlanFromMap(rootQuery string, raw map[string]any, id string, branchID
 		FalsifiabilityCondition: firstNonEmpty(AsOptionalString(raw["falsifiabilityCondition"]), AsOptionalString(raw["falsifiability_condition"]), AsOptionalString(raw["falsification_condition"]), "credible contradictory or missing grounded evidence invalidates this branch"),
 		ClosureCondition:        firstNonEmpty(AsOptionalString(raw["closureCondition"]), AsOptionalString(raw["closure_condition"]), "grounded evidence, source diversity, citation identity, and contradiction checks are resolved"),
 		ParentID:                firstNonEmpty(AsOptionalString(raw["parentId"]), AsOptionalString(raw["parent_id"])),
+		DependsOnPlanIDs:        branchPlanStringSlice(firstPresent(raw, "dependsOnPlanIds", "depends_on_plan_ids", "dependsOn", "depends_on")),
 		Depth:                   depth,
 		SearchWeight:            ClampFloat(weight, 0.05, 1),
 		Status:                  firstNonEmpty(AsOptionalString(raw["status"]), status, "planned"),
@@ -166,7 +170,202 @@ func researchBranchPlansFromQueries(rootQuery string, queries []string) []Resear
 	for idx, query := range queries {
 		plans = append(plans, defaultResearchBranchPlan(rootQuery, query, fmt.Sprintf("branch-%03d", idx+1)))
 	}
+	return attachResearchBranchPlanDependencies(rootQuery, plans)
+}
+
+func attachResearchBranchPlanDependencies(rootQuery string, plans []ResearchBranchPlan) []ResearchBranchPlan {
+	if len(plans) == 0 {
+		return nil
+	}
+	rootQuery = strings.TrimSpace(rootQuery)
+	rootID := strings.TrimSpace(plans[0].ID)
+	for idx := range plans {
+		if strings.EqualFold(strings.TrimSpace(plans[idx].Query), rootQuery) {
+			rootID = strings.TrimSpace(plans[idx].ID)
+			break
+		}
+	}
+	if rootID == "" {
+		rootID = "branch-001"
+	}
+
+	primaryEvidenceIDs := make([]string, 0, len(plans))
+	facetEvidenceIDs := make([]string, 0, len(plans))
+	for _, plan := range plans {
+		if strings.TrimSpace(plan.ID) == "" {
+			continue
+		}
+		lower := strings.ToLower(plan.Query)
+		switch {
+		case strings.EqualFold(strings.TrimSpace(plan.Query), rootQuery):
+			continue
+		case isPrimaryEvidenceAgendaQuery(lower):
+			primaryEvidenceIDs = appendUniquePlanID(primaryEvidenceIDs, plan.ID)
+		}
+		if isFacetEvidenceAgendaQuery(lower) {
+			facetEvidenceIDs = appendUniquePlanID(facetEvidenceIDs, plan.ID)
+		}
+	}
+	if len(primaryEvidenceIDs) == 0 {
+		primaryEvidenceIDs = appendUniquePlanID(primaryEvidenceIDs, rootID)
+	}
+
+	for idx := range plans {
+		query := strings.TrimSpace(plans[idx].Query)
+		if query == "" || strings.EqualFold(query, rootQuery) {
+			plans[idx].ReasoningStrategy = firstNonEmpty(plans[idx].ReasoningStrategy, "root_research_goal")
+			continue
+		}
+		plans[idx].ParentID = firstNonEmpty(strings.TrimSpace(plans[idx].ParentID), rootID)
+		plans[idx].DependsOnPlanIDs = appendUniquePlanID(plans[idx].DependsOnPlanIDs, plans[idx].ParentID)
+		plans[idx].ReasoningStrategy = firstNonEmpty(strings.TrimSpace(plans[idx].ReasoningStrategy), "recursive_query_decomposition")
+		plans[idx].Depth = maxInt(plans[idx].Depth, 1)
+
+		lower := strings.ToLower(query)
+		if isComparativeSynthesisAgendaQuery(lower) && len(facetEvidenceIDs) > 0 {
+			plans[idx].ParentID = facetEvidenceIDs[0]
+			plans[idx].DependsOnPlanIDs = uniqueStrings(append(append([]string(nil), facetEvidenceIDs...), rootID))
+			plans[idx].ReasoningStrategy = "dependent_comparative_synthesis"
+			plans[idx].Depth = maxInt(plans[idx].Depth, 2)
+			continue
+		}
+		if isVerificationAgendaQuery(lower) {
+			plans[idx].ParentID = primaryEvidenceIDs[0]
+			plans[idx].DependsOnPlanIDs = uniqueStrings(append(append([]string(nil), primaryEvidenceIDs...), rootID))
+			plans[idx].ReasoningStrategy = "dependent_verification"
+			plans[idx].Depth = maxInt(plans[idx].Depth, 2)
+		}
+	}
+	return normalizeResearchBranchPlans(rootQuery, plans)
+}
+
+func isPrimaryEvidenceAgendaQuery(lowerQuery string) bool {
+	return strings.Contains(lowerQuery, "primary evidence") ||
+		strings.Contains(lowerQuery, "mechanism evidence") ||
+		strings.Contains(lowerQuery, "systematic review") ||
+		strings.Contains(lowerQuery, "evidence and deployment") ||
+		strings.Contains(lowerQuery, "pre-prints evidence") ||
+		strings.Contains(lowerQuery, "materials synthesis")
+}
+
+func isFacetEvidenceAgendaQuery(lowerQuery string) bool {
+	return strings.Contains(lowerQuery, "rag-based systems evidence") ||
+		strings.Contains(lowerQuery, "fine-tuned model deployment evidence") ||
+		strings.Contains(lowerQuery, "recent pre-prints evidence") ||
+		strings.Contains(lowerQuery, "historical failed replications")
+}
+
+func isComparativeSynthesisAgendaQuery(lowerQuery string) bool {
+	return strings.Contains(lowerQuery, "comparative tradeoffs") ||
+		strings.Contains(lowerQuery, "versus") ||
+		strings.Contains(lowerQuery, "cross-referencing")
+}
+
+func isVerificationAgendaQuery(lowerQuery string) bool {
+	return strings.Contains(lowerQuery, "limitations") ||
+		strings.Contains(lowerQuery, "contradictory") ||
+		strings.Contains(lowerQuery, "citation graph") ||
+		strings.Contains(lowerQuery, "failed replication") ||
+		strings.Contains(lowerQuery, "experimental pitfall") ||
+		strings.Contains(lowerQuery, "falsification") ||
+		strings.Contains(lowerQuery, "bias")
+}
+
+func appendUniquePlanID(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if strings.EqualFold(strings.TrimSpace(existing), value) {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func researchBranchPlansFromHypotheses(rootQuery string, hypotheses []Hypothesis) []ResearchBranchPlan {
+	if len(hypotheses) == 0 {
+		return nil
+	}
+	plans := make([]ResearchBranchPlan, 0, len(hypotheses))
+	for idx, hypothesis := range hypotheses {
+		claim := strings.TrimSpace(firstNonEmpty(hypothesis.Claim, hypothesis.Text, hypothesis.Query))
+		if claim == "" {
+			continue
+		}
+		falsifiability := strings.TrimSpace(hypothesis.FalsifiabilityCondition)
+		if falsifiability == "" {
+			falsifiability = "credible contradictory or missing grounded evidence invalidates this hypothesis"
+		}
+		evidenceQuery := buildResearchWorkerQuery(rootQuery, "hypothesis evidence: "+claim)
+		falsificationQuery := buildResearchWorkerQuery(rootQuery, "falsification check: "+falsifiability)
+		contradictionQuery := buildResearchWorkerQuery(rootQuery, "contradiction and bias check: "+claim)
+		planID := strings.TrimSpace(hypothesis.ID)
+		if planID == "" {
+			planID = stableWisDevID("pre-retrieval-hypothesis", rootQuery, claim)
+		}
+		plans = append(plans, ResearchBranchPlan{
+			ID:                      firstNonEmpty(planID, fmt.Sprintf("hypothesis-branch-%03d", idx+1)),
+			Query:                   evidenceQuery,
+			Hypothesis:              claim,
+			RetrievalPlan:           normalizeLoopQueries(rootQuery, []string{evidenceQuery, falsificationQuery, contradictionQuery}),
+			ReasoningStrategy:       "pre_retrieval_hypothesis_test",
+			FalsifiabilityCondition: falsifiability,
+			ClosureCondition:        "supporting evidence, falsification probes, and contradiction checks are represented before synthesis",
+			Depth:                   1,
+			SearchWeight:            ClampFloat(firstNonEmptyFloat(hypothesis.ConfidenceScore, hypothesis.ConfidenceThreshold, 0.65), 0.05, 1),
+			Status:                  firstNonEmpty(strings.TrimSpace(hypothesis.Status), "planned"),
+			StopReason:              "pending_retrieval",
+		})
+	}
+	return normalizeResearchBranchPlans(rootQuery, plans)
+}
+
+func researchBranchPlansWithExecutionStatus(rootQuery string, plannedQueries []string, executedQueries []string, queryCoverage map[string][]search.Paper) []ResearchBranchPlan {
+	return applyResearchBranchPlanExecutionStatus(researchBranchPlansFromQueries(rootQuery, plannedQueries), executedQueries, queryCoverage)
+}
+
+// applyResearchBranchPlanExecutionStatus overlays executed/retrieved status onto
+// existing branch plans without rebuilding them, so richer plan metadata (for
+// example pre-retrieval hypothesis branches) is preserved.
+func applyResearchBranchPlanExecutionStatus(plans []ResearchBranchPlan, executedQueries []string, queryCoverage map[string][]search.Paper) []ResearchBranchPlan {
+	if len(plans) == 0 {
+		return plans
+	}
+	executed := make(map[string]struct{}, len(executedQueries))
+	for _, query := range executedQueries {
+		key := loopQueryMatchKey(query)
+		if key != "" {
+			executed[key] = struct{}{}
+		}
+	}
+	coverageByKey := make(map[string][]search.Paper, len(queryCoverage))
+	for query, papers := range queryCoverage {
+		key := loopQueryMatchKey(query)
+		if key == "" {
+			continue
+		}
+		coverageByKey[key] = appendUniqueSearchPapers(coverageByKey[key], papers)
+	}
+	for idx := range plans {
+		key := loopQueryMatchKey(plans[idx].Query)
+		if _, ok := executed[key]; !ok {
+			continue
+		}
+		plans[idx].Status = "executed"
+		if len(coverageByKey[key]) > 0 {
+			plans[idx].Status = "retrieved"
+			plans[idx].StopReason = "sources_found"
+			continue
+		}
+		plans[idx].StopReason = "no_sources"
+	}
 	return plans
+}
+
+func loopQueryMatchKey(query string) string {
+	return strings.ToLower(strings.TrimSpace(applyResearchQueryCorrections(normalizeResearchQueryText(query))))
 }
 
 func defaultResearchBranchPlan(rootQuery string, query string, id string) ResearchBranchPlan {
@@ -218,6 +417,7 @@ func normalizeResearchBranchPlans(rootQuery string, plans []ResearchBranchPlan) 
 		if strings.TrimSpace(plan.ClosureCondition) == "" {
 			plan.ClosureCondition = "grounded evidence, source diversity, citation identity, and contradiction checks are resolved"
 		}
+		plan.DependsOnPlanIDs = uniqueStrings(plan.DependsOnPlanIDs)
 		if plan.Depth <= 0 {
 			plan.Depth = 1
 		}
@@ -234,6 +434,18 @@ func normalizeResearchBranchPlans(rootQuery string, plans []ResearchBranchPlan) 
 		out = append(out, plan)
 	}
 	return out
+}
+
+func mergeResearchBranchPlans(rootQuery string, groups ...[]ResearchBranchPlan) []ResearchBranchPlan {
+	total := 0
+	for _, group := range groups {
+		total += len(group)
+	}
+	merged := make([]ResearchBranchPlan, 0, total)
+	for _, group := range groups {
+		merged = append(merged, group...)
+	}
+	return normalizeResearchBranchPlans(rootQuery, merged)
 }
 
 func researchBranchPlanQueries(plans []ResearchBranchPlan) []string {

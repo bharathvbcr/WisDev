@@ -140,16 +140,7 @@ func (s *AgentSwarmCoordinator) LaunchSwarm(ctx context.Context) ([]*Hypothesis,
 
 // rankHypothesesList sorts a provided slice of hypotheses by confidence score.
 func (s *AgentSwarmCoordinator) rankHypothesesList(list []*Hypothesis) {
-	// Implement simple selection sort for descending confidence
-	for i := 0; i < len(list); i++ {
-		maxIdx := i
-		for j := i + 1; j < len(list); j++ {
-			if list[j].ConfidenceScore > list[maxIdx].ConfidenceScore {
-				maxIdx = j
-			}
-		}
-		list[i], list[maxIdx] = list[maxIdx], list[i]
-	}
+	NewHypothesisRanker().Rank(list)
 }
 
 // generateHypotheses generates initial hypotheses from a query.
@@ -190,80 +181,19 @@ func (s *AgentSwarmCoordinator) gatherEvidenceForHypothesis(ctx context.Context,
 // Stage 3: specialist-verification weighting.
 // Stage 4: confidence aggregation with contradiction penalty.
 func (s *AgentSwarmCoordinator) verificationLayer(ctx context.Context, hypothesis *Hypothesis) error {
-	if strings.TrimSpace(hypothesis.Text) == "" {
-		return fmt.Errorf("hypothesis text is empty")
+	if s.verLayer == nil {
+		s.verLayer = NewVerificationLayer(VerificationLayerConfig{
+			EnableSourceScoring:          true,
+			EnableClaimLinking:           true,
+			EnableContradictionDetection: true,
+			EnableConfidenceAggregation:  true,
+		})
 	}
-
-	// Stage 1: Score source credibility (recency + overlap + existing confidence)
-	for _, ev := range hypothesis.Evidence {
-		ev.Confidence = s.scoreSourceCredibility(ev)
-	}
-
-	// Stage 2: Detect contradicting evidence pairs.
-	// Each pair where two findings make opposing claims raises the contradiction count.
-	pairs := s.detectContradictionPairs(hypothesis)
-	hypothesis.ContradictionCount = len(pairs)
-	// Keep the explicit contradiction slice aligned with the count.
-	contradictingSet := make(map[string]bool, len(pairs)*2)
-	for _, p := range pairs {
-		contradictingSet[p.FindingA.ID] = true
-		contradictingSet[p.FindingB.ID] = true
-	}
-	var contradictingEvidence []*EvidenceFinding
-	for _, ev := range hypothesis.Evidence {
-		if contradictingSet[ev.ID] {
-			contradictingEvidence = append(contradictingEvidence, ev)
-		}
-	}
-	hypothesis.Contradictions = contradictingEvidence
-
-	// Stage 3: Specialist-verification downweight — evidence explicitly rejected
-	// (Specialist.Verification == -1) is penalised in Stage 4 via aggregation.
-
-	// Stage 4: Aggregate confidence with contradiction penalty
-	hypothesis.ConfidenceScore = s.aggregateConfidence(hypothesis)
-
-	return nil
+	return s.verLayer.Verify(ctx, hypothesis)
 }
 
 func (s *AgentSwarmCoordinator) scoreSourceCredibility(ev *EvidenceFinding) float64 {
-	// Formula: Impact (0.4) + Overlap (0.3) + Recency (0.3)
-	// Impact: carry forward any existing confidence signal (0.5 baseline).
-	impact := ev.Confidence
-	if impact <= 0 {
-		impact = 0.5
-	}
-	// Cap impact at 1.0 so we don't compound self-referentially.
-	if impact > 1.0 {
-		impact = 1.0
-	}
-
-	overlap := ev.OverlapRatio
-	if overlap <= 0 {
-		overlap = 0.5 // default when not measured
-	}
-
-	// Recency: papers from the last 2 years score 1.0, decay linearly to 0.3 over 10 years.
-	recency := 0.5 // neutral default when year is unknown
-	if ev.Year > 0 {
-		currentYear := time.Now().Year()
-		age := currentYear - ev.Year
-		if age < 0 {
-			age = 0
-		}
-		switch {
-		case age <= 2:
-			recency = 1.0
-		case age <= 5:
-			recency = 0.85
-		case age <= 10:
-			recency = 0.65
-		default:
-			recency = 0.3
-		}
-	}
-
-	return (impact * 0.4) + (overlap * 0.3) + (recency * 0.3)
+	return scoreEvidenceSourceCredibility(ev)
 }
 
 // detectContradictionPairs identifies oppositely-valenced evidence pairs.
@@ -359,53 +289,7 @@ func contradictionPairsFor(h *Hypothesis) []ContradictionPair {
 }
 
 func (s *AgentSwarmCoordinator) aggregateConfidence(h *Hypothesis) float64 {
-	if len(h.Evidence) == 0 {
-		return 0.0
-	}
-
-	// Weighted mean: specialist-verified evidence (+) / rejected evidence (-) counts double.
-	totalWeight := 0.0
-	weightedConf := 0.0
-	for _, ev := range h.Evidence {
-		weight := 1.0
-		switch ev.Specialist.Verification {
-		case 1:
-			weight = 2.0 // Verified by specialist
-		case -1:
-			weight = 0.25 // Rejected — down-weight heavily
-		}
-		weightedConf += ev.Confidence * weight
-		totalWeight += weight
-	}
-
-	baseConf := weightedConf / totalWeight
-
-	// Contradiction penalty: each high-confidence pair reduces score by 0.15,
-	// medium by 0.08, low by 0.03 — capped at 40% total reduction.
-	penalty := 0.0
-	for _, pair := range s.pairsForHypothesis(h) {
-		switch pair.Severity {
-		case ContradictionHigh:
-			penalty += 0.15
-		case ContradictionMedium:
-			penalty += 0.08
-		case ContradictionLow:
-			penalty += 0.03
-		}
-	}
-	if penalty > 0.40 {
-		penalty = 0.40
-	}
-	baseConf -= penalty
-
-	if baseConf < 0 {
-		baseConf = 0
-	}
-	if baseConf > 1.0 {
-		baseConf = 1.0
-	}
-
-	return baseConf
+	return aggregateHypothesisConfidence(h, s.pairsForHypothesis(h))
 }
 
 // pairsForHypothesis re-runs contradiction pair detection (read-only) to feed aggregation.

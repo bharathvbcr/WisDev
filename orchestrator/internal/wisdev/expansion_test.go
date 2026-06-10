@@ -1,9 +1,17 @@
 package wisdev
 
 import (
+	"context"
+	"encoding/json"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
 )
 
 func TestApplyMultiSourceScoreBoost(t *testing.T) {
@@ -19,34 +27,40 @@ func TestApplyMultiSourceScoreBoost(t *testing.T) {
 	assert.Equal(t, 0.2, boosted[2].Score)
 }
 
-func TestDetectIntent(t *testing.T) {
-	tests := []struct {
-		query    string
-		expected string
-	}{
-		{"cancer treatment", "medical"},
-		{"machine learning algorithm", "computer_science"},
-		{"system design and architecture", "implementation"},
-		{"systematic review of literature", "review"},
-		{"random topic", "academic"},
+func TestExpandQueryWithLLMPrep(t *testing.T) {
+	preparedQueryCache = sync.Map{}
+	msc := &mockLLMServiceClient{}
+	client := llm.NewClient()
+	client.SetClient(msc)
+	payload := structuredResearchQueryPrep{
+		CorrectedQuery: "large language model transformer",
+		SearchQuery:    "large language model transformer",
+		Domain:         "cs",
+		Intent:         "computer_science",
+		Keywords:       []string{"large", "language", "model", "transformer"},
+		Synonyms:       []string{"LLM", "foundation model"},
+		SeedQueries:    []string{"large language model transformer"},
+		AgendaQueries:  []string{"large language model transformer systematic review"},
 	}
+	data, err := json.Marshal(payload)
+	require.NoError(t, err)
+	msc.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
+		return strings.Contains(req.Prompt, "Prepare this academic research query")
+	})).Return(&llmv1.StructuredResponse{JsonResult: string(data)}, nil).Once()
 
-	for _, tt := range tests {
-		assert.Equal(t, tt.expected, detectIntent(tt.query))
-	}
+	expanded := ExpandQueryWithContext(context.Background(), "large language model transformer", client)
+	assert.Contains(t, expanded.Expanded, "LLM")
+	assert.Equal(t, "computer_science", expanded.Intent)
+	assert.Contains(t, expanded.Keywords, "transformer")
 }
 
-func TestExpandQuery(t *testing.T) {
-	t.Run("Synonyms", func(t *testing.T) {
-		expanded := ExpandQuery("large language model transformer")
-		assert.Contains(t, expanded.Expanded, "LLM")
-		assert.Equal(t, "computer_science", expanded.Intent)
-		assert.Contains(t, expanded.Keywords, "transformer")
-	})
+func TestExpandQueryOfflineFallback(t *testing.T) {
+	oldClient := GlobalLLMClient
+	GlobalLLMClient = nil
+	defer func() { GlobalLLMClient = oldClient }()
+	preparedQueryCache = sync.Map{}
 
-	t.Run("Keywords only", func(t *testing.T) {
-		expanded := ExpandQuery("abc def ghi")
-		assert.Equal(t, "abc def ghi", expanded.Expanded)
-		assert.Equal(t, "academic", expanded.Intent)
-	})
+	expanded := ExpandQueryWithContext(context.Background(), "abc def ghi", nil)
+	assert.Equal(t, "abc def ghi", expanded.Expanded)
+	assert.Equal(t, "academic", expanded.Intent)
 }

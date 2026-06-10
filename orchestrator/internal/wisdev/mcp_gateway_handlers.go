@@ -12,9 +12,12 @@
 package wisdev
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -107,11 +110,38 @@ func (gw *AgentGateway) RegisterMCPRoutes(mux *http.ServeMux, cfg MCPRouteConfig
 			adkToolInfos = append(adkToolInfos, adkToolInfo{Name: t.Name()})
 		}
 
+		llmStatus := map[string]any{"configured": false}
+		if gw.LLMClient != nil {
+			probeCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			llmStatus = gw.LLMClient.DirectProviderStatus(probeCtx)
+			cancel()
+		}
+
+		adkBridge := map[string]any{
+			"enabled":   true,
+			"toolCount": len(adkTools),
+			"tools":     adkToolInfos,
+			"runtime":   officialADKModule,
+		}
+		if gw.ADKRuntime != nil {
+			if meta := gw.ADKRuntime.Metadata(); meta != nil {
+				if backend := strings.TrimSpace(fmt.Sprint(meta["modelBackend"])); backend != "" {
+					adkBridge["modelBackend"] = backend
+				}
+				if source := strings.TrimSpace(fmt.Sprint(meta["credentialSource"])); source != "" {
+					adkBridge["credentialSource"] = source
+				}
+				adkBridge["ready"] = meta["ready"]
+				adkBridge["status"] = meta["status"]
+			}
+		}
+
 		status := map[string]any{
 			"status":          "ok",
 			"serverName":      mcpSrv.ServerName,
 			"serverVersion":   mcpSrv.ServerVersion,
 			"protocolVersion": mcpProtocolVersion,
+			"llmDirect":       llmStatus,
 			"mcpTools": map[string]any{
 				"count": len(mcpSrv.allTools()),
 				"names": func() []string {
@@ -122,12 +152,7 @@ func (gw *AgentGateway) RegisterMCPRoutes(mux *http.ServeMux, cfg MCPRouteConfig
 					return names
 				}(),
 			},
-			"adkBridge": map[string]any{
-				"enabled":   true,
-				"toolCount": len(adkTools),
-				"tools":     adkToolInfos,
-				"runtime":   officialADKModule,
-			},
+			"adkBridge": adkBridge,
 			"searchRegistry": map[string]any{
 				"providerCount": providerCount,
 				"providers":     gw.SearchRegistry.All(),
@@ -160,11 +185,18 @@ func (gw *AgentGateway) MCPStatus() map[string]any {
 	bridge := NewMCPADKBridge(gw.SearchRegistry)
 	adkTools := bridge.BuildADKTools()
 	srv := NewMCPServer(gw.SearchRegistry)
+	llmStatus := map[string]any{"configured": false}
+	if gw.LLMClient != nil {
+		probeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		llmStatus = gw.LLMClient.DirectProviderStatus(probeCtx)
+		cancel()
+	}
 	return map[string]any{
 		"mcpEnabled":      true,
 		"protocolVersion": mcpProtocolVersion,
 		"mcpToolCount":    len(srv.allTools()),
 		"adkToolCount":    len(adkTools),
 		"providerCount":   providerCount,
+		"llmDirect":       llmStatus,
 	}
 }

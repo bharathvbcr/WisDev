@@ -122,6 +122,22 @@ func TestAutonomousLoopHelpers_Resolution(t *testing.T) {
 		assert.Equal(t, 5, resolveLoopSearchTermBudget(5, 0))
 		assert.Equal(t, 5, resolveLoopSearchTermBudget(0, 5))
 		assert.Equal(t, 3, resolveLoopSearchTermBudget(8, 3))
+
+		assert.True(t, loopMinimumIterationsMet(LoopRequest{}, 1))
+		assert.True(t, loopMinimumIterationsMet(LoopRequest{MinIterations: 3}, 3))
+		assert.False(t, loopMinimumIterationsMet(LoopRequest{MinIterations: 3}, 2))
+		assert.True(t, loopExhaustiveMode(LoopRequest{MinIterations: 12, MaxIterations: 12}))
+		assert.False(t, shouldAllowLoopEarlyStop(LoopRequest{MinIterations: 12, MaxIterations: 12}, 7))
+		assert.True(t, shouldAllowLoopEarlyStop(LoopRequest{MinIterations: 12, MaxIterations: 12}, 12))
+		pending := []string{}
+		seen := map[string]struct{}{}
+		assert.True(t, enqueueExhaustiveContinuationQueries(LoopRequest{
+			Query:          "meniscus scaffolds and ACL reconstruction",
+			MinIterations:  12,
+			MaxIterations:  12,
+			SeedQueries:    []string{"acl graft outcomes"},
+		}, &pending, seen, []string{"meniscus repair"}))
+		assert.NotEmpty(t, pending)
 		assert.Equal(t, 3, resolveLoopQueryParallelism(string(WisDevModeYOLO), ResearchExecutionPlaneAutonomous))
 		assert.Equal(t, 3, resolveLoopQueryParallelism(string(WisDevModeYOLO), ResearchExecutionPlaneJob))
 		assert.Equal(t, 2, resolveLoopQueryParallelism(string(WisDevModeYOLO), ""))

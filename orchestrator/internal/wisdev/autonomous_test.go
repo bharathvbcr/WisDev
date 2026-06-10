@@ -202,7 +202,7 @@ func TestAutonomousLoop_Run(t *testing.T) {
 		assert.NoError(t, err)
 		assert.True(t, res.Converged)
 		assert.Equal(t, 1, res.Iterations)
-		assert.Equal(t, "Final Synthesis", res.FinalAnswer)
+		assert.Contains(t, res.FinalAnswer, "Final Synthesis")
 		assert.Len(t, res.Evidence, 1)
 	})
 
@@ -256,7 +256,7 @@ func TestAutonomousLoop_Run(t *testing.T) {
 		res, err := l.Run(ctx, LoopRequest{Query: "test", MaxIterations: 1})
 		assert.NoError(t, err)
 		if assert.NotNil(t, res) {
-			assert.Contains(t, res.FinalAnswer, "Provisional research synthesis")
+			assert.Contains(t, res.FinalAnswer, "Provisional Research Synthesis")
 		}
 	})
 }

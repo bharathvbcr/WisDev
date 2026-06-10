@@ -262,6 +262,7 @@ func (gw *AgentGateway) defaultPythonExecutor(ctx context.Context, action string
 
 		loopReq := LoopRequest{
 			Query:         query,
+			OriginalQuery: strings.TrimSpace(query),
 			Domain:        domain,
 			MaxIterations: int(maxIter),
 			BudgetCents:   int(budget),
@@ -559,27 +560,13 @@ func NewAgentGateway(db DBProvider, rdb redis.UniversalClient, journal *RuntimeJ
 		)
 	}
 	llmClient := llm.NewClient()
-	// Attempt to wire native Vertex AI structured output so schema-constrained
-	// generation bypasses the Python sidecar proxy (which drops the json_schema).
-	//
-	// IMPORTANT: Use a short deadline. In local dev without GCP credentials,
-	// google.FindDefaultCredentials attempts to reach the GCP metadata server
-	// (169.254.169.254) which is unreachable. Without a deadline this blocks
-	// server startup for 15–20 s (the OS socket connect timeout), delaying
-	// http.ListenAndServe and causing the first frontend requests to time out.
-	// A 4 s deadline is sufficient for ADC resolution when credentials exist.
-	vertexInitCtx, vertexInitCancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer vertexInitCancel()
-	if vertexClient, err := llm.NewVertexClient(vertexInitCtx, "", ""); err == nil {
-		llmClient.VertexDirect = vertexClient
-		slog.Info("wisdev gateway: native VertexDirect wired for structured output",
-			"backend", vertexClient.BackendName(),
-			"credential_source", vertexClient.CredentialSource(),
-		)
-	} else {
-		slog.Warn("wisdev gateway: VertexDirect unavailable — structured output will use Python sidecar (JSON schema may not be enforced)",
-			"error", err.Error(),
-		)
+	// Wire native structured-output providers (Ollama/OpenAI-compatible or Vertex).
+	// Use a short deadline so unreachable GCP metadata does not delay server startup.
+	directInitCtx, directInitCancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer directInitCancel()
+	llm.WireDirectProviders(directInitCtx, llmClient)
+	if llmClient.OpenAICompatible == nil && llmClient.VertexDirect == nil {
+		slog.Warn("wisdev gateway: no direct structured-output provider configured — structured output will use Python sidecar (JSON schema may not be enforced)")
 	}
 	memStore := NewInMemorySessionStore()
 	memCheckpoints := NewInMemoryCheckpointStore()
@@ -612,7 +599,9 @@ func NewAgentGateway(db DBProvider, rdb redis.UniversalClient, journal *RuntimeJ
 	}
 	resolvedSearchRegistry.SetDB(db)
 	resolvedSearchRegistry.SetRedis(rdb)
+	GlobalDomainOutcomes.SetRedis(rdb)
 	memoryStore := NewMemoryStoreFromRedis(rdb)
+	GlobalLLMClient = llmClient
 
 	gw := &AgentGateway{
 		Store:            sessionStore,
@@ -698,13 +687,26 @@ func (gw *AgentGateway) ensureADKSessionWithContext(ctx context.Context, session
 			}
 		}
 	}
+	rawQuery := strings.TrimSpace(query)
+	llmClient := (*llm.Client)(nil)
+	if gw != nil {
+		llmClient = gw.LLMClient
+	}
+	originalQuery, correctedQuery, planningQuery, detectedDomain := ApplyEarlySessionQueryPrep(ctx, rawQuery, "", "", strings.TrimSpace(domain), llmClient, false)
+	if strings.TrimSpace(correctedQuery) == "" {
+		correctedQuery = originalQuery
+	}
+	if strings.TrimSpace(planningQuery) == "" {
+		planningQuery = ResolveSessionQueryText(correctedQuery, originalQuery)
+	}
 	return &AgentSession{
 		SchemaVersion:  "adk-go-v1",
 		PolicyVersion:  policyVersion,
 		SessionID:      sessionID,
-		OriginalQuery:  strings.TrimSpace(query),
-		CorrectedQuery: strings.TrimSpace(query),
-		DetectedDomain: strings.TrimSpace(domain),
+		Query:          planningQuery,
+		OriginalQuery:  originalQuery,
+		CorrectedQuery: correctedQuery,
+		DetectedDomain: detectedDomain,
 		Status:         SessionQuestioning,
 		Answers:        map[string]Answer{},
 		FailureMemory:  map[string]int{},
@@ -840,14 +842,26 @@ func (gw *AgentGateway) CreateSession(ctx context.Context, userID string, query 
 	if query == "" {
 		return nil, fmt.Errorf("query is required")
 	}
+	llmClient := (*llm.Client)(nil)
+	if gw != nil {
+		llmClient = gw.LLMClient
+	}
+	originalQuery, correctedQuery, planningQuery, detectedDomain := ApplyEarlySessionQueryPrep(ctx, query, "", "", "", llmClient, false)
+	if strings.TrimSpace(correctedQuery) == "" {
+		correctedQuery = originalQuery
+	}
+	if strings.TrimSpace(planningQuery) == "" {
+		planningQuery = correctedQuery
+	}
 	sessionID := NewTraceID()
 	now := time.Now().UnixMilli()
 	session := &AgentSession{
 		SessionID:      sessionID,
 		UserID:         userID,
-		Query:          query, // planning-query field; must match OriginalQuery here
-		OriginalQuery:  query,
-		CorrectedQuery: query,
+		Query:          planningQuery,
+		OriginalQuery:  originalQuery,
+		CorrectedQuery: correctedQuery,
+		DetectedDomain: detectedDomain,
 		Status:         SessionQuestioning,
 		CreatedAt:      now,
 		UpdatedAt:      now,

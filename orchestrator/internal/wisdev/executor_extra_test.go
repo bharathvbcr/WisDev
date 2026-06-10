@@ -102,7 +102,7 @@ func TestPlanExecutor_RunStepWithRecovery_Extra(t *testing.T) {
 		lc := llm.NewClient()
 		lc.SetClient(mockLLM)
 		mockLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
-			return strings.Contains(req.Prompt, `Synthesize a comprehensive research report for the query: "sleep memory"`) &&
+			return strings.Contains(req.Prompt, `Synthesize a highly explanatory, comprehensive, and learning-oriented research report for the query: "sleep memory"`) &&
 				strings.Contains(req.Prompt, "ID: p1 | Title: Sleep Study")
 		})).Return(&llmv1.StructuredResponse{JsonResult: `{"sections":[{"heading":"Findings","sentences":[{"text":"sleep supports memory consolidation","evidenceIds":["p1"]}]}]}`}, nil).Once()
 
@@ -126,7 +126,7 @@ func TestPlanExecutor_RunStepWithRecovery_Extra(t *testing.T) {
 		res := e.RunStepWithRecovery(context.Background(), session, step, 1)
 		require.NoError(t, res.Err)
 		assert.Equal(t, 0.9, res.Confidence)
-		assert.Equal(t, "## Findings\n\nsleep supports memory consolidation", res.Payload["text"])
+		assert.Equal(t, "## Findings\n\nsleep supports memory consolidation. (Sleep Study)", res.Payload["text"])
 		assert.NotNil(t, res.Payload["structuredAnswer"])
 		assert.Len(t, res.Sources, 1)
 		mockLLM.AssertExpectations(t)

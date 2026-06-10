@@ -11,6 +11,7 @@ import (
 
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/rag"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
 	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
 )
 
@@ -64,13 +65,15 @@ func (c *BrainCapabilities) DecomposeTask(ctx context.Context, query string, dom
 	if model == "" {
 		model = llm.ResolveStandardModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
-		slog.Warn("wisdev brain task decomposition using cooldown fallback",
-			"component", "wisdev.brain",
-			"operation", "decompose_task",
-			"stage", "cooldown_fallback",
-			"retry_after_ms", remaining.Milliseconds(),
-		)
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
+		if shouldLogWisDevCooldownFallback("wisdev.brain.decompose_task", time.Now()) {
+			slog.Warn("wisdev brain task decomposition using cooldown fallback",
+				"component", "wisdev.brain",
+				"operation", "decompose_task",
+				"stage", "cooldown_fallback",
+				"retry_after_ms", remaining.Milliseconds(),
+			)
+		}
 		return fallbackBrainResearchTasks(query, domain), nil
 	}
 	prompt := appendWisdevStructuredOutputInstruction(fmt.Sprintf("Decompose query: %s in domain: %s into research tasks.", query, domain))
@@ -87,6 +90,16 @@ func (c *BrainCapabilities) DecomposeTask(ctx context.Context, query string, dom
 				"stage", "rate_limit_fallback",
 				"error_code", "provider_rate_limited",
 				"error", err,
+			)
+			return fallbackBrainResearchTasks(query, domain), nil
+		}
+		if wisdevStructuredOutputCanUseTimeoutFallback(err) {
+			slog.Warn("wisdev brain task decomposition using provider-timeout fallback",
+				"component", "wisdev.brain",
+				"operation", "decompose_task",
+				"stage", "timeout_fallback",
+				"error_code", "provider_timeout",
+				"error", err.Error(),
 			)
 			return fallbackBrainResearchTasks(query, domain), nil
 		}
@@ -124,7 +137,7 @@ func (c *BrainCapabilities) ProposeHypotheses(ctx context.Context, query string,
 	if model == "" {
 		model = llm.ResolveStandardModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
 		slog.Warn("wisdev brain hypothesis proposal using cooldown fallback",
 			"component", "wisdev.brain",
 			"operation", "propose_hypotheses",
@@ -169,11 +182,11 @@ func (c *BrainCapabilities) ProposeHypotheses(ctx context.Context, query string,
 	return result.Hypotheses, nil
 }
 
-func brainCapabilityCooldownRemaining(c *BrainCapabilities) time.Duration {
+func brainCapabilityCooldownRemaining(c *BrainCapabilities, model ...string) time.Duration {
 	if c == nil || c.llmClient == nil {
 		return 0
 	}
-	return c.llmClient.ProviderCooldownRemaining()
+	return wisdevLLMCooldownRemaining(c.llmClient, model...)
 }
 
 func fallbackBrainHypotheses(query string, intent string) []Hypothesis {
@@ -235,7 +248,7 @@ func (c *BrainCapabilities) CoordinateReplan(ctx context.Context, failedID strin
 	if model == "" {
 		model = llm.ResolveStandardModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
 		slog.Warn("wisdev brain replan using cooldown fallback",
 			"component", "wisdev.brain",
 			"operation", "coordinate_replan",
@@ -245,7 +258,9 @@ func (c *BrainCapabilities) CoordinateReplan(ctx context.Context, failedID strin
 		return fallbackBrainReplanTasks(failedID, reason, contextData), nil
 	}
 	prompt := appendWisdevStructuredOutputInstruction(fmt.Sprintf("A research step (%s) failed with reason: %s. Context: %v. Propose a recovery plan.", failedID, reason, contextData))
-	resp, err := c.llmClient.StructuredOutput(ctx, applyBrainStructuredPolicy(&llmv1.StructuredRequest{
+	requestCtx, cancel := wisdevRecoverableStructuredContext(ctx)
+	defer cancel()
+	resp, err := c.llmClient.StructuredOutput(requestCtx, applyBrainStructuredPolicy(&llmv1.StructuredRequest{
 		Prompt:     prompt,
 		Model:      model,
 		JsonSchema: `{"type": "object", "properties": {"tasks": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "action": {"type": "string"}, "dependsOnIds": {"type": "array", "items": {"type": "string"}}}}}}}`,
@@ -257,6 +272,26 @@ func (c *BrainCapabilities) CoordinateReplan(ctx context.Context, failedID strin
 				"operation", "coordinate_replan",
 				"stage", "rate_limit_fallback",
 				"error_code", "provider_rate_limited",
+				"error", err,
+			)
+			return fallbackBrainReplanTasks(failedID, reason, contextData), nil
+		}
+		if wisdevStructuredOutputCanUseTimeoutFallback(err) {
+			slog.Warn("wisdev brain replan using timeout fallback",
+				"component", "wisdev.brain",
+				"operation", "coordinate_replan",
+				"stage", "timeout_fallback",
+				"error_code", "provider_timeout",
+				"error", err,
+			)
+			return fallbackBrainReplanTasks(failedID, reason, contextData), nil
+		}
+		if wisdevStructuredOutputCanUseDeterministicFallback(err) {
+			slog.Warn("wisdev brain replan using structured-output fallback",
+				"component", "wisdev.brain",
+				"operation", "coordinate_replan",
+				"stage", "structured_output_fallback",
+				"error_code", "structured_output_invalid_json",
 				"error", err,
 			)
 			return fallbackBrainReplanTasks(failedID, reason, contextData), nil
@@ -294,7 +329,7 @@ func (c *BrainCapabilities) GenerateSnowballQueries(ctx context.Context, seedPap
 	if model == "" {
 		model = llm.ResolveLightModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
 		slog.Warn("wisdev brain snowball query generation using cooldown fallback",
 			"component", "wisdev.brain",
 			"operation", "generate_snowball_queries",
@@ -381,7 +416,7 @@ func (c *BrainCapabilities) VerifyCitations(ctx context.Context, papers []Source
 	if model == "" {
 		model = llm.ResolveStandardModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
 		slog.Warn("wisdev brain citation verification using cooldown fallback",
 			"component", "wisdev.brain",
 			"operation", "verify_citations",
@@ -455,7 +490,7 @@ func (c *BrainCapabilities) BuildClaimEvidenceTable(ctx context.Context, query s
 	if model == "" {
 		model = llm.ResolveStandardModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
 		slog.Warn("wisdev brain claim evidence table using cooldown fallback",
 			"component", "wisdev.brain",
 			"operation", "build_claim_evidence_table",
@@ -479,6 +514,16 @@ func (c *BrainCapabilities) BuildClaimEvidenceTable(ctx context.Context, query s
 				"operation", "build_claim_evidence_table",
 				"stage", "rate_limit_fallback",
 				"error_code", "provider_rate_limited",
+				"error", err,
+			)
+			return fallbackClaimEvidenceTable(query, papers), nil
+		}
+		if wisdevStructuredOutputCanUseDeterministicFallback(err) {
+			slog.Warn("wisdev brain claim evidence table using structured-output fallback",
+				"component", "wisdev.brain",
+				"operation", "build_claim_evidence_table",
+				"stage", "structured_output_fallback",
+				"error_code", "structured_output_invalid_json",
 				"error", err,
 			)
 			return fallbackClaimEvidenceTable(query, papers), nil
@@ -521,13 +566,15 @@ func (c *BrainCapabilities) GenerateThoughts(ctx context.Context, payload map[st
 	if model == "" {
 		model = llm.ResolveStandardModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
-		slog.Warn("wisdev brain thought generation using cooldown fallback",
-			"component", "wisdev.brain",
-			"operation", "generate_thoughts",
-			"stage", "cooldown_fallback",
-			"retry_after_ms", remaining.Milliseconds(),
-		)
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
+		if shouldLogWisDevCooldownFallback("wisdev.brain.generate_thoughts", time.Now()) {
+			slog.Warn("wisdev brain thought generation using cooldown fallback",
+				"component", "wisdev.brain",
+				"operation", "generate_thoughts",
+				"stage", "cooldown_fallback",
+				"retry_after_ms", remaining.Milliseconds(),
+			)
+		}
 		return fallbackThoughts(payload), nil
 	}
 	prompt := appendWisdevStructuredOutputInstruction(fmt.Sprintf("Generate internal thoughts/reasoning based on context: %v.", payload))
@@ -543,6 +590,16 @@ func (c *BrainCapabilities) GenerateThoughts(ctx context.Context, payload map[st
 				"operation", "generate_thoughts",
 				"stage", "rate_limit_fallback",
 				"error_code", "provider_rate_limited",
+				"error", err,
+			)
+			return fallbackThoughts(payload), nil
+		}
+		if wisdevStructuredOutputCanUseDeterministicFallback(err) {
+			slog.Warn("wisdev brain thought generation using structured-output fallback",
+				"component", "wisdev.brain",
+				"operation", "generate_thoughts",
+				"stage", "structured_output_fallback",
+				"error_code", "structured_output_invalid_json",
 				"error", err,
 			)
 			return fallbackThoughts(payload), nil
@@ -578,7 +635,7 @@ func (c *BrainCapabilities) DetectContradictions(ctx context.Context, papers []S
 	if model == "" {
 		model = llm.ResolveStandardModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
 		slog.Warn("wisdev brain contradiction detection using cooldown fallback",
 			"component", "wisdev.brain",
 			"operation", "detect_contradictions",
@@ -602,6 +659,16 @@ func (c *BrainCapabilities) DetectContradictions(ctx context.Context, papers []S
 				"operation", "detect_contradictions",
 				"stage", "rate_limit_fallback",
 				"error_code", "provider_rate_limited",
+				"error", err,
+			)
+			return fallbackContradictions(), nil
+		}
+		if wisdevStructuredOutputCanUseDeterministicFallback(err) {
+			slog.Warn("wisdev brain contradiction detection using structured-output fallback",
+				"component", "wisdev.brain",
+				"operation", "detect_contradictions",
+				"stage", "structured_output_fallback",
+				"error_code", "structured_output_invalid_json",
 				"error", err,
 			)
 			return fallbackContradictions(), nil
@@ -647,13 +714,15 @@ func (c *BrainCapabilities) VerifyClaims(ctx context.Context, text string, paper
 	if model == "" {
 		model = llm.ResolveStandardModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
-		slog.Warn("wisdev brain claim verification using cooldown fallback",
-			"component", "wisdev.brain",
-			"operation", "verify_claims",
-			"stage", "cooldown_fallback",
-			"retry_after_ms", remaining.Milliseconds(),
-		)
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
+		if shouldLogWisDevCooldownFallback("wisdev.brain.verify_claims", time.Now()) {
+			slog.Warn("wisdev brain claim verification using cooldown fallback",
+				"component", "wisdev.brain",
+				"operation", "verify_claims",
+				"stage", "cooldown_fallback",
+				"retry_after_ms", remaining.Milliseconds(),
+			)
+		}
 		return fallbackClaimVerification(text, papers), nil
 	}
 	requestCtx, cancel := wisdevRecoverableStructuredContext(ctx)
@@ -712,7 +781,7 @@ func (c *BrainCapabilities) VerifyClaimsBatchInteractive(ctx context.Context, ou
 	if model == "" {
 		model = llm.ResolveStandardModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
 		slog.Warn("wisdev brain claim batch verification using cooldown fallback",
 			"component", "wisdev.brain",
 			"operation", "verify_claims_batch",
@@ -768,7 +837,7 @@ func (c *BrainCapabilities) SystematicReviewPrisma(ctx context.Context, query st
 	if model == "" {
 		model = llm.ResolveStandardModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
 		slog.Warn("wisdev brain prisma report using cooldown fallback",
 			"component", "wisdev.brain",
 			"operation", "systematic_review_prisma",
@@ -815,7 +884,7 @@ func (c *BrainCapabilities) AssessResearchComplexity(ctx context.Context, query 
 	if c == nil || c.llmClient == nil {
 		return "", fmt.Errorf("llm client is not configured")
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
+	if remaining := brainCapabilityCooldownRemaining(c, llm.ResolveLightModel()); remaining > 0 {
 		slog.Warn("wisdev brain research complexity using cooldown fallback",
 			"component", "wisdev.brain",
 			"operation", "assess_research_complexity",
@@ -879,7 +948,7 @@ func (c *BrainCapabilities) SynthesizeAnswer(ctx context.Context, query string, 
 	if model == "" {
 		model = llm.ResolveHeavyModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
 		slog.Warn("wisdev brain answer synthesis using cooldown fallback",
 			"component", "wisdev.brain",
 			"operation", "synthesize_answer",
@@ -891,20 +960,23 @@ func (c *BrainCapabilities) SynthesizeAnswer(ctx context.Context, query string, 
 
 	evidenceText := ""
 	for _, p := range papers {
-		evidenceText += fmt.Sprintf("ID: %s | Title: %s | Summary: %s\n", p.ID, p.Title, p.Summary)
+		meta := formatSourceBibliographicMeta(p)
+		evidenceText += fmt.Sprintf("ID: %s | Title: %s%s | Summary: %s\n", p.ID, p.Title, meta, p.Summary)
 	}
 
-	prompt := appendWisdevStructuredOutputInstruction(fmt.Sprintf(`Synthesize a comprehensive research report for the query: "%s"
+	prompt := appendWisdevStructuredOutputInstruction(fmt.Sprintf(`Synthesize a highly explanatory, comprehensive, and learning-oriented research report for the query: "%s"
 Based on %d sources found.
 
 Sources:
 %s
 
 Instructions:
-1. Break the report into logical sections with headings.
-2. For each sentence, specify which source IDs support it.
-3. If a sentence has no supporting source, return empty evidenceIds.
-4. Be precise and technical.
+1. Write for working researchers: explanatory, critical, and insight-driven — not a shallow abstract list.
+2. Ground every factual sentence in the provided source IDs only. Do not invent studies, statistics, author names, or effect sizes.
+3. For each sentence, set evidenceIds to the supporting source ID(s). If no source supports a claim, omit the claim or mark the sentence as unsupported with empty evidenceIds.
+4. Prefer short, source-linked sentences over long ungrounded prose paragraphs.
+5. Break the report into sections such as Research landscape, Synthesis, Key literature, Grounded evidence, Implications for researchers, and Questions worth investigating.
+6. Do not end sentences with ellipsis ("...") or stray whitespace-before-period artifacts; write complete thoughts.
 `, query, len(papers), evidenceText))
 
 	resp, err := c.llmClient.StructuredOutput(ctx, applyBrainStructuredPolicy(&llmv1.StructuredRequest{
@@ -920,6 +992,16 @@ Instructions:
 				"operation", "synthesize_answer",
 				"stage", "rate_limit_fallback",
 				"error_code", "provider_rate_limited",
+				"error", err,
+			)
+			return fallbackStructuredAnswer(query, papers), nil
+		}
+		if wisdevStructuredOutputCanUseDeterministicFallback(err) {
+			slog.Warn("wisdev brain answer synthesis using structured-output fallback",
+				"component", "wisdev.brain",
+				"operation", "synthesize_answer",
+				"stage", "structured_output_fallback",
+				"error_code", "structured_output_invalid_json",
 				"error", err,
 			)
 			return fallbackStructuredAnswer(query, papers), nil
@@ -946,7 +1028,10 @@ Instructions:
 			result.Sections[i].Sentences = append(result.Sections[i].Sentences, claim)
 		}
 	}
-	result.Text = rag.RenderAnswerSections(result.Sections)
+	index := buildSourceCitationIndex(papers)
+	result.Text = rag.RenderAnswerSectionsWithCitations(result.Sections, func(evidenceIDs []string) string {
+		return resolveInlineCitationsParenthetical(evidenceIDs, index)
+	})
 
 	return result, nil
 }
@@ -969,9 +1054,14 @@ func fallbackStructuredAnswer(query string, papers []Source) *rag.StructuredAnsw
 		for i, paper := range papers {
 			title := firstNonEmpty(paper.Title, fmt.Sprintf("Source %d", i+1))
 			summary := strings.TrimSpace(paper.Summary)
-			text := fmt.Sprintf("%s is part of the retrieved evidence for %s.", title, queryText)
+			inline := formatInlineNarrativeCitation(search.Paper{
+				Authors:       paper.Authors,
+				Year:          paper.Year,
+				CitationCount: paper.CitationCount,
+			})
+			text := fmt.Sprintf("%s is part of the retrieved evidence for %s.", inline, queryText)
 			if summary != "" {
-				text = fmt.Sprintf("%s reports: %s", title, summary)
+				text = fmt.Sprintf("%s report that %s (*%s*).", inline, firstEvidenceSentence(summary), title)
 			}
 			evidenceIDs := []string{}
 			if id := strings.TrimSpace(paper.ID); id != "" {
@@ -985,7 +1075,10 @@ func fallbackStructuredAnswer(query string, papers []Source) *rag.StructuredAnsw
 		}
 	}
 
-	answer.Text = rag.RenderAnswerSections(answer.Sections)
+	index := buildSourceCitationIndex(papers)
+	answer.Text = rag.RenderAnswerSectionsWithCitations(answer.Sections, func(evidenceIDs []string) string {
+		return resolveInlineCitationsParenthetical(evidenceIDs, index)
+	})
 	return answer
 }
 
@@ -993,7 +1086,7 @@ func (c *BrainCapabilities) ResolveCanonicalCitations(ctx context.Context, paper
 	if model == "" {
 		model = llm.ResolveStandardModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
 		slog.Warn("wisdev brain canonical citation resolution using cooldown fallback",
 			"component", "wisdev.brain",
 			"operation", "resolve_canonical_citations",
@@ -1021,6 +1114,26 @@ func (c *BrainCapabilities) ResolveCanonicalCitations(ctx context.Context, paper
 			)
 			return fallbackCanonicalCitations(papers), nil
 		}
+		if wisdevStructuredOutputCanUseTimeoutFallback(err) || isCancellableStructuredOutputError(err) {
+			slog.Warn("wisdev brain canonical citation resolution using structured-output cancellation fallback",
+				"component", "wisdev.brain",
+				"operation", "resolve_canonical_citations",
+				"stage", "timeout_or_cancel_fallback",
+				"error_code", "provider_timeout_or_canceled",
+				"error", err.Error(),
+			)
+			return fallbackCanonicalCitations(papers), nil
+		}
+		if wisdevStructuredOutputCanUseDeterministicFallback(err) {
+			slog.Warn("wisdev brain canonical citation resolution using structured-output fallback",
+				"component", "wisdev.brain",
+				"operation", "resolve_canonical_citations",
+				"stage", "structured_output_fallback",
+				"error_code", "structured_output_invalid_json",
+				"error", err,
+			)
+			return fallbackCanonicalCitations(papers), nil
+		}
 		return nil, err
 	}
 	var result map[string]any
@@ -1028,6 +1141,18 @@ func (c *BrainCapabilities) ResolveCanonicalCitations(ctx context.Context, paper
 		return nil, err
 	}
 	return normalizeCanonicalCitationResult(result, papers), nil
+}
+
+func isCancellableStructuredOutputError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "context cancelled") ||
+		strings.Contains(message, "context canceled") ||
+		(strings.Contains(message, "status: cancelled") && strings.Contains(message, "499")) ||
+		(strings.Contains(message, "status: canceled") && strings.Contains(message, "499")) ||
+		(strings.Contains(message, "error 499") && strings.Contains(message, "cancel"))
 }
 
 func (c *BrainCapabilities) ResolveCanonicalCitationsInteractive(ctx context.Context, papers []Source, model string) (map[string]any, error) {
@@ -1178,7 +1303,7 @@ func (c *BrainCapabilities) VerifyReasoningPaths(ctx context.Context, branches [
 	if model == "" {
 		model = llm.ResolveStandardModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
 		slog.Warn("wisdev brain reasoning path verification using cooldown fallback",
 			"component", "wisdev.brain",
 			"operation", "verify_reasoning_paths",
@@ -1205,6 +1330,19 @@ func (c *BrainCapabilities) VerifyReasoningPaths(ctx context.Context, branches [
 				"operation", "verify_reasoning_paths",
 				"stage", "rate_limit_fallback",
 				"error_code", "provider_rate_limited",
+				"error", err,
+			)
+			for k, v := range fallbackReasoningPathVerification(auditedBranches) {
+				result[k] = v
+			}
+			return result, nil
+		}
+		if wisdevStructuredOutputCanUseDeterministicFallback(err) {
+			slog.Warn("wisdev brain reasoning path verification using structured-output fallback",
+				"component", "wisdev.brain",
+				"operation", "verify_reasoning_paths",
+				"stage", "structured_output_fallback",
+				"error_code", "structured_output_invalid_json",
 				"error", err,
 			)
 			for k, v := range fallbackReasoningPathVerification(auditedBranches) {
@@ -1283,49 +1421,36 @@ func fallbackReasoningPathVerification(branches []map[string]any) map[string]any
 	}
 }
 
-func (c *BrainCapabilities) EnhanceAcademicQuery(ctx context.Context, query string, model string) (string, error) {
-	if model == "" {
-		model = llm.ResolveLightModel()
-	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
-		slog.Warn("wisdev brain query enhancement using cooldown fallback",
-			"component", "wisdev.brain",
-			"operation", "enhance_academic_query",
-			"stage", "cooldown_fallback",
-			"retry_after_ms", remaining.Milliseconds(),
-		)
-		return strings.TrimSpace(query), nil
-	}
-	prompt := fmt.Sprintf("Enhance this academic query for better retrieval: %s.", query)
-	resp, err := c.llmClient.Generate(ctx, applyBrainGeneratePolicy(&llmv1.GenerateRequest{
-		Prompt: prompt,
-		Model:  model,
-	}, "light"))
+func (c *BrainCapabilities) CorrectResearchQueryGrammar(ctx context.Context, query string, model string) (string, error) {
+	prep, err := c.PrepareResearchQueryStructured(ctx, query, model)
 	if err != nil {
-		if llm.IsProviderRateLimitError(err) {
-			slog.Warn("wisdev brain query enhancement using provider-rate-limit fallback",
-				"component", "wisdev.brain",
-				"operation", "enhance_academic_query",
-				"stage", "rate_limit_fallback",
-				"error_code", "provider_rate_limited",
-				"error", err,
-			)
-			return strings.TrimSpace(query), nil
-		}
 		return "", err
 	}
-	enhanced := strings.TrimSpace(resp.Text)
-	if enhanced == "" {
-		return "", fmt.Errorf("EnhanceAcademicQuery: LLM returned empty result")
+	if corrected := strings.TrimSpace(prep.Corrected); corrected != "" {
+		return corrected, nil
 	}
-	return enhanced, nil
+	return strings.TrimSpace(query), nil
+}
+
+func (c *BrainCapabilities) EnhanceAcademicQuery(ctx context.Context, query string, model string) (string, error) {
+	prep, err := c.PrepareResearchQueryStructured(ctx, query, model)
+	if err != nil {
+		return "", err
+	}
+	if enhanced := strings.TrimSpace(prep.SearchQuery); enhanced != "" {
+		return enhanced, nil
+	}
+	if corrected := strings.TrimSpace(prep.Corrected); corrected != "" {
+		return corrected, nil
+	}
+	return "", fmt.Errorf("enhanced academic query resulted in empty string")
 }
 
 func (c *BrainCapabilities) SelectPrimarySource(ctx context.Context, query string, papers []Source, model string) (map[string]any, error) {
 	if model == "" {
 		model = llm.ResolveStandardModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
 		slog.Warn("wisdev brain primary source selection using cooldown fallback",
 			"component", "wisdev.brain",
 			"operation", "select_primary_source",
@@ -1399,7 +1524,7 @@ func (c *BrainCapabilities) AskFollowUpIfAmbiguous(ctx context.Context, query st
 	if model == "" {
 		model = llm.ResolveStandardModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
 		slog.Warn("wisdev brain ambiguity check using cooldown fallback",
 			"component", "wisdev.brain",
 			"operation", "ask_follow_up_if_ambiguous",
@@ -1455,7 +1580,7 @@ func (c *BrainCapabilities) SuggestQuestionValues(ctx context.Context, query str
 	if model == "" {
 		model = llm.ResolveLightModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
 		slog.Warn("wisdev brain question value suggestion using cooldown fallback",
 			"component", "wisdev.brain",
 			"operation", "suggest_question_values",
@@ -1562,7 +1687,7 @@ func (c *BrainCapabilities) CritiqueEvidenceSet(ctx context.Context, query strin
 	if model == "" {
 		model = llm.ResolveLightModel()
 	}
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
 		slog.Warn("wisdev brain evidence critique using cooldown fallback",
 			"component", "wisdev.brain",
 			"operation", "critique_evidence_set",
@@ -1637,7 +1762,7 @@ func (c *BrainCapabilities) JudgeQuestExperience(ctx context.Context, quest *Res
 		return nil, nil
 	}
 	model := llm.ResolveLightModel()
-	if remaining := brainCapabilityCooldownRemaining(c); remaining > 0 {
+	if remaining := brainCapabilityCooldownRemaining(c, model); remaining > 0 {
 		slog.Warn("wisdev brain experience judging using cooldown fallback",
 			"component", "wisdev.brain",
 			"operation", "judge_quest_experience",

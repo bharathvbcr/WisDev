@@ -2,6 +2,7 @@ package wisdev
 
 import (
 	"context"
+	"strings"
 	"errors"
 	"testing"
 
@@ -93,6 +94,13 @@ func TestHypothesisExplorer_ExploreHypothesis_Refinement(t *testing.T) {
 		return req != nil && req.Model == llm.ResolveLightModel()
 	})).Return(&llmv1.StructuredResponse{
 		JsonResult: `{"score": 0.4, "verdict": "uncertain", "reasoning": "need more info", "suggestedQueries": ["refinement_query"]}`,
+	}, nil).Once()
+
+	// Mock claim refinement: rewrite the hypothesis from the new evidence
+	msc.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
+		return req != nil && strings.Contains(req.Prompt, "falsifiable claim")
+	})).Return(&llmv1.StructuredResponse{
+		JsonResult: `{"refinedClaim": "Refined Test Hypothesis", "changed": true}`,
 	}, nil).Once()
 
 	// Mock SECOND evaluation: supported

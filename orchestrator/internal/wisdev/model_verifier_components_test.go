@@ -31,6 +31,135 @@ func TestRerankPlanCandidatesWithVerifier(t *testing.T) {
 	assert.Nil(t, RerankPlanCandidatesWithVerifier(context.Background(), nil, nil, "", nil))
 }
 
+func TestRerankPlanCandidatesWithVerifier_BlendsModelScores(t *testing.T) {
+	msc := &mockLLMServiceClient{}
+	client := llm.NewClient()
+	client.SetClient(msc)
+
+	msc.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
+		return req != nil &&
+			strings.Contains(req.Prompt, "Research goal: improve protein folding accuracy") &&
+			strings.Contains(req.Prompt, "[0] hypothesis: alpha") &&
+			strings.Contains(req.Prompt, "[2] hypothesis: gamma") &&
+			strings.Contains(req.JsonSchema, `"scores"`) &&
+			strings.Contains(req.Prompt, wisdevStructuredOutputSchemaInstruction)
+	})).Return(&llmv1.StructuredResponse{
+		JsonResult: `{"scores":[{"index":0,"score":0.1,"reason":"weak coverage"},{"index":1,"score":1.0,"reason":"strong coverage"},{"index":9,"score":0.9,"reason":"out of range"}]}`,
+	}, nil).Once()
+
+	input := []PlanCandidate{
+		{Hypothesis: "alpha", Score: 0.9},
+		{Hypothesis: "beta", Score: 0.2, Rationale: "prior rationale"},
+		{Hypothesis: "gamma", Score: 0.55},
+	}
+	reranked := RerankPlanCandidatesWithVerifier(context.Background(), client, nil, "improve protein folding accuracy", input)
+
+	require.Len(t, reranked, 3)
+	// beta: 0.5*0.2 + 0.5*1.0 = 0.6; gamma: untouched 0.55; alpha: 0.5*0.9 + 0.5*0.1 = 0.5
+	assert.Equal(t, "beta", reranked[0].Hypothesis)
+	assert.InDelta(t, 0.6, reranked[0].Score, 1e-9)
+	assert.Equal(t, "gamma", reranked[1].Hypothesis)
+	assert.InDelta(t, 0.55, reranked[1].Score, 1e-9)
+	assert.Equal(t, "alpha", reranked[2].Hypothesis)
+	assert.InDelta(t, 0.5, reranked[2].Score, 1e-9)
+
+	// Verifier reasons are attached to Rationale without clobbering priors.
+	assert.Equal(t, "prior rationale | Verifier: strong coverage", reranked[0].Rationale)
+	assert.Equal(t, "Verifier: weak coverage", reranked[2].Rationale)
+
+	// The input slice is never mutated.
+	assert.Equal(t, 0.9, input[0].Score)
+	assert.Equal(t, 0.2, input[1].Score)
+	assert.Equal(t, 0.55, input[2].Score)
+	assert.Equal(t, "prior rationale", input[1].Rationale)
+
+	msc.AssertExpectations(t)
+}
+
+func TestRerankPlanCandidatesWithVerifier_DegradedFallbacks(t *testing.T) {
+	input := []PlanCandidate{
+		{Hypothesis: "low", Score: 0.2},
+		{Hypothesis: "high", Score: 0.9},
+		{Hypothesis: "mid", Score: 0.5},
+	}
+
+	t.Run("llm error keeps deterministic prior order", func(t *testing.T) {
+		msc := &mockLLMServiceClient{}
+		client := llm.NewClient()
+		client.SetClient(msc)
+		msc.On("StructuredOutput", mock.Anything, mock.Anything).Return(nil, errors.New("provider unavailable")).Once()
+
+		reranked := RerankPlanCandidatesWithVerifier(context.Background(), client, nil, "goal", input)
+		require.Len(t, reranked, 3)
+		assert.Equal(t, "high", reranked[0].Hypothesis)
+		assert.Equal(t, "mid", reranked[1].Hypothesis)
+		assert.Equal(t, "low", reranked[2].Hypothesis)
+	})
+
+	t.Run("unparseable structured output keeps deterministic prior order", func(t *testing.T) {
+		msc := &mockLLMServiceClient{}
+		client := llm.NewClient()
+		client.SetClient(msc)
+		msc.On("StructuredOutput", mock.Anything, mock.Anything).Return(&llmv1.StructuredResponse{JsonResult: "not json"}, nil).Once()
+
+		reranked := RerankPlanCandidatesWithVerifier(context.Background(), client, nil, "goal", input)
+		require.Len(t, reranked, 3)
+		assert.Equal(t, "high", reranked[0].Hypothesis)
+		assert.Equal(t, "mid", reranked[1].Hypothesis)
+		assert.Equal(t, "low", reranked[2].Hypothesis)
+	})
+
+	t.Run("single candidate skips the model entirely", func(t *testing.T) {
+		msc := &mockLLMServiceClient{}
+		client := llm.NewClient()
+		client.SetClient(msc)
+
+		reranked := RerankPlanCandidatesWithVerifier(context.Background(), client, nil, "goal", []PlanCandidate{{Hypothesis: "solo", Score: 0.4}})
+		require.Len(t, reranked, 1)
+		assert.Equal(t, "solo", reranked[0].Hypothesis)
+		msc.AssertNotCalled(t, "StructuredOutput", mock.Anything, mock.Anything)
+	})
+}
+
+func TestVerifyClaimLexicalHeuristicFallback(t *testing.T) {
+	model := NewGoogleGenAIModel(nil, "heuristic-model", ModelTierStandard)
+
+	t.Run("high overlap is supported with bounded confidence", func(t *testing.T) {
+		supported, confidence, err := model.VerifyClaim(context.Background(),
+			"Transformers improve translation quality",
+			"Recent studies confirm transformers improve translation quality across benchmarks")
+		require.NoError(t, err)
+		assert.True(t, supported)
+		assert.InDelta(t, 0.80, confidence, 1e-9)
+		assert.GreaterOrEqual(t, confidence, 0.25)
+		assert.LessOrEqual(t, confidence, 0.80)
+	})
+
+	t.Run("zero overlap is unsupported", func(t *testing.T) {
+		supported, confidence, err := model.VerifyClaim(context.Background(),
+			"quantum entanglement decay",
+			"banana bread recipe instructions")
+		require.NoError(t, err)
+		assert.False(t, supported)
+		assert.InDelta(t, 0.30, confidence, 1e-9)
+	})
+
+	t.Run("llm error path uses heuristic", func(t *testing.T) {
+		msc := &mockLLMServiceClient{}
+		client := llm.NewClient()
+		client.SetClient(msc)
+		mocked := NewGoogleGenAIModel(client, "heuristic-model", ModelTierStandard)
+		msc.On("StructuredOutput", mock.Anything, mock.Anything).Return(nil, errors.New("model down")).Once()
+
+		supported, confidence, err := mocked.VerifyClaim(context.Background(),
+			"graphene conducts electricity",
+			"experiments show graphene conducts electricity efficiently")
+		require.NoError(t, err)
+		assert.True(t, supported)
+		assert.InDelta(t, 0.80, confidence, 1e-9)
+	})
+}
+
 func TestGoogleGenAIModelDefaultsAndActions(t *testing.T) {
 	model := NewGoogleGenAIModel(nil, "", "")
 
@@ -48,10 +177,12 @@ func TestGoogleGenAIModelDefaultsAndActions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"key claim text"}, claims)
 
+	// Without a client the model degrades to the lexical overlap heuristic:
+	// "claim" and "evidence" share no tokens, so the claim is unsupported.
 	pass, confidence, err := model.VerifyClaim(context.Background(), "claim", "evidence")
 	require.NoError(t, err)
-	assert.True(t, pass)
-	assert.Equal(t, 0.7, confidence)
+	assert.False(t, pass)
+	assert.InDelta(t, 0.30, confidence, 1e-9)
 
 	synthesis, err := model.SynthesizeFindings(context.Background(), []string{"h1", "h2"}, map[string]interface{}{"query": "x"})
 	require.NoError(t, err)

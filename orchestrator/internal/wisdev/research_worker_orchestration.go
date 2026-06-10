@@ -1131,15 +1131,7 @@ func buildWorkerCoverageLedger(result researchWorkerExecution) []CoverageLedgerE
 }
 
 func buildResearchWorkerQuery(query string, focus string) string {
-	query = strings.TrimSpace(query)
-	focus = strings.TrimSpace(focus)
-	if query == "" {
-		return focus
-	}
-	if focus == "" {
-		return query
-	}
-	return strings.TrimSpace(query + " " + focus)
+	return normalizeAgendaFocus(query, focus)
 }
 
 func domainSpecificEvidenceQuery(domain string) string {

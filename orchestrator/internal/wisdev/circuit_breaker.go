@@ -3,6 +3,8 @@ package wisdev
 import (
 	"sync"
 	"time"
+
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
 )
 
 type CircuitBreakerOption func(*CircuitBreaker)
@@ -20,8 +22,8 @@ type CircuitBreaker struct {
 func NewCircuitBreaker(name string, opts ...CircuitBreakerOption) *CircuitBreaker {
 	cb := &CircuitBreaker{
 		name:             name,
-		failureThreshold: 3,
-		resetTimeout:     30 * time.Second,
+		failureThreshold: 5,
+		resetTimeout:     20 * time.Second,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -76,7 +78,14 @@ func (cb *CircuitBreaker) RecordSuccess() {
 }
 
 func (cb *CircuitBreaker) RecordFailure() {
+	cb.RecordFailureFor(nil)
+}
+
+func (cb *CircuitBreaker) RecordFailureFor(err error) {
 	if cb == nil {
+		return
+	}
+	if err != nil && !resilience.ShouldTripCircuitBreaker(err) {
 		return
 	}
 	cb.mu.Lock()

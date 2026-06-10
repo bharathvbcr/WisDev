@@ -415,6 +415,39 @@ func buildCritiqueFollowUpQueries(query string, critique *LoopDraftCritique, gap
 	return queries
 }
 
+func buildCritiqueReplanBranchPlans(rootQuery string, critique *LoopDraftCritique, candidates []string) []ResearchBranchPlan {
+	if critique == nil {
+		return nil
+	}
+	queries := normalizeLoopQueries("", candidates)
+	if len(queries) == 0 {
+		return nil
+	}
+	reasoning := strings.TrimSpace(critique.Reasoning)
+	if reasoning == "" {
+		reasoning = "Resolve draft critique before finalization."
+	}
+	plans := make([]ResearchBranchPlan, 0, len(queries))
+	for idx, query := range queries {
+		verificationQuery := buildResearchWorkerQuery(rootQuery, "critique verification: "+query)
+		contradictionQuery := buildResearchWorkerQuery(rootQuery, "bias and contradiction check: "+query)
+		plans = append(plans, ResearchBranchPlan{
+			ID:                      firstNonEmpty(stableWisDevID("critique-replan", rootQuery, query, reasoning), fmt.Sprintf("critique-replan-%03d", idx+1)),
+			Query:                   query,
+			Hypothesis:              reasoning,
+			RetrievalPlan:           normalizeLoopQueries(rootQuery, []string{query, verificationQuery, contradictionQuery}),
+			ReasoningStrategy:       "critique_replan",
+			FalsifiabilityCondition: "follow-up evidence fails to resolve the draft critique or introduces unresolved contradictions",
+			ClosureCondition:        "draft critique gaps, contradictions, and source-type omissions are resolved or explicitly bounded",
+			Depth:                   1,
+			SearchWeight:            ClampFloat(firstPositive(1-critique.Confidence, 0.65), 0.05, 1),
+			Status:                  "replan_requested",
+			StopReason:              "draft_critique",
+		})
+	}
+	return normalizeResearchBranchPlans(rootQuery, plans)
+}
+
 func mergeDraftCritiqueIntoGapState(gap *LoopGapState, critique *LoopDraftCritique, query string) *LoopGapState {
 	if critique == nil {
 		return gap

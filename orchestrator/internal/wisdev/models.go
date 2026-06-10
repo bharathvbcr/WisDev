@@ -107,6 +107,7 @@ type EvidenceFinding struct {
 	Confidence      float64           `json:"confidence"`
 	Status          string            `json:"status,omitempty"`
 	OverlapRatio    float64           `json:"overlapRatio,omitempty"`
+	Spans           []EvidenceSpan    `json:"spans,omitempty"` // sentence-level anchors backing the claim
 	Specialist      SpecialistStatus  `json:"specialist,omitempty"`
 	SpecialistNotes []SpecialistNote  `json:"specialistNotes,omitempty"`
 	ProvenanceChain []ProvenanceEntry `json:"provenanceChain,omitempty"` // R2: Track discovery path
@@ -542,9 +543,7 @@ func NewVerificationLayer(cfg VerificationLayerConfig) *VerificationLayer {
 	return &VerificationLayer{config: cfg}
 }
 
-func (v *VerificationLayer) Verify(ctx context.Context, h *Hypothesis) error {
-	return nil
-}
+// Verify is implemented in verification_layer.go.
 
 type AgentSession struct {
 	SchemaVersion        string                      `json:"schemaVersion"`

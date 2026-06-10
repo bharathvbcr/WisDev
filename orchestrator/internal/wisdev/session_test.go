@@ -76,7 +76,7 @@ func TestInferDomainFromQueryUsesCanonicalDomains(t *testing.T) {
 		want  string
 	}{
 		{name: "medicine", query: "clinical treatment options for diabetes patients", want: "medicine"},
-		{name: "biology", query: "protein dynamics in cancer cell signaling", want: "biology"},
+		{name: "biomedical", query: "protein dynamics in cancer cell signaling", want: "biomedical"},
 		{name: "computer science", query: "machine learning algorithms for retrieval", want: "cs"},
 		{name: "social", query: "social science policy outcomes in education", want: "social"},
 		{name: "empty", query: "weather patterns in local newspapers", want: ""},

@@ -52,6 +52,8 @@ type ExplorationResult struct {
 	Queries           []string
 	Confidence        float64
 	ExplorationStatus string // "completed", "insufficient_evidence", "refuted"
+	Terminated        bool   // hypothesis was refuted; applied to the hypothesis after the worker pool joins
+	RefinedClaim      string // evidence-driven claim rewrite; applied after the worker pool joins
 }
 
 // ExploreAll explores all hypotheses concurrently, each with its own search context
@@ -111,12 +113,28 @@ func (he *HypothesisExplorer) ExploreAll(
 
 	wg.Wait()
 
-	// Filter out empty results (from terminated hypotheses)
+	// Apply hypothesis mutations on this goroutine only, after all workers have
+	// joined — workers must not write hypothesis state concurrently.
 	filteredResults := make([]ExplorationResult, 0, len(results))
 	for _, r := range results {
-		if r.Hypothesis != nil {
-			filteredResults = append(filteredResults, r)
+		if r.Hypothesis == nil {
+			continue
 		}
+		if refined := strings.TrimSpace(r.RefinedClaim); refined != "" && !strings.EqualFold(refined, strings.TrimSpace(r.Hypothesis.Claim)) {
+			slog.Info("Hypothesis claim refined from evidence",
+				"hypothesisID", r.Hypothesis.ID,
+				"previousClaim", r.Hypothesis.Claim,
+				"refinedClaim", refined)
+			r.Hypothesis.Claim = refined
+			if strings.TrimSpace(r.Hypothesis.Text) != "" {
+				r.Hypothesis.Text = refined
+			}
+			r.Hypothesis.UpdatedAt = NowMillis()
+		}
+		if r.Terminated {
+			r.Hypothesis.IsTerminated = true
+		}
+		filteredResults = append(filteredResults, r)
 	}
 
 	return filteredResults
@@ -160,13 +178,17 @@ func (he *HypothesisExplorer) exploreHypothesis(
 	// Deduplicate papers
 	allPapers = dedupePapers(allPapers)
 
+	// Ground verification in paper bodies, not just abstracts: fetch extracted
+	// full text for the top papers that expose an open-access PDF source.
+	AcquireFullTextForPapers(ctx, allPapers, 3)
+
 	// Step 3: Convert papers to evidence findings
 	evidenceFindings := make([]EvidenceFinding, 0, len(allPapers))
 	for idx, paper := range allPapers {
 		evidenceFindings = append(evidenceFindings, EvidenceFinding{
 			ID:         fmt.Sprintf("hyp_ev_%s_%d", hypothesis.ID, idx),
 			Claim:      paper.Title,
-			Snippet:    paper.Abstract,
+			Snippet:    evidenceTextFromPaper(paper),
 			PaperTitle: paper.Title,
 			SourceID:   paper.ID,
 			Confidence: 0.5, // Neutral until evaluated
@@ -195,6 +217,7 @@ func (he *HypothesisExplorer) exploreHypothesis(
 
 	// Step 5: Iterative Refinement (R1)
 	// If the result is uncertain and we have suggested queries, perform a second pass.
+	refinedClaim := ""
 	if evalResult.Verdict == "uncertain" && len(evalResult.SuggestedQueries) > 0 {
 		slog.Debug("Hypothesis explorer performing second pass refinement", "claim", hypothesis.Claim)
 		secondPassQueries := evalResult.SuggestedQueries
@@ -215,7 +238,7 @@ func (he *HypothesisExplorer) exploreHypothesis(
 					evidenceFindings = append(evidenceFindings, EvidenceFinding{
 						ID:         fmt.Sprintf("hyp_ev_ref_%s_%s", hypothesis.ID, paper.ID),
 						Claim:      paper.Title,
-						Snippet:    paper.Abstract,
+						Snippet:    evidenceTextFromPaper(paper),
 						PaperTitle: paper.Title,
 						SourceID:   paper.ID,
 						Confidence: 0.5,
@@ -225,26 +248,46 @@ func (he *HypothesisExplorer) exploreHypothesis(
 			}
 		}
 
-		// Re-evaluate with new evidence
+		// Evidence-driven refinement: rewrite the claim from accumulated evidence
+		// before re-evaluating, so refinement can change the hypothesis itself
+		// rather than only re-scoring the original text.
+		refinedClaim = he.refineHypothesisClaim(ctx, hypothesis, evidenceFindings, evalResult)
+		evaluationTarget := hypothesis
+		if refinedClaim != "" {
+			refined := *hypothesis
+			refined.Claim = refinedClaim
+			if strings.TrimSpace(refined.Text) != "" {
+				refined.Text = refinedClaim
+			}
+			evaluationTarget = &refined
+		}
+
+		// Re-evaluate with new evidence (and the refined claim when available)
 		if he.evaluator != nil {
-			newEval, err := he.evaluator.Evaluate(ctx, hypothesis, evidenceFindings)
-			if err == nil {
+			newEval, err := he.evaluator.Evaluate(ctx, evaluationTarget, evidenceFindings)
+			if err != nil {
+				refinedClaim = ""
+				slog.Warn("Hypothesis re-evaluation after refinement failed; keeping previous evaluation",
+					"error", err, "claim", hypothesis.Claim)
+			} else {
 				evalResult = newEval
 				slog.Debug("Hypothesis explorer refinement completed",
-					"claim", hypothesis.Claim,
+					"claim", evaluationTarget.Claim,
 					"newVerdict", evalResult.Verdict,
 					"newScore", evalResult.Score)
 			}
 		}
 	}
 
-	// Step 6: Determine exploration status
+	// Step 6: Determine exploration status. Hypothesis state is mutated by the
+	// caller (ExploreAll) after all workers join, never inside this worker.
 	explorationStatus := "completed"
+	terminated := false
 	if len(allPapers) < 3 {
 		explorationStatus = "insufficient_evidence"
 	} else if evalResult.Verdict == "refuted" {
 		explorationStatus = "refuted"
-		hypothesis.IsTerminated = true
+		terminated = true
 	}
 
 	slog.Debug("Hypothesis exploration completed",
@@ -263,7 +306,87 @@ func (he *HypothesisExplorer) exploreHypothesis(
 		Queries:           queries,
 		Confidence:        evalResult.Score,
 		ExplorationStatus: explorationStatus,
+		Terminated:        terminated,
+		RefinedClaim:      refinedClaim,
 	}
+}
+
+// refineHypothesisClaim asks the LLM to rewrite an uncertain hypothesis into a
+// sharper falsifiable claim consistent with the accumulated evidence. Returns
+// an empty string when no meaningful rewrite is available.
+func (he *HypothesisExplorer) refineHypothesisClaim(
+	ctx context.Context,
+	hypothesis *Hypothesis,
+	evidence []EvidenceFinding,
+	eval *EvaluationResult,
+) string {
+	if he.brainCaps == nil || he.brainCaps.llmClient == nil {
+		return ""
+	}
+
+	var sb strings.Builder
+	limit := 8
+	for idx, ev := range evidence {
+		if idx >= limit {
+			break
+		}
+		snippet := ev.Snippet
+		if len(snippet) > 300 {
+			snippet = snippet[:300]
+		}
+		sb.WriteString(fmt.Sprintf("%d. %s — %s\n", idx+1, ev.PaperTitle, snippet))
+	}
+	if sb.Len() == 0 {
+		return ""
+	}
+
+	reasoning := ""
+	if eval != nil {
+		reasoning = strings.TrimSpace(eval.Reasoning)
+	}
+
+	prompt := fmt.Sprintf(`A research hypothesis was evaluated as UNCERTAIN against the evidence below.
+
+Hypothesis: %s
+Evaluator reasoning: %s
+
+Evidence:
+%s
+
+Rewrite the hypothesis into a sharper, falsifiable claim that is consistent with this evidence:
+- Keep the original research subject and scope.
+- Narrow or qualify the claim where the evidence demands it (population, mechanism, conditions).
+- If the original claim is already as precise as the evidence allows, set "changed" to false.
+
+Return JSON with the refined claim using the provided schema.`,
+		hypothesis.Claim, reasoning, sb.String())
+
+	response, err := he.generateStructuredWithTier(ctx, prompt, TierLight,
+		`{"type":"object","properties":{"refinedClaim":{"type":"string"},"changed":{"type":"boolean"}},"required":["refinedClaim","changed"]}`)
+	if err != nil {
+		slog.Warn("Hypothesis claim refinement failed; keeping original claim",
+			"error", err, "claim", hypothesis.Claim)
+		return ""
+	}
+
+	var parsed struct {
+		RefinedClaim string `json:"refinedClaim"`
+		Changed      bool   `json:"changed"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(response)), &parsed); err != nil {
+		slog.Warn("Hypothesis claim refinement returned unparseable output; keeping original claim",
+			"error", err, "claim", hypothesis.Claim)
+		return ""
+	}
+
+	refined := strings.TrimSpace(parsed.RefinedClaim)
+	if !parsed.Changed || refined == "" || strings.EqualFold(refined, strings.TrimSpace(hypothesis.Claim)) {
+		return ""
+	}
+	if len(refined) > 500 {
+		refined = refined[:500]
+	}
+	return refined
 }
 
 // generateHypothesisQueries generates targeted search queries for a specific hypothesis

@@ -355,6 +355,14 @@ func BuildReasoningGraph(query string, hypotheses []Hypothesis, evidence []Evide
 			"falsifiabilityCondition": hypothesis.FalsifiabilityCondition,
 			"isTerminated":            hypothesis.IsTerminated,
 		}
+		// Carry the real hypothesis ID and status so UI surfaces can target the
+		// accept/refine endpoints, which key on Hypothesis.ID (not the node hash).
+		if id := strings.TrimSpace(hypothesis.ID); id != "" {
+			metadata["hypothesisId"] = id
+		}
+		if status := strings.TrimSpace(hypothesis.Status); status != "" {
+			metadata["status"] = status
+		}
 		if len(evidenceIDs) > 0 {
 			metadata["evidenceIds"] = evidenceIDs
 		}
@@ -579,6 +587,14 @@ func UpdateReasoningGraphIncrementally(existing *ReasoningGraph, query string, n
 		metadata := map[string]any{
 			"falsifiabilityCondition": hypothesis.FalsifiabilityCondition,
 			"isTerminated":            hypothesis.IsTerminated,
+		}
+		// Carry the real hypothesis ID and status so UI surfaces can target the
+		// accept/refine endpoints, which key on Hypothesis.ID (not the node hash).
+		if id := strings.TrimSpace(hypothesis.ID); id != "" {
+			metadata["hypothesisId"] = id
+		}
+		if status := strings.TrimSpace(hypothesis.Status); status != "" {
+			metadata["status"] = status
 		}
 		if len(evidenceIDs) > 0 {
 			metadata["evidenceIds"] = evidenceIDs

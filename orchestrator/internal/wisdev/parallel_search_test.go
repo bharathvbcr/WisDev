@@ -3,6 +3,7 @@ package wisdev
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -114,6 +115,17 @@ func TestExecuteWithResilience(t *testing.T) {
 }
 
 func TestIsMedicalQuery(t *testing.T) {
+	preparedQueryCache = sync.Map{}
+	storePreparedQuery(PreparedResearchQuery{
+		Original:  "clinical trial",
+		Corrected: "clinical trial",
+		Domain:    "medicine",
+	})
+	storePreparedQuery(PreparedResearchQuery{
+		Original:  "quantum computing",
+		Corrected: "quantum computing",
+		Domain:    "physics",
+	})
 	assert.True(t, isMedicalQuery("clinical trial"))
 	assert.False(t, isMedicalQuery("quantum computing"))
 }

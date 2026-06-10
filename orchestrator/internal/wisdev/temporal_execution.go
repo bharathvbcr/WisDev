@@ -263,6 +263,10 @@ func WisdevSessionWorkflow(ctx workflow.Context, input SessionWorkflowInput) (*S
 	if session.Mode == "yolo" {
 		maxIterations = 10
 	}
+	searchQuery := ResolveSessionSearchQuery(session.Query, session.CorrectedQuery, session.OriginalQuery)
+	if strings.TrimSpace(searchQuery) == "" {
+		searchQuery = strings.TrimSpace(session.Query)
+	}
 
 	var papers []search.Paper
 	queryCoverage := make(map[string][]search.Paper)
@@ -276,7 +280,7 @@ func WisdevSessionWorkflow(ctx workflow.Context, input SessionWorkflowInput) (*S
 		var searchOut ResearchSearchOutput
 		searchIn := ResearchSearchInput{
 			SessionID:   input.SessionID,
-			Queries:     []string{session.Query}, // simplified for now
+			Queries:     []string{searchQuery},
 			Parallelism: 3,
 		}
 		if err := workflow.ExecuteActivity(ctx, "ResearchSearchActivity", searchIn).Get(ctx, &searchOut); err != nil {
@@ -291,7 +295,7 @@ func WisdevSessionWorkflow(ctx workflow.Context, input SessionWorkflowInput) (*S
 		var suffOut SufficiencyOutput
 		suffIn := SufficiencyInput{
 			SessionID:     input.SessionID,
-			OriginalQuery: session.Query,
+			OriginalQuery: searchQuery,
 			Papers:        papers,
 		}
 		if err := workflow.ExecuteActivity(ctx, "SufficiencyActivity", suffIn).Get(ctx, &suffOut); err != nil {
@@ -302,8 +306,11 @@ func WisdevSessionWorkflow(ctx workflow.Context, input SessionWorkflowInput) (*S
 		// C. Reasoning Refresh Activity
 		var refreshOut ReasoningRefreshOutput
 		refreshIn := ReasoningRefreshInput{
-			SessionID:     input.SessionID,
-			Request:       LoopRequest{Query: session.Query},
+			SessionID: input.SessionID,
+			Request: LoopRequest{
+				Query:         searchQuery,
+				OriginalQuery: strings.TrimSpace(session.OriginalQuery),
+			},
 			Papers:        papers,
 			QueryCoverage: queryCoverage,
 		}
@@ -329,7 +336,7 @@ func WisdevSessionWorkflow(ctx workflow.Context, input SessionWorkflowInput) (*S
 	var finalAnswer string
 	synthIn := SufficiencyInput{
 		SessionID:     input.SessionID,
-		OriginalQuery: session.Query,
+		OriginalQuery: searchQuery,
 		Papers:        papers,
 	}
 	if err := workflow.ExecuteActivity(ctx, "SynthesisActivity", synthIn).Get(ctx, &finalAnswer); err != nil {

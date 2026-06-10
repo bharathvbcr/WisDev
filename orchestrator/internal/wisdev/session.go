@@ -8,40 +8,17 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	internalsearch "github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
 )
 
-// inferDomainFromQuery returns a coarse domain hint based on keyword
-// matching so that SessionManager.CreateSession can set DetectedDomain
-// before building the adaptive question sequence. This mirrors what the
-// handleInitializeSession handler does when a detectedDomain is explicitly
-// passed from the frontend.
+// inferDomainFromQuery returns a coarse domain hint for session planning.
 func inferDomainFromQuery(query string) string {
-	lower := strings.ToLower(strings.TrimSpace(query))
-	switch {
-	case containsAnyDomainPhrase(lower, []string{"medicine", "drug", "clinical", "patient", "diagnosis", "treatment", "therapy", "healthcare"}):
-		return "medicine"
-	case containsAnyDomainPhrase(lower, []string{"machine learning", "deep learning", "neural network", "algorithm", "computer science", "artificial intelligence", "generative ai"}):
-		return "cs"
-	case containsAnyDomainPhrase(lower, []string{"neuroscience", "neuro", "brain"}):
-		return "neuro"
-	case containsAnyDomainPhrase(lower, []string{"cancer", "biology", "genomics", "genetics", "protein", "cell"}):
-		return "biology"
-	case containsAnyDomainPhrase(lower, []string{"physics", "quantum", "chemistry", "material", "engineering"}):
-		return "physics"
-	case containsAnyDomainPhrase(lower, []string{"social science", "sociology", "psychology", "economics", "policy"}):
-		return "social"
-	default:
+	domain := internalsearch.InferDomainFromQuery(query)
+	if domain == "general" {
 		return ""
 	}
-}
-
-func containsAnyDomainPhrase(query string, phrases []string) bool {
-	for _, phrase := range phrases {
-		if strings.Contains(query, phrase) {
-			return true
-		}
-	}
-	return false
+	return domain
 }
 
 // SessionManager handles WisDev session lifecycle and persistence.
@@ -60,18 +37,24 @@ func NewSessionManager(baseDir string) *SessionManager {
 
 func (m *SessionManager) CreateSession(ctx context.Context, userID, query string) (*Session, error) {
 	sessionID := newSessionManagerID()
-	// Infer DetectedDomain from the query before building the adaptive question
-	// sequence. Without this the sequence is always built with an empty
-	// domain hint, suppressing domain-specific questions. Use the same
-	// heuristic the API handler uses when no explicit domain is provided.
-	detectedDomain := inferDomainFromQuery(query)
+	originalQuery := strings.TrimSpace(query)
+	originalQuery, correctedQuery, planningQuery, detectedDomain := ApplyEarlySessionQueryPrep(ctx, originalQuery, "", "", "", nil, false)
+	if strings.TrimSpace(correctedQuery) == "" {
+		correctedQuery = originalQuery
+	}
+	if strings.TrimSpace(planningQuery) == "" {
+		planningQuery = ResolveSessionQueryText(correctedQuery, originalQuery)
+	}
+	if strings.TrimSpace(detectedDomain) == "" {
+		detectedDomain = inferDomainFromQuery(planningQuery)
+	}
 	session := &Session{
 		ID:                   sessionID,
 		UserID:               userID,
-		Query:                query,
-		OriginalQuery:        query,
-		CorrectedQuery:       query,
-		ExpertiseLevel:       DetectExpertiseLevel(query),
+		Query:                planningQuery,
+		OriginalQuery:        originalQuery,
+		CorrectedQuery:       correctedQuery,
+		ExpertiseLevel:       DetectExpertiseLevel(planningQuery),
 		DetectedDomain:       detectedDomain,
 		Answers:              make(map[string]Answer),
 		Status:               StatusQuestioning,
@@ -80,7 +63,7 @@ func (m *SessionManager) CreateSession(ctx context.Context, userID, query string
 		UpdatedAt:            NowMillis(),
 	}
 	session.QuestionSequence, _, _ = BuildAdaptiveQuestionSequence(
-		EstimateComplexityScore(query),
+		EstimateComplexityScore(planningQuery),
 		session.DetectedDomain,
 	)
 

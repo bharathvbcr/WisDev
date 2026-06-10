@@ -3,6 +3,7 @@ package wisdev
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -212,6 +213,10 @@ func TestAgentGateway_ExecuteADKAction(t *testing.T) {
 }
 
 func TestAgentGateway_ExecuteADKAction_RetrievePapers(t *testing.T) {
+	preparedQueryCache = sync.Map{}
+	originalGlobalLLM := GlobalLLMClient
+	GlobalLLMClient = nil
+	defer func() { GlobalLLMClient = originalGlobalLLM }()
 	originalParallelSearch := ParallelSearch
 	defer func() { ParallelSearch = originalParallelSearch }()
 	ParallelSearch = func(ctx context.Context, rdb redis.UniversalClient, query string, opts SearchOptions) (*MultiSourceResult, error) {
@@ -252,6 +257,10 @@ func TestAgentGateway_ExecuteADKAction_RetrievePapers(t *testing.T) {
 }
 
 func TestAgentGatewayRetrievePapersUsesCoreMCPToolWhenRegistryConfigured(t *testing.T) {
+	preparedQueryCache = sync.Map{}
+	originalGlobalLLM := GlobalLLMClient
+	GlobalLLMClient = nil
+	defer func() { GlobalLLMClient = originalGlobalLLM }()
 	registry := internalsearch.NewProviderRegistry()
 	provider := &gatewaySearchProvider{name: "openalex"}
 	registry.Register(provider)
@@ -385,7 +394,7 @@ func TestAgentGateway_ExecuteADKAction_AllRegisteredGoNativeTools(t *testing.T) 
 		return req != nil && strings.Contains(req.Prompt, "Verify these reasoning branches")
 	})).Return(&llmv1.StructuredResponse{JsonResult: `{"results":[{"branchId":"branch-1","verified":true,"score":0.93}]}`}, nil).Maybe()
 	mockLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
-		return req != nil && strings.Contains(req.Prompt, "Synthesize a comprehensive research report")
+		return req != nil && strings.Contains(req.Prompt, "Synthesize a highly explanatory, comprehensive, and learning-oriented research report")
 	})).Return(&llmv1.StructuredResponse{JsonResult: `{"sections":[{"heading":"Answer","sentences":[{"text":"answer","evidenceIds":["p1"]}]}]}`}, nil).Maybe()
 
 	client := llm.NewClient()

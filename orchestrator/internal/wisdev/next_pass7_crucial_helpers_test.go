@@ -1,6 +1,7 @@
 package wisdev
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -39,6 +40,10 @@ func TestNextPass7CrucialWisdevHelpers(t *testing.T) {
 	})
 
 	t.Run("adaptive expansion API targeting selects domain-appropriate providers", func(t *testing.T) {
+		preparedQueryCache = sync.Map{}
+		storePreparedQuery(PreparedResearchQuery{Original: "cancer immunotherapy clinical trial", Corrected: "cancer immunotherapy clinical trial", Domain: "medicine"})
+		storePreparedQuery(PreparedResearchQuery{Original: "quantum gravity galaxy survey", Corrected: "quantum gravity galaxy survey", Domain: "physics"})
+		storePreparedQuery(PreparedResearchQuery{Original: "neural network database security algorithm", Corrected: "neural network database security algorithm", Domain: "cs"})
 		assert.Equal(t, []string{"pubmed", "europe_pmc", "semantic_scholar", "openalex"}, adaptiveExpansionTargetAPIs("cancer immunotherapy clinical trial"))
 		assert.Equal(t, []string{"arxiv", "nasa_ads", "semantic_scholar", "openalex"}, adaptiveExpansionTargetAPIs("quantum gravity galaxy survey"))
 		assert.Equal(t, []string{"dblp", "arxiv", "semantic_scholar", "openalex"}, adaptiveExpansionTargetAPIs("neural network database security algorithm"))

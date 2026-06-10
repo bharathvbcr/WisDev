@@ -443,8 +443,19 @@ func (he *HypothesisEvaluator) buildEvidenceSummary(hypothesis *Hypothesis, evid
 
 	var sb strings.Builder
 	for idx, ev := range relevantEvidence {
-		sb.WriteString(fmt.Sprintf("%d. [Confidence: %.2f] %s\n   Source: %s\n",
+		sb.WriteString(fmt.Sprintf("%d. [Confidence: %.2f] %s\n   Source: %s",
 			idx+1, ev.Confidence, ev.Claim, ev.PaperTitle))
+		if ev.Year > 0 {
+			sb.WriteString(fmt.Sprintf(" (%d)", ev.Year))
+		}
+		sb.WriteString("\n")
+		// Ground the evaluation in the abstract text, not just the title.
+		if snippet := strings.TrimSpace(ev.Snippet); snippet != "" {
+			if len(snippet) > 400 {
+				snippet = snippet[:400] + "…"
+			}
+			sb.WriteString(fmt.Sprintf("   Abstract: %s\n", snippet))
+		}
 	}
 
 	return sb.String()

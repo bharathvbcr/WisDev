@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -84,6 +85,7 @@ func assertBrainHighValueStructuredPolicy(t *testing.T, req *llmv1.StructuredReq
 }
 
 func TestBrainCapabilities_DecomposeTask(t *testing.T) {
+	t.Setenv("AI_MODEL_STANDARD_ID", "gemini-2.0-flash")
 	mockLLM := new(mockLLMServiceClient)
 	client := llm.NewClient()
 	client.SetClient(mockLLM)
@@ -937,6 +939,34 @@ func TestBrainCapabilities_SystematicReviewPrismaRateLimitUsesFallback(t *testin
 	mockLLM.AssertExpectations(t)
 }
 
+func TestBrainCapabilities_CorrectResearchQueryGrammar(t *testing.T) {
+	mockLLM := new(mockLLMServiceClient)
+	client := llm.NewClient()
+	client.SetClient(mockLLM)
+	caps := NewBrainCapabilities(client)
+
+	ctx := context.Background()
+
+	mockLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
+		return req != nil &&
+			assertBrainHighValueStructuredPolicy(t, req) &&
+			strings.Contains(req.Prompt, "Prepare this academic research query")
+	})).Return(&llmv1.StructuredResponse{JsonResult: `{
+		"corrected_query":"meniscus reconstruction strategies",
+		"search_query":"meniscus reconstruction strategies",
+		"domain":"medicine",
+		"intent":"medical",
+		"keywords":["meniscus","reconstruction","strategies"],
+		"synonyms":[],
+		"seed_queries":["meniscus reconstruction strategies"],
+		"agenda_queries":["meniscus reconstruction strategies systematic review"]
+	}`}, nil).Once()
+
+	corrected, err := caps.CorrectResearchQueryGrammar(ctx, "Menicius reconstruction stratiges", "")
+	assert.NoError(t, err)
+	assert.Equal(t, "meniscus reconstruction strategies", corrected)
+}
+
 func TestBrainCapabilities_EnhanceAcademicQuery(t *testing.T) {
 	mockLLM := new(mockLLMServiceClient)
 	client := llm.NewClient()
@@ -945,16 +975,20 @@ func TestBrainCapabilities_EnhanceAcademicQuery(t *testing.T) {
 
 	ctx := context.Background()
 
-	mockLLM.On("Generate", mock.Anything, mock.MatchedBy(func(req *llmv1.GenerateRequest) bool {
-		assert.NotContains(t, req.Prompt, "Return ONLY")
+	mockLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
 		return req != nil &&
 			req.Model == llm.ResolveLightModel() &&
-			req.RequestClass == "light" &&
-			req.RetryProfile == "conservative" &&
-			req.ServiceTier == "standard" &&
-			req.GetThinkingBudget() == 0 &&
-			req.LatencyBudgetMs > 0
-	})).Return(&llmv1.GenerateResponse{Text: " enhanced query "}, nil)
+			strings.Contains(req.Prompt, "Prepare this academic research query")
+	})).Return(&llmv1.StructuredResponse{JsonResult: `{
+		"corrected_query":"corrected query",
+		"search_query":"enhanced query",
+		"domain":"medicine",
+		"intent":"medical",
+		"keywords":["query"],
+		"synonyms":[],
+		"seed_queries":["enhanced query"],
+		"agenda_queries":["enhanced query systematic review"]
+	}`}, nil).Once()
 
 	enhanced, err := caps.EnhanceAcademicQuery(ctx, "query", "")
 	assert.NoError(t, err)
@@ -967,11 +1001,11 @@ func TestBrainCapabilities_EnhanceAcademicQueryRateLimitUsesFallback(t *testing.
 	client.SetClient(mockLLM)
 	caps := NewBrainCapabilities(client)
 
-	mockLLM.On("Generate", mock.Anything, mock.MatchedBy(func(req *llmv1.GenerateRequest) bool {
+	mockLLM.On("StructuredOutput", mock.Anything, mock.MatchedBy(func(req *llmv1.StructuredRequest) bool {
 		return req != nil &&
-			req.RequestClass == "light" &&
-			req.ServiceTier == "standard"
-	})).Return((*llmv1.GenerateResponse)(nil), errors.New("429 RESOURCE_EXHAUSTED")).Once()
+			assertBrainHighValueStructuredPolicy(t, req) &&
+			strings.Contains(req.Prompt, "Prepare this academic research query")
+	})).Return((*llmv1.StructuredResponse)(nil), errors.New("429 RESOURCE_EXHAUSTED")).Once()
 
 	enhanced, err := caps.EnhanceAcademicQuery(context.Background(), " original query ", "")
 	require.NoError(t, err)
@@ -1104,7 +1138,8 @@ func TestBrainCapabilities_SynthesizeAnswerRateLimitUsesFallback(t *testing.T) {
 	require.Len(t, answer.Sections[0].Sentences, 1)
 	assert.Equal(t, []string{"paper-1"}, answer.Sections[0].Sentences[0].EvidenceIDs)
 	assert.False(t, answer.Sections[0].Sentences[0].Unsupported)
-	assert.Contains(t, answer.RenderText(), "P1 reports: S1")
+	assert.Contains(t, answer.RenderText(), "report that S1")
+	assert.Contains(t, answer.RenderText(), "P1")
 	mockLLM.AssertExpectations(t)
 }
 

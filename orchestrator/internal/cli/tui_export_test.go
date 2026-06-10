@@ -57,6 +57,69 @@ func TestSaveTUIResultWritesFile(t *testing.T) {
 	}
 }
 
+func TestSnakeCaseQuerySlug(t *testing.T) {
+	cases := []struct {
+		query string
+		want  string
+	}{
+		{"map open source research agent evidence", "map_open_source_research_agent_evidence"},
+		{"  What evidence supports RAG?  ", "what_evidence_supports_rag"},
+		{"CRISPR-Cas9 off-target effects (2024)", "crispr_cas9_off_target_effects_2024"},
+		{"___", "wisdev_result"},
+		{"", "wisdev_result"},
+		{strings.Repeat("verylongword ", 10), "verylongword_verylongword_verylongword_verylongword_verylong"},
+	}
+	for _, tc := range cases {
+		if got := snakeCaseQuerySlug(tc.query); got != tc.want {
+			t.Errorf("snakeCaseQuerySlug(%q) = %q, want %q", tc.query, got, tc.want)
+		}
+	}
+	if slug := snakeCaseQuerySlug(strings.Repeat("a b ", 40)); len(slug) > 60 {
+		t.Errorf("slug exceeds max length: %d", len(slug))
+	}
+}
+
+func TestDefaultTUIResultFile(t *testing.T) {
+	path := defaultTUIResultFile("map open source evidence", "md")
+	if dir := filepath.Dir(path); dir != defaultResultsDirName {
+		t.Errorf("expected results to land in %q, got dir %q", defaultResultsDirName, dir)
+	}
+	base := filepath.Base(path)
+	if !strings.HasPrefix(base, "map_open_source_evidence_") {
+		t.Errorf("expected snake_case query prefix, got %q", base)
+	}
+	if !strings.HasSuffix(base, ".md") {
+		t.Errorf("expected .md extension, got %q", base)
+	}
+}
+
+func TestSaveTUIResultDefaultsToResultsFolder(t *testing.T) {
+	dir := t.TempDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+
+	saved, err := saveTUIResult("", "graphene battery anodes", &agent.YOLOResult{FinalAnswer: "ok"}, time.Second, nil, nil)
+	if err != nil {
+		t.Fatalf("saveTUIResult() error: %v", err)
+	}
+	rel, err := filepath.Rel(dir, saved)
+	if err != nil {
+		t.Fatalf("saved path %q not under temp dir: %v", saved, err)
+	}
+	if filepath.Dir(rel) != defaultResultsDirName {
+		t.Errorf("expected save under %s/, got %q", defaultResultsDirName, rel)
+	}
+	if base := filepath.Base(rel); !strings.HasPrefix(base, "graphene_battery_anodes_") {
+		t.Errorf("expected snake_case filename, got %q", base)
+	}
+}
+
 func TestParseMouseScrollDelta(t *testing.T) {
 	if got := parseMouseScrollDelta([]byte("\033[<64;8;12M")); got != -3 {
 		t.Fatalf("wheel up = %d; want -3", got)

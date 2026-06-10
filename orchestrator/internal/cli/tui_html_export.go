@@ -351,8 +351,7 @@ func saveTUIResultHTML(path, query string, result *agent.YOLOResult, elapsed tim
 	}
 	target := strings.TrimSpace(path)
 	if target == "" {
-		stamp := time.Now().Format("20060102-150405")
-		target = filepath.Join(".", fmt.Sprintf("wisdev-result-%s.html", stamp))
+		target = defaultTUIResultFile(query, "html")
 	} else {
 		ext := strings.ToLower(filepath.Ext(target))
 		switch ext {

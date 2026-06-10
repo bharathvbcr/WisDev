@@ -945,6 +945,13 @@ type StructuredAnswerResponse struct {
 }
 
 func (c *BrainCapabilities) SynthesizeAnswer(ctx context.Context, query string, papers []Source, model string) (*rag.StructuredAnswer, error) {
+	return c.SynthesizeAnswerStyled(ctx, query, papers, model, false)
+}
+
+// SynthesizeAnswerStyled is SynthesizeAnswer with an optional long-form style:
+// when longForm is true the report opens with extended Introduction and
+// Background sections written for readers new to the topic.
+func (c *BrainCapabilities) SynthesizeAnswerStyled(ctx context.Context, query string, papers []Source, model string, longForm bool) (*rag.StructuredAnswer, error) {
 	if model == "" {
 		model = llm.ResolveHeavyModel()
 	}
@@ -964,6 +971,14 @@ func (c *BrainCapabilities) SynthesizeAnswer(ctx context.Context, query string, 
 		evidenceText += fmt.Sprintf("ID: %s | Title: %s%s | Summary: %s\n", p.ID, p.Title, meta, p.Summary)
 	}
 
+	styleInstructions := ""
+	if longForm {
+		styleInstructions = `
+7. Open the report with an extended "Introduction" section (multiple paragraphs) that frames the research question, explains why it matters, and sets out the scope of the report.
+8. Follow the Introduction with a substantial "Background" section that explains the foundational concepts, terminology, and prior work a reader needs before the findings — written so a newcomer to the topic can follow the rest of the report.
+9. The Introduction and Background sections should be noticeably longer and more explanatory than the remaining sections, while still grounding every factual sentence in the provided source IDs.`
+	}
+
 	prompt := appendWisdevStructuredOutputInstruction(fmt.Sprintf(`Synthesize a highly explanatory, comprehensive, and learning-oriented research report for the query: "%s"
 Based on %d sources found.
 
@@ -976,8 +991,8 @@ Instructions:
 3. For each sentence, set evidenceIds to the supporting source ID(s). If no source supports a claim, omit the claim or mark the sentence as unsupported with empty evidenceIds.
 4. Prefer short, source-linked sentences over long ungrounded prose paragraphs.
 5. Break the report into sections such as Research landscape, Synthesis, Key literature, Grounded evidence, Implications for researchers, and Questions worth investigating.
-6. Do not end sentences with ellipsis ("...") or stray whitespace-before-period artifacts; write complete thoughts.
-`, query, len(papers), evidenceText))
+6. Do not end sentences with ellipsis ("...") or stray whitespace-before-period artifacts; write complete thoughts.%s
+`, query, len(papers), evidenceText, styleInstructions))
 
 	resp, err := c.llmClient.StructuredOutput(ctx, applyBrainStructuredPolicy(&llmv1.StructuredRequest{
 		Prompt:     prompt,

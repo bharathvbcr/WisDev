@@ -108,7 +108,10 @@ type YOLORequest struct {
 	DisableHypotheses   bool
 	DisableQueryEnhance bool
 	BypassSearchCache   bool
-	OnProgress          func(ProgressEvent)
+	// LongFormReport asks synthesis for extended Introduction and Background
+	// sections instead of the default compact report.
+	LongFormReport bool
+	OnProgress     func(ProgressEvent)
 }
 
 // YOLOResult is the stable public result returned by RunYOLO.
@@ -313,6 +316,7 @@ func (a *Agent) RunYOLO(ctx context.Context, req YOLORequest) (*YOLOResult, erro
 		DisableProgrammaticPlanning: req.DisablePlanning,
 		DisableHypothesisGeneration: req.DisableHypotheses,
 		BypassSearchCache:           req.BypassSearchCache,
+		LongFormReport:              req.LongFormReport,
 	}, onEvent)
 	if err != nil {
 		return nil, err

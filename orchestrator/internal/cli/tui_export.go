@@ -259,6 +259,48 @@ func formatYOLOResultBibTeX(result *agent.YOLOResult) string {
 	return b.String()
 }
 
+// defaultResultsDirName is the folder where run exports land when no explicit
+// output path is given.
+const defaultResultsDirName = "wisdev-results"
+
+// snakeCaseQuerySlug converts a research query into a snake_case filename
+// slug: lowercased, non-alphanumeric runs collapsed to single underscores,
+// capped so filenames stay portable. Empty queries fall back to
+// "wisdev_result".
+func snakeCaseQuerySlug(query string) string {
+	var b strings.Builder
+	pendingSep := false
+	for _, r := range strings.ToLower(strings.TrimSpace(query)) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			if pendingSep && b.Len() > 0 {
+				b.WriteByte('_')
+			}
+			pendingSep = false
+			b.WriteRune(r)
+		default:
+			pendingSep = true
+		}
+	}
+	slug := b.String()
+	const maxSlugLen = 60
+	if len(slug) > maxSlugLen {
+		slug = strings.TrimRight(slug[:maxSlugLen], "_")
+	}
+	if slug == "" {
+		return "wisdev_result"
+	}
+	return slug
+}
+
+// defaultTUIResultFile builds the default export path for a run:
+// wisdev-results/<query_slug>_<timestamp>.<ext>. The timestamp keeps repeat
+// runs of the same query from overwriting each other.
+func defaultTUIResultFile(query, ext string) string {
+	stamp := time.Now().Format("20060102_150405")
+	return filepath.Join(defaultResultsDirName, fmt.Sprintf("%s_%s.%s", snakeCaseQuerySlug(query), stamp, ext))
+}
+
 func saveTUIResultBibTeX(path, query string, result *agent.YOLOResult) (string, error) {
 	content := formatYOLOResultBibTeX(result)
 	if strings.TrimSpace(content) == "" {
@@ -266,8 +308,7 @@ func saveTUIResultBibTeX(path, query string, result *agent.YOLOResult) (string, 
 	}
 	target := strings.TrimSpace(path)
 	if target == "" {
-		stamp := time.Now().Format("20060102-150405")
-		target = filepath.Join(".", fmt.Sprintf("wisdev-result-%s.bib", stamp))
+		target = defaultTUIResultFile(query, "bib")
 	} else {
 		ext := strings.ToLower(filepath.Ext(target))
 		switch ext {
@@ -293,7 +334,7 @@ func saveTUIResultBibTeX(path, query string, result *agent.YOLOResult) (string, 
 func saveTUIResult(path, query string, result *agent.YOLOResult, elapsed time.Duration, runErr error, stageLogs []tuiLogEntry) (string, error) {
 	target := strings.TrimSpace(path)
 	if target == "" {
-		target = defaultTUIResultPath()
+		target = defaultTUIResultFile(query, "md")
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil && filepath.Dir(target) != "." {
 		return "", err
@@ -309,20 +350,10 @@ func saveTUIResult(path, query string, result *agent.YOLOResult, elapsed time.Du
 	return abs, nil
 }
 
-func defaultTUIResultPath() string {
-	stamp := time.Now().Format("20060102-150405")
-	return filepath.Join(".", fmt.Sprintf("wisdev-result-%s.md", stamp))
-}
-
-func defaultTUIResultJSONPath() string {
-	stamp := time.Now().Format("20060102-150405")
-	return filepath.Join(".", fmt.Sprintf("wisdev-result-%s.json", stamp))
-}
-
 func saveTUIResultJSON(path, query string, result *agent.YOLOResult, elapsed time.Duration, runErr error) (string, error) {
 	target := strings.TrimSpace(path)
 	if target == "" {
-		target = defaultTUIResultJSONPath()
+		target = defaultTUIResultFile(query, "json")
 	} else if strings.HasSuffix(strings.ToLower(target), ".md") {
 		target = strings.TrimSuffix(target, filepath.Ext(target)) + ".json"
 	}
@@ -861,14 +892,13 @@ func formatPaperMarkdown(index int, paper agent.Paper) string {
 	return line
 }
 
-func saveTUIResultCSV(path string, result *agent.YOLOResult) (string, error) {
+func saveTUIResultCSV(path, query string, result *agent.YOLOResult) (string, error) {
 	if result == nil || len(result.Papers) == 0 {
 		return "", fmt.Errorf("no papers available for CSV export")
 	}
 	target := strings.TrimSpace(path)
 	if target == "" {
-		stamp := time.Now().Format("20060102-150405")
-		target = filepath.Join(".", fmt.Sprintf("wisdev-result-%s.csv", stamp))
+		target = defaultTUIResultFile(query, "csv")
 	} else {
 		ext := strings.ToLower(filepath.Ext(target))
 		switch ext {

@@ -13,17 +13,18 @@ import (
 // maxRecentRuns caps the past-runs browser list.
 const maxRecentRuns = 5
 
-// recentRunEntry is one saved wisdev-result-*.json run in the working
-// directory, ready to reopen in the results view.
+// recentRunEntry is one saved JSON run export, ready to reopen in the
+// results view.
 type recentRunEntry struct {
 	Path    string
 	Query   string
 	ModTime time.Time
 }
 
-// listRecentRunFiles returns up to max saved wisdev-result-*.json exports in
-// dir, most recent first by mtime, with the saved query parsed for display.
-// Unreadable or non-result JSON files are skipped.
+// listRecentRunFiles returns up to max saved JSON exports under dir, most
+// recent first by mtime, with the saved query parsed for display. It scans
+// the wisdev-results/ folder plus legacy wisdev-result-*.json files saved
+// directly in dir. Unreadable or non-result JSON files are skipped.
 func listRecentRunFiles(dir string, max int) []recentRunEntry {
 	if max <= 0 {
 		max = maxRecentRuns
@@ -31,8 +32,14 @@ func listRecentRunFiles(dir string, max int) []recentRunEntry {
 	if strings.TrimSpace(dir) == "" {
 		dir = "."
 	}
-	matches, err := filepath.Glob(filepath.Join(dir, "wisdev-result-*.json"))
-	if err != nil || len(matches) == 0 {
+	matches, err := filepath.Glob(filepath.Join(dir, defaultResultsDirName, "*.json"))
+	if err != nil {
+		matches = nil
+	}
+	if legacy, legacyErr := filepath.Glob(filepath.Join(dir, "wisdev-result-*.json")); legacyErr == nil {
+		matches = append(matches, legacy...)
+	}
+	if len(matches) == 0 {
 		return nil
 	}
 	candidates := make([]recentRunEntry, 0, len(matches))

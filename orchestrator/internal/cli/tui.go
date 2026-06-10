@@ -84,6 +84,7 @@ type tuiState struct {
 	enableQueryEnhance  bool
 	enableHypotheses    bool
 	deepSearch          bool
+	longFormReport      bool
 	offlineMode         bool
 	originalQuery       string
 	preparedQuery       string
@@ -91,7 +92,7 @@ type tuiState struct {
 	seedQueries         []string
 	bypassSearchCache   bool
 	llmBackend          string
-	activeSetting       int // 0=iterations 1=planning 2=offline 3=enhance 4=hypotheses 5=deep
+	activeSetting       int // 0=iterations 1=planning 2=offline 3=enhance 4=hypotheses 5=deep 6=longform
 	outputPath        string
 	showHelp          bool
 	completedElapsed  time.Duration
@@ -162,6 +163,11 @@ type tuiState struct {
 	// Citation jump state (results mode: [n] -> source paper)
 	citationJumpOn      bool
 	citationJumpInput   string
+
+	// Follow-up question state (results mode: f -> new run seeded with prior context)
+	followUpOn          bool
+	followUpInput       string
+	keepPrevResultOnce  bool
 
 	// Provider filter state
 	providerFilter      string
@@ -389,7 +395,41 @@ func (s *tuiState) toggleActiveSetting() {
 		s.enableHypotheses = !s.enableHypotheses
 	case 5:
 		s.deepSearch = !s.deepSearch
+	case 6:
+		s.longFormReport = !s.longFormReport
 	}
+}
+
+// composeFollowUpQuery builds the task for a follow-up run: the new question
+// carries the previous research question as context so query preparation and
+// planning stay anchored to the original topic.
+func composeFollowUpQuery(prevQuery, followUp string) string {
+	prevQuery = strings.TrimSpace(prevQuery)
+	followUp = strings.TrimSpace(followUp)
+	if followUp == "" {
+		return prevQuery
+	}
+	if prevQuery == "" || strings.EqualFold(prevQuery, followUp) {
+		return followUp
+	}
+	return fmt.Sprintf("%s (follow-up to: %s)", followUp, prevQuery)
+}
+
+// startFollowUpResearch launches a new run for a follow-up question typed in
+// results mode, keeping the previous result so the Compare pane shows what the
+// follow-up changed.
+func (s *tuiState) startFollowUpResearch(ctx context.Context, followUp string) {
+	followUp = strings.TrimSpace(followUp)
+	if followUp == "" {
+		return
+	}
+	s.savePreviousResult()
+	s.keepPrevResultOnce = true
+	s.saveQueryUndoState()
+	s.query = composeFollowUpQuery(s.originalQuery, followUp)
+	s.cursorPos = len(s.query)
+	s.setSaveMsg("")
+	s.startResearch(ctx)
 }
 
 func (s *tuiState) getResultLines(width int) []string {
@@ -444,7 +484,7 @@ func (s *tuiState) resultsHome() {
 }
 
 func (s *tuiState) resultsFooterShortcut() string {
-	return "Tab/[ ] panes  j/k scroll  h=home  v=reasoning  y=hypotheses  o=open [n]  /=filter  s/e/b/t/w export  c=copy  r/E re-run  ?=help"
+	return "Tab/[ ] panes  j/k scroll  h=home  v=reasoning  y=hypotheses  o=open [n]  f=follow-up  /=filter  s/e/b/t/w export  c=copy  r/E re-run  ?=help"
 }
 
 func (s *tuiState) runningFooterShortcut() string {
@@ -501,6 +541,7 @@ func (s *tuiState) saveSession() {
 		EnableQueryEnhance: s.enableQueryEnhance,
 		EnableHypotheses:   s.enableHypotheses,
 		DeepSearch:         s.deepSearch,
+		LongFormReport:     s.longFormReport,
 	}
 	
 	data, err := json.Marshal(sess)
@@ -540,6 +581,7 @@ func (s *tuiState) restoreSession() {
 		s.enableQueryEnhance = sess.EnableQueryEnhance
 		s.enableHypotheses = sess.EnableHypotheses
 		s.deepSearch = sess.DeepSearch
+		s.longFormReport = sess.LongFormReport
 		
 		for _, sp := range sess.Providers {
 			for idx, p := range s.providers {
@@ -561,6 +603,7 @@ type tuiSession struct {
 	EnableQueryEnhance bool               `json:"enable_query_enhance"`
 	EnableHypotheses   bool               `json:"enable_hypotheses"`
 	DeepSearch         bool               `json:"deep_search"`
+	LongFormReport     bool               `json:"long_form_report"`
 }
 
 type tuiSessionProv struct {
@@ -617,7 +660,7 @@ func (s *tuiState) checkProvidersHealth() {
 }
 
 func (s *tuiState) saveResultsCSV() {
-	savedPath, err := saveTUIResultCSV(s.outputPath, s.result)
+	savedPath, err := saveTUIResultCSV(s.outputPath, s.runningTask, s.result)
 	if err != nil {
 		s.setSaveMsg("Error: " + err.Error())
 		return
@@ -976,8 +1019,7 @@ func (s *tuiState) resolvedSavePath(saveType string) string {
 	target := strings.TrimSpace(s.outputPath)
 	if saveType == "bib" {
 		if target == "" {
-			stamp := time.Now().Format("20060102-150405")
-			target = filepath.Join(".", fmt.Sprintf("wisdev-result-%s.bib", stamp))
+			target = defaultTUIResultFile(s.runningTask, "bib")
 		} else {
 			ext := strings.ToLower(filepath.Ext(target))
 			switch ext {
@@ -989,14 +1031,13 @@ func (s *tuiState) resolvedSavePath(saveType string) string {
 		}
 	} else if saveType == "json" {
 		if target == "" {
-			target = defaultTUIResultJSONPath()
+			target = defaultTUIResultFile(s.runningTask, "json")
 		} else if strings.HasSuffix(strings.ToLower(target), ".md") {
 			target = strings.TrimSuffix(target, filepath.Ext(target)) + ".json"
 		}
 	} else if saveType == "csv" {
 		if target == "" {
-			stamp := time.Now().Format("20060102-150405")
-			target = filepath.Join(".", fmt.Sprintf("wisdev-result-%s.csv", stamp))
+			target = defaultTUIResultFile(s.runningTask, "csv")
 		} else {
 			ext := strings.ToLower(filepath.Ext(target))
 			switch ext {
@@ -1008,8 +1049,7 @@ func (s *tuiState) resolvedSavePath(saveType string) string {
 		}
 	} else if saveType == "html" {
 		if target == "" {
-			stamp := time.Now().Format("20060102-150405")
-			target = filepath.Join(".", fmt.Sprintf("wisdev-result-%s.html", stamp))
+			target = defaultTUIResultFile(s.runningTask, "html")
 		} else {
 			ext := strings.ToLower(filepath.Ext(target))
 			switch ext {
@@ -1021,7 +1061,7 @@ func (s *tuiState) resolvedSavePath(saveType string) string {
 		}
 	} else {
 		if target == "" {
-			target = defaultTUIResultPath()
+			target = defaultTUIResultFile(s.runningTask, "md")
 		}
 	}
 	return target
@@ -1552,6 +1592,30 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 				continue
 			}
 
+			// Overlay 3c: Follow-up question input (f -> new run with prior context)
+			if state.mode == modeResults && state.followUpOn {
+				if len(b) == 1 {
+					key := b[0]
+					if key == 27 { // ESC
+						state.followUpOn = false
+						state.followUpInput = ""
+					} else if key == 13 || key == 10 { // Enter
+						followUp := state.followUpInput
+						state.followUpOn = false
+						state.followUpInput = ""
+						state.startFollowUpResearch(ctx, followUp)
+					} else if key == 127 || key == 8 { // Backspace
+						if len(state.followUpInput) > 0 {
+							state.followUpInput = state.followUpInput[:len(state.followUpInput)-1]
+						}
+					} else if key >= 32 && key <= 126 {
+						state.followUpInput += string(key)
+					}
+				}
+				state.render()
+				continue
+			}
+
 			// Overlay 4: Provider checklist filter input
 			if state.mode == modeInput && state.providerFiltering {
 				if len(b) == 1 {
@@ -1736,6 +1800,8 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 							state.enableHypotheses = !state.enableHypotheses
 						} else if state.activeElement == 2 && state.activeSetting == 5 {
 							state.deepSearch = !state.deepSearch
+						} else if state.activeElement == 2 && state.activeSetting == 6 {
+							state.longFormReport = !state.longFormReport
 						} else if state.activeElement == 0 {
 							state.validationMsg = ""
 							state.insertQueryChar(" ")
@@ -1803,7 +1869,7 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 							}
 						case 3:
 							state.activeElement = 2
-							state.activeSetting = 3
+							state.activeSetting = 6
 						case 4, 5:
 							state.activeElement = 3
 						}
@@ -1823,8 +1889,8 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 								state.activeSetting = 0
 							}
 						case 2:
-							if state.activeSetting < settingsPerRow {
-								state.activeSetting = moveSettingDown(state.activeSetting)
+							if next := moveSettingDown(state.activeSetting); next != state.activeSetting {
+								state.activeSetting = next
 							} else {
 								state.activeElement = 3
 							}
@@ -2037,6 +2103,9 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 						} else {
 							state.setSaveMsg("No sources available for citation jump.")
 						}
+					} else if key == 'f' { // Follow-up question: new run with prior context
+						state.followUpOn = true
+						state.followUpInput = ""
 					} else if key == 'n' && len(state.resultFilterMatch) > 0 {
 						state.resultFilterCursor = (state.resultFilterCursor + 1) % len(state.resultFilterMatch)
 						state.scrollOffset = state.resultFilterMatch[state.resultFilterCursor]
@@ -2180,9 +2249,10 @@ func (s *tuiState) startResearchWithOptions(parentCtx context.Context, forceExha
 		s.deepSearch = true
 		s.bypassSearchCache = true
 	}
-	if s.originalQuery != strings.TrimSpace(s.query) {
+	if s.originalQuery != strings.TrimSpace(s.query) && !s.keepPrevResultOnce {
 		s.prevResult = nil
 	}
+	s.keepPrevResultOnce = false
 	s.cachedResultLines = nil
 	s.saveSession()
 
@@ -2311,6 +2381,7 @@ func (s *tuiState) startResearchWithOptions(parentCtx context.Context, forceExha
 				DisableHypotheses:   !s.enableHypotheses,
 				DisableQueryEnhance: !s.enableQueryEnhance,
 				BypassSearchCache:   s.bypassSearchCache,
+				LongFormReport:      s.longFormReport,
 				OnProgress: func(event agent.ProgressEvent) {
 					s.handleProgressEvent(event)
 				},
@@ -2423,7 +2494,7 @@ func (s *tuiState) scrollResultsBy(lineDelta int, pageDelta int) {
 		if err != nil {
 			height = 24
 		}
-		pageSize := resultsViewportHeight(height, s.saveMsg != "" || s.resultFilterOn || s.citationJumpOn)
+		pageSize := resultsViewportHeight(height, s.saveMsg != "" || s.resultFilterOn || s.citationJumpOn || s.followUpOn)
 		lineDelta = pageDelta * pageSize
 	}
 	s.scrollOffset += lineDelta
@@ -2438,7 +2509,7 @@ func (s *tuiState) clampResultsScrollOffset() {
 	if height <= 0 {
 		height = 24
 	}
-	viewport := resultsViewportHeight(height, s.saveMsg != "" || s.resultFilterOn || s.citationJumpOn)
+	viewport := resultsViewportHeight(height, s.saveMsg != "" || s.resultFilterOn || s.citationJumpOn || s.followUpOn)
 	lines := s.getResultLines(width)
 	maxOffset := len(lines) - viewport
 	if maxOffset < 0 {
@@ -2463,7 +2534,7 @@ func (s *tuiState) scrollSelectedPaperIntoView() {
 	if height <= 0 {
 		height = 24
 	}
-	viewport := resultsViewportHeight(height, s.saveMsg != "" || s.resultFilterOn || s.citationJumpOn)
+	viewport := resultsViewportHeight(height, s.saveMsg != "" || s.resultFilterOn || s.citationJumpOn || s.followUpOn)
 	lines := s.getResultLines(width)
 
 	targetPrefix := fmt.Sprintf("  [%d] ", s.paperDetailIdx+1)
@@ -2845,6 +2916,7 @@ func (s *tuiState) render() {
 			lines = append(lines, "    h                   Results Home: Go to All pane & reset scroll")
 			lines = append(lines, "    s / e / b / t / w   Save markdown / JSON / BibTeX / CSV / HTML export")
 			lines = append(lines, "    c                   Copy all results (markdown format) to clipboard")
+			lines = append(lines, "    f                   Ask a follow-up question (new run with prior context)")
 			lines = append(lines, "    r                   Re-run same query with current settings")
 			lines = append(lines, "    R                   Go back to Input Mode to edit query/settings")
 			lines = append(lines, "    E                   Re-run with Exhaustive (deep search) mode enabled")
@@ -2924,7 +2996,7 @@ func (s *tuiState) render() {
 	if s.showRecentRuns {
 		drawBorder("Recent Saved Runs")
 		if len(s.recentRuns) == 0 {
-			drawLine("  No saved wisdev-result-*.json runs in this directory.", theme.DimText)
+			drawLine("  No saved runs found (wisdev-results/ or legacy wisdev-result-*.json).", theme.DimText)
 		} else {
 			if s.recentRunsIdx < 0 {
 				s.recentRunsIdx = 0
@@ -3157,9 +3229,11 @@ func (s *tuiState) render() {
 			highlightSetting(fmt.Sprintf(" Hypotheses: %s", onOff(s.enableHypotheses)), 4),
 			highlightSetting(fmt.Sprintf(" Exhaustive: %s", onOff(s.deepSearch)), 5),
 		}, "   ")
+		rowThree := highlightSetting(fmt.Sprintf(" Long-form: %s", onOff(s.longFormReport)), 6)
 
 		drawLine("   "+rowOne, "")
 		drawLine("   "+rowTwo, "")
+		drawLine("   "+rowThree, "")
 		if backend := strings.TrimSpace(s.llmBackend); backend != "" {
 			drawLine("   LLM backend: "+backend, theme.DimText)
 		}
@@ -3191,6 +3265,8 @@ func (s *tuiState) render() {
 				settingHint = "Hypotheses: Allow generating candidate hypotheses during research."
 			case 5:
 				settingHint = "Exhaustive: Run all max iterations without early convergence stops."
+			case 6:
+				settingHint = "Long-form: Write extended Introduction and Background sections in the report."
 			}
 		} else {
 			settingHint = "Exhaustive runs all max iterations before early stop."
@@ -3325,7 +3401,7 @@ func (s *tuiState) render() {
 		drawDivider()
 		lines := s.getResultLines(width)
 
-		displayHeight := resultsViewportHeight(height, s.saveMsg != "" || s.resultFilterOn || s.citationJumpOn)
+		displayHeight := resultsViewportHeight(height, s.saveMsg != "" || s.resultFilterOn || s.citationJumpOn || s.followUpOn)
 
 		r.hasScrollbar = len(lines) > displayHeight
 		r.totalLines = len(lines)
@@ -3385,7 +3461,10 @@ func (s *tuiState) render() {
 		}
 		r.scrollbarTrack = false
 
-		if s.citationJumpOn {
+		if s.followUpOn {
+			drawDivider()
+			drawLine(renderTextInput(" Follow-up question: ", s.followUpInput, len(s.followUpInput), true, theme), "")
+		} else if s.citationJumpOn {
 			drawDivider()
 			drawLine(renderTextInput(" Open citation [n]: ", s.citationJumpInput, len(s.citationJumpInput), true, theme), "")
 		} else if s.resultFilterOn {
@@ -3788,10 +3867,16 @@ func moveSettingDown(setting int) int {
 	if setting < settingsPerRow {
 		return setting + settingsPerRow
 	}
+	if setting < 2*settingsPerRow {
+		return 6 // third row has a single setting (Long-form)
+	}
 	return setting
 }
 
 func moveSettingUp(setting int) int {
+	if setting == 6 {
+		return 3
+	}
 	if setting >= settingsPerRow {
 		return setting - settingsPerRow
 	}

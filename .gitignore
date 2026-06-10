@@ -38,6 +38,7 @@ ACL
 Meniscus_and_ACL
 Mixture_of_Experts
 wisdev-result-*
+wisdev-results/
 
 # OSS-mirror provenance marker written by scripts/sync-wisdev-oss.ps1
 .oss-sync-stamp.json

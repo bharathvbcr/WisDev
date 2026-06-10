@@ -26,6 +26,7 @@ type AutonomousLoop struct {
 	evaluator          *HypothesisEvaluator
 	beliefManager      *BeliefStateManager
 	hypothesisExplorer *HypothesisExplorer
+	longFormReport     bool
 }
 
 const optionalCritiqueRefinementLatencyBudget = 15 * time.Second
@@ -86,6 +87,7 @@ type LoopRequest struct {
 	BypassSearchCache              bool                      `json:"bypassSearchCache,omitempty"`
 	DisableProgrammaticPlanning    bool                      `json:"disableProgrammaticPlanning,omitempty"`
 	DisableHypothesisGeneration    bool                      `json:"disableHypothesisGeneration,omitempty"`
+	LongFormReport                 bool                      `json:"longFormReport,omitempty"`
 	SteeringChan                   <-chan SteeringSignal     `json:"-"`
 	SteeringJournal                *RuntimeJournal           `json:"-"`
 }
@@ -168,6 +170,7 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 	if emit != nil {
 		ctx = WithLoopProgress(ctx, &LoopProgressEmitter{Emit: emit, Req: req})
 	}
+	l.longFormReport = req.LongFormReport
 	loopLLMClient := GlobalLLMClient
 	if l.llmClient != nil {
 		loopLLMClient = l.llmClient
@@ -3218,7 +3221,7 @@ func (l *AutonomousLoop) synthesizeWithEvidence(ctx context.Context, query strin
 		sources[i] = mapPaperToSource(p)
 	}
 
-	ans, err := safeSynthesizeStructuredAnswer(ctx, l.brainCaps, query, sources)
+	ans, err := safeSynthesizeStructuredAnswer(ctx, l.brainCaps, query, sources, l.longFormReport)
 	if err != nil {
 		if shouldAbortAutonomousLoop(err) || ctx.Err() != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -3288,13 +3291,13 @@ func (l *AutonomousLoop) synthesizeWithEvidence(ctx context.Context, query strin
 	return ans, nil
 }
 
-func safeSynthesizeStructuredAnswer(ctx context.Context, caps *BrainCapabilities, query string, sources []Source) (answer *rag.StructuredAnswer, err error) {
+func safeSynthesizeStructuredAnswer(ctx context.Context, caps *BrainCapabilities, query string, sources []Source, longForm bool) (answer *rag.StructuredAnswer, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("structured synthesis panic: %v", recovered)
 		}
 	}()
-	return caps.SynthesizeAnswer(ctx, query, sources, "")
+	return caps.SynthesizeAnswerStyled(ctx, query, sources, "", longForm)
 }
 
 func (l *AutonomousLoop) synthesizePlainTextFallback(ctx context.Context, query string, papers []search.Paper, evidence []EvidenceItem) (string, error) {

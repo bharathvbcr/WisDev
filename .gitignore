@@ -30,3 +30,9 @@ service-account*.json
 *-credentials.json
 node_modules/
 .gitnexus/
+
+# Local research run outputs (do not commit or sync to OSS)
+ACL/
+Meniscus_and_ACL/
+Mixture_of_Experts/
+wisdev-result-*

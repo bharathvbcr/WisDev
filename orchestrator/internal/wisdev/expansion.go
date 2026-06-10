@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
 )
 
 // applyMultiSourceScoreBoost boosts the Score of papers that appear in 2 or

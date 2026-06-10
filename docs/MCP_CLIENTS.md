@@ -16,12 +16,12 @@ Legacy `scholarlm*` aliases are accepted on `tools/call`.
 ## Run the stdio server
 
 ```powershell
-cd wisdev-agent-os
+cd wisdev-arc
 .\wisdev.cmd mcp
 ```
 
 ```bash
-cd wisdev-agent-os
+cd wisdev-arc
 ./wisdev mcp
 ```
 
@@ -32,7 +32,7 @@ The process reads JSON-RPC from **stdin** and writes responses to **stdout**. Do
 ## Cursor
 
 ```powershell
-cd wisdev-agent-os
+cd wisdev-arc
 .\wisdev.cmd setup --write .cursor\mcp.json
 ```
 
@@ -43,8 +43,8 @@ Or copy [`docs/examples/cursor-mcp.json`](examples/cursor-mcp.json). Minimal han
   "mcpServers": {
     "wisdev": {
       "command": "powershell",
-      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\path\\to\\WisDev\\scripts\\wisdev.ps1", "mcp"],
-      "cwd": "C:\\path\\to\\WisDev"
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\path\\to\\wisdev-arc\\scripts\\wisdev.ps1", "mcp"],
+      "cwd": "C:\\path\\to\\wisdev-arc"
     }
   }
 }
@@ -56,7 +56,7 @@ After `make build-cli`:
 {
   "mcpServers": {
     "wisdev": {
-      "command": "C:\\path\\to\\WisDev\\dist\\wisdev.exe",
+      "command": "C:\\path\\to\\wisdev-arc\\dist\\wisdev.exe",
       "args": ["mcp"]
     }
   }
@@ -69,7 +69,7 @@ After `make build-cli`:
 {
   "mcpServers": {
     "wisdev": {
-      "command": "/absolute/path/to/WisDev/wisdev",
+      "command": "/absolute/path/to/wisdev-arc/wisdev",
       "args": ["mcp"]
     }
   }

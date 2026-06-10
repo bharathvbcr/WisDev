@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/policy"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/policy"
 )
 
 func TestReasoning_ClampFloat(t *testing.T) {

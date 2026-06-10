@@ -11,11 +11,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/stackconfig"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/telemetry"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/stackconfig"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/telemetry"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
 
 	"github.com/redis/go-redis/v9"
 	temporalclient "go.temporal.io/sdk/client"

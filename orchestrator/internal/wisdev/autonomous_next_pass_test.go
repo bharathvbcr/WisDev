@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 
 	"github.com/stretchr/testify/assert"
 )

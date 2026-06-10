@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
+	llmv1 "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm"
 )
 
 func normalizeGeneratedResponseText(operation string, resp *llmv1.GenerateResponse) (string, error) {

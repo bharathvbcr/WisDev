@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	wisdevpb "github.com/wisdev/wisdev-agent-os/orchestrator/proto/wisdev"
+	wisdevpb "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/wisdev"
 )
 
 func TestMapStatusToProto(t *testing.T) {

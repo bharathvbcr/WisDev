@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"

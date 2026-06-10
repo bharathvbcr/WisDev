@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
 	"log/slog"
 	"sort"
 	"strings"
 
-	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
+	llmv1 "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm"
 )
 
 type CommitteeMember struct {

@@ -7,7 +7,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	wisdevpb "github.com/wisdev/wisdev-agent-os/orchestrator/proto/wisdev"
+	wisdevpb "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/wisdev"
 )
 
 // --- IterativeResearch ---

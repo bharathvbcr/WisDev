@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/cli"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/cli"
 )
 
 var version = "dev"

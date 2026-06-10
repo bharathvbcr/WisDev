@@ -1,4 +1,4 @@
-name: WisDev Agent OS CI
+name: WisDev Arc CI
 
 on:
   push:

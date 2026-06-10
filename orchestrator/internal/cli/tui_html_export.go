@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	agent "github.com/wisdev/wisdev-agent-os/orchestrator/pkg/wisdev"
+	agent "github.com/bharathvbcr/wisdev-arc/orchestrator/pkg/wisdev"
 )
 
 // htmlCitationMarkerRe matches inline [n] citation markers in escaped text.

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/telemetry"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/telemetry"
 	"sync"
 	"time"
 )

@@ -1,7 +1,7 @@
 package llm
 
 import (
-	llmpb "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
+	llmpb "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm"
 )
 
 // HybridStructuredOutputPrefersCloud reports whether hybrid mode should route a

@@ -15,10 +15,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/paper"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/stackconfig"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/paper"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/resilience"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/stackconfig"
 )
 
 type PaperProfiler interface {

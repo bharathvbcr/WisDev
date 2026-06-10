@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"google.golang.org/grpc"
-	llmpb "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
+	llmpb "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm"
 )
 
 type mockLLMClient struct {

@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/telemetry"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/telemetry"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
 )
 
 func normalizeSessionMode(raw string) wisdev.WisDevMode {

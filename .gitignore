@@ -25,6 +25,8 @@ tmp/
 .wisdev/
 wisdev_journal.jsonl
 wisdev_journal.jsonl.index
+wisdev_prm_rewards.jsonl
+*_prm_rewards.jsonl
 wd_*.json
 service-account*.json
 *-credentials.json
@@ -36,3 +38,6 @@ ACL
 Meniscus_and_ACL
 Mixture_of_Experts
 wisdev-result-*
+
+# OSS-mirror provenance marker written by scripts/sync-wisdev-oss.ps1
+.oss-sync-stamp.json

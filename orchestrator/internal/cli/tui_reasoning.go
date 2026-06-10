@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	agent "github.com/wisdev/wisdev-agent-os/orchestrator/pkg/wisdev"
+	agent "github.com/bharathvbcr/wisdev-arc/orchestrator/pkg/wisdev"
 )
 
 // maxReasoningAlternatives caps the dim sub-bullets shown per trace entry.

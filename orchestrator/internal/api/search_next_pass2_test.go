@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"

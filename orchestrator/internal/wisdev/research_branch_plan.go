@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
 
 // ResearchBranchPlan is the durable form of a tree/MCTS research branch. Query

@@ -1,4 +1,4 @@
-module github.com/wisdev/wisdev-agent-os/orchestrator
+module github.com/bharathvbcr/wisdev-arc/orchestrator
 
 go 1.25.0
 

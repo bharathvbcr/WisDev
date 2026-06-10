@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/rag"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/rag"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
 
 // AgentSwarmConfig controls the behavior of the agent swarm.

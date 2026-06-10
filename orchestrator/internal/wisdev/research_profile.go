@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
 )
 
 // normalizeSpaceLower trims, collapses whitespace, and lowercases a string.

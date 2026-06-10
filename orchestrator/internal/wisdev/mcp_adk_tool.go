@@ -10,7 +10,7 @@ import (
 	adktool "google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
 
 // ──────────────────────────────────────────────
@@ -129,7 +129,7 @@ func (b *MCPADKBridge) searchPapersTool() adktool.Tool {
 			QualitySort: in.QualitySort,
 		})
 		slog.Info("mcp adk tool wisdevSearchPapers",
-			"service", "wisdev_agent_os",
+			"service", "wisdev_arc",
 			"component", "wisdev.mcp_adk_tool",
 			"operation", "search_papers",
 			"query_length", len(in.Query),

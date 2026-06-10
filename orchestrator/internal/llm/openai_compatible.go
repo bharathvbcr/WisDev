@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/stackconfig"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/stackconfig"
 )
 
 const (

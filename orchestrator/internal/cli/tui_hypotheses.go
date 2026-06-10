@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	agent "github.com/wisdev/wisdev-agent-os/orchestrator/pkg/wisdev"
+	agent "github.com/bharathvbcr/wisdev-arc/orchestrator/pkg/wisdev"
 )
 
 // confidenceBarWidth is the glyph width of hypothesis/belief confidence bars.

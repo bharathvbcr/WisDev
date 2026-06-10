@@ -13,8 +13,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
 )
 
 type mockYoloLoop struct {

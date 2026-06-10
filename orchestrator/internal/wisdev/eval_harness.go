@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
 
 type EvalHarnessScenarioFile struct {

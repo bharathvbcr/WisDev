@@ -6,8 +6,8 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/rag"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/rag"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
 
 const (

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	wisdevpb "github.com/wisdev/wisdev-agent-os/orchestrator/proto/wisdev"
+	wisdevpb "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/wisdev"
 
 	"google.golang.org/grpc"
 )

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	agent "github.com/wisdev/wisdev-agent-os/orchestrator/pkg/wisdev"
+	agent "github.com/bharathvbcr/wisdev-arc/orchestrator/pkg/wisdev"
 )
 
 func writeRunFile(t *testing.T, dir, name, query string, mtime time.Time) string {

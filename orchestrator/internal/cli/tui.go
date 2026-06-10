@@ -20,8 +20,8 @@ import (
 	"unicode"
 
 	"golang.org/x/term"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
-	agent "github.com/wisdev/wisdev-agent-os/orchestrator/pkg/wisdev"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
+	agent "github.com/bharathvbcr/wisdev-arc/orchestrator/pkg/wisdev"
 )
 
 const (

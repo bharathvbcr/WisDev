@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

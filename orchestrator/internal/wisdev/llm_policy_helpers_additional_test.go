@@ -3,8 +3,8 @@ package wisdev
 import (
 	"testing"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
-	llmpb "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
+	llmpb "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

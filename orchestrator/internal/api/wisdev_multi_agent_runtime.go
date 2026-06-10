@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/rag"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/rag"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
 )
 
 var errWisdevSwarmInsufficientGrounding = errors.New("wisdev_swarm_insufficient_grounding")

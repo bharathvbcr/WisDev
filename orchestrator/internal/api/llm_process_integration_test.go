@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/testsupport"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/testsupport"
 
 	"github.com/stretchr/testify/require"
 )

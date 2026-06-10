@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
 )
 
 func resolveTraceSessionOwner(r *http.Request, agentGateway *wisdev.AgentGateway, sessionID string) string {

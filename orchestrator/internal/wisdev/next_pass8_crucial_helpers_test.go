@@ -3,8 +3,8 @@ package wisdev
 import (
 	"testing"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
-	wisdevpb "github.com/wisdev/wisdev-agent-os/orchestrator/proto/wisdev"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
+	wisdevpb "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/wisdev"
 
 	"github.com/stretchr/testify/assert"
 )

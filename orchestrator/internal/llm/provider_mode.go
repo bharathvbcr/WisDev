@@ -3,7 +3,7 @@ package llm
 import (
 	"strings"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/stackconfig"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/stackconfig"
 )
 
 // LLMProviderMode selects how native structured-output backends are wired.

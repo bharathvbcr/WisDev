@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/mock"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
-	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
+	llmv1 "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm"
 	"google.golang.org/grpc"
 )
 

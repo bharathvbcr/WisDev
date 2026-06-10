@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/policy"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/policy"
 )
 
 type DecisionCandidate struct {

@@ -1,6 +1,6 @@
 <#
 DESCRIPTION:
-    Wrapper for running GitNexus inside the wisdev-agent-os workspace.
+    Wrapper for running GitNexus inside the wisdev-arc workspace.
 
 USAGE:
     .\scripts\gitnexus.ps1 index   # refresh index

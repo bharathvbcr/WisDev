@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/stackconfig"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/telemetry"
-	llmpb "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/stackconfig"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/telemetry"
+	llmpb "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"

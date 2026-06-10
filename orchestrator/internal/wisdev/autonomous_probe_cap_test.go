@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
 
 // hypothesisProbeQuery reports whether a query looks like one of the

@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/policy"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/policy"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
 
 	"github.com/stretchr/testify/assert"
 )

@@ -1,6 +1,6 @@
 # Gemini File Search Multimodal RAG
 
-WisDev Agent OS can ground `/wisdev/rag/answer` with Gemini API File Search stores from the Go orchestrator. Go remains the canonical RAG owner; clients only send typed options, and Python remains limited to worker-side ML tasks.
+WisDev Arc can ground `/wisdev/rag/answer` with Gemini API File Search stores from the Go orchestrator. Go remains the canonical RAG owner; clients only send typed options, and Python remains limited to worker-side ML tasks.
 
 ## Configuration
 

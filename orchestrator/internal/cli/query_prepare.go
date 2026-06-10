@@ -3,8 +3,8 @@ package cli
 import (
 	"context"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
-	internal "github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
+	internal "github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
 )
 
 type preparedResearchQuery = internal.PreparedResearchQuery

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	agent "github.com/wisdev/wisdev-agent-os/orchestrator/pkg/wisdev"
+	agent "github.com/bharathvbcr/wisdev-arc/orchestrator/pkg/wisdev"
 )
 
 func TestRenderWisDevBannerArtMode(t *testing.T) {

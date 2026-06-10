@@ -3,7 +3,7 @@ package wisdev
 import (
 	"strings"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/evidence/citations"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/evidence/citations"
 )
 
 func NormalizeCitationVerificationStatus(raw string, verified, resolved bool) CitationVerificationStatus {

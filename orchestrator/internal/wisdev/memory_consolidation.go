@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/pycompute"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/pycompute"
 )
 
 // MemoryConsolidator handles cross-session learning and semantic memory construction.

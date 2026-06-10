@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/resilience"
 	"testing"
 
 	"github.com/stretchr/testify/assert"

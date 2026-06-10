@@ -13,7 +13,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/telemetry"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/telemetry"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

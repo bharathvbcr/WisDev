@@ -1,7 +1,7 @@
 package rag
 
 import (
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
 
 // AnswerRequest is the input for a RAG answer generation.

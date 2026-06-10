@@ -16,13 +16,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/evidence"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/policy"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/telemetry"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
-	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/evidence"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/policy"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/telemetry"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
+	llmv1 "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm"
 )
 
 var routeConcurrencyGuards = struct {

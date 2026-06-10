@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/policy"
-	internalsearch "github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/policy"
+	internalsearch "github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

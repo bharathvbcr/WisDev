@@ -11,7 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
+	llmv1 "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm"
 )
 
 func TestAnalysisHandler_HandleAnalysis_Routing(t *testing.T) {

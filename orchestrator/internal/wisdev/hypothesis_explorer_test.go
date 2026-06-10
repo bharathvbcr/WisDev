@@ -6,12 +6,12 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
+	llmv1 "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm"
 )
 
 func TestHypothesisExplorer_ExploreAll(t *testing.T) {

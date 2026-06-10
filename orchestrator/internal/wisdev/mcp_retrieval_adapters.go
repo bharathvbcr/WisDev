@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
 
 func retrieveCanonicalSearchPapers(ctx context.Context, registry *search.ProviderRegistry, query string, opts search.SearchOpts) ([]search.Paper, map[string]any, error) {

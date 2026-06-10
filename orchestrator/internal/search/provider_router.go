@@ -3,7 +3,7 @@ package search
 import (
 	"context"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/resilience"
 )
 
 // ProviderRouter decides which search providers to use for a given query.

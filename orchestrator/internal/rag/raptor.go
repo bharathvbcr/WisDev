@@ -9,8 +9,8 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
-	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
+	llmv1 "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm"
 )
 
 // RaptorNode represents a node in the RAPTOR tree.

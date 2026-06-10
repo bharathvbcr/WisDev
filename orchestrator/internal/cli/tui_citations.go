@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	agent "github.com/wisdev/wisdev-agent-os/orchestrator/pkg/wisdev"
+	agent "github.com/bharathvbcr/wisdev-arc/orchestrator/pkg/wisdev"
 )
 
 // answerBibliographyHeading is the section the synthesis pipeline appends to

@@ -8,10 +8,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/rag"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
-	internal "github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/rag"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
+	internal "github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
 )
 
 const (

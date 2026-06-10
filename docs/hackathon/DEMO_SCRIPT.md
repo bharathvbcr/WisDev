@@ -16,7 +16,7 @@ npm run ops:hackathon:demo-cli
 npm run ops:hackathon:demo-cli -- --offline
 
 # Or from WisDev repo root:
-cd WisDev
+cd wisdev-arc
 .\wisdev.cmd demo
 .\wisdev.cmd demo --offline
 
@@ -58,7 +58,7 @@ Have ready:
 Run:
 
 ```powershell
-cd WisDev
+cd wisdev-arc
 .\wisdev.cmd demo
 ```
 

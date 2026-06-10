@@ -3,7 +3,7 @@ package llm
 import (
 	"strings"
 
-	llmpb "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
+	llmpb "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm"
 )
 
 // ApplyGeneratePolicy populates a GenerateRequest with the canonical LLM

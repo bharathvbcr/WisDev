@@ -1,0 +1,13 @@
+title = "WisDev Arc gitleaks configuration"
+
+# Inherit the full set of gitleaks default rules, then narrow with allowlists below.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Non-secret open-source config templates and example env files"
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''(^|/)config/.*\.example\..*$''',
+  '''(^|/).*\.example\.(ya?ml|yml|json|toml)$''',
+]

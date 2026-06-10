@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
 	"google.golang.org/adk/agent"
 	adkmemory "google.golang.org/adk/memory"
 	"google.golang.org/adk/model"

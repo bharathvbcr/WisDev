@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/policy"
-	wisdevpb "github.com/wisdev/wisdev-agent-os/orchestrator/proto/wisdev"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/policy"
+	wisdevpb "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/wisdev"
 )
 
 type agentGatewayGRPCServer struct {

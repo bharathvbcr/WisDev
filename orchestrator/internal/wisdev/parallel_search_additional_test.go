@@ -10,7 +10,7 @@ import (
 	"github.com/go-redis/redismock/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	internalsearch "github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	internalsearch "github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 	"golang.org/x/sync/semaphore"
 )
 

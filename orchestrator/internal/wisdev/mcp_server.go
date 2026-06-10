@@ -33,7 +33,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
 
 // ──────────────────────────────────────────────
@@ -316,7 +316,7 @@ func (s *MCPServer) handleToolsCall(ctx context.Context, raw json.RawMessage) (a
 	}
 
 	slog.Info("mcp tools/call",
-		"service", "wisdev_agent_os",
+		"service", "wisdev_arc",
 		"runtime", "go",
 		"component", "wisdev.mcp_server",
 		"operation", "tool_call",
@@ -344,7 +344,7 @@ func (s *MCPServer) handleToolsCall(ctx context.Context, raw json.RawMessage) (a
 	latency := time.Since(start)
 	if callErr != nil {
 		slog.Warn("mcp tool call error",
-			"service", "wisdev_agent_os",
+			"service", "wisdev_arc",
 			"component", "wisdev.mcp_server",
 			"tool", toolName,
 			"latency_ms", latency.Milliseconds(),
@@ -358,7 +358,7 @@ func (s *MCPServer) handleToolsCall(ctx context.Context, raw json.RawMessage) (a
 	}
 
 	slog.Info("mcp tool call completed",
-		"service", "wisdev_agent_os",
+		"service", "wisdev_arc",
 		"component", "wisdev.mcp_server",
 		"tool", toolName,
 		"latency_ms", latency.Milliseconds(),

@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package llm;
 
-option go_package = "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm;llm";
+option go_package = "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm;llm";
 
 // Canonical WisDev sidecar contract. The Python sidecar currently owns
 // text generation, structured output, embeddings, and health only.

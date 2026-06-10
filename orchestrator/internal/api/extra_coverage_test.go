@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/paper"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/rag"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/paper"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/rag"
 
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/genai"

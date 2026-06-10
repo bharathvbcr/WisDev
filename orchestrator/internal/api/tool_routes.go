@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/policy"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/policy"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
 )
 
 func (s *wisdevServer) registerToolRoutes(mux *http.ServeMux, agentGateway *wisdev.AgentGateway) {

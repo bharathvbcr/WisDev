@@ -28,8 +28,8 @@ import (
 	"google.golang.org/genai"
 	"gopkg.in/yaml.v3"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/resilience"
 )
 
 type ADKRuntimeConfig struct {

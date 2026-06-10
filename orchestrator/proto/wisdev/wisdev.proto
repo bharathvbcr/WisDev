@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package wisdev;
 
-option go_package = "github.com/wisdev/wisdev-agent-os/orchestrator/proto/wisdev;wisdev";
+option go_package = "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/wisdev;wisdev";
 
 // ──────────────────────────────────────────────────────────────────────
 //  AgentGateway (Go) — Frontend entry point

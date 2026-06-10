@@ -3,12 +3,12 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-export function wisdevAgentOsRootFromModule() {
+export function wisdevArcRootFromModule() {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 }
 
 export function resolveWisdevInvocation({
-  repoRoot = wisdevAgentOsRootFromModule(),
+  repoRoot = wisdevArcRootFromModule(),
   args = [],
   platform = process.platform,
 } = {}) {
@@ -41,7 +41,7 @@ export function resolveWisdevInvocation({
 }
 
 export function runWisdev({
-  repoRoot = wisdevAgentOsRootFromModule(),
+  repoRoot = wisdevArcRootFromModule(),
   args = [],
   spawnImpl = spawnSync,
   env = process.env,

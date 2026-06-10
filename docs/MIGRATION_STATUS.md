@@ -2,10 +2,10 @@
 
 ## Implemented In This Pass
 
-- Created a fresh top-level `wisdev-agent-os` tree.
+- Created a fresh top-level `wisdev-arc` tree.
 - Seeded `orchestrator/` from current `backend/go_orchestrator`, including current WisDev YOLO code and its dependent Go packages.
 - Seeded `sidecar/` from current `backend/python_sidecar`, excluding generated coverage and local Python install artifacts.
-- Rewrote Go import paths from the private parent module path to `github.com/wisdev/wisdev-agent-os/orchestrator`.
+- Rewrote Go import paths from the private parent module path to `github.com/bharathvbcr/wisdev-arc/orchestrator`.
 - Added open-source config, environment template, Makefile, docker-compose, adapter boundary notes, and README.
 - Promoted the first stable embedding facade at `orchestrator/pkg/wisdev`.
 - Added `wisdev yolo --local` so the CLI can execute YOLO without an HTTP server.

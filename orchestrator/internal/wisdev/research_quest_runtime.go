@@ -15,8 +15,8 @@ import (
 	"unicode"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/stackconfig"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/stackconfig"
 )
 
 const allowGoCitationFallbackEnv = "WISDEV_ALLOW_GO_CITATION_FALLBACK"

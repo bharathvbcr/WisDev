@@ -1077,7 +1077,7 @@ const file_proto_llm_llm_proto_rawDesc = "" +
 	"\x05Embed\x12\x11.llm.EmbedRequest\x1a\x12.llm.EmbedResponse\x12=\n" +
 	"\n" +
 	"EmbedBatch\x12\x16.llm.EmbedBatchRequest\x1a\x17.llm.EmbedBatchResponse\x121\n" +
-	"\x06Health\x12\x12.llm.HealthRequest\x1a\x13.llm.HealthResponseB>Z<github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm;llmb\x06proto3"
+	"\x06Health\x12\x12.llm.HealthRequest\x1a\x13.llm.HealthResponseB>Z<github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm;llmb\x06proto3"
 
 var (
 	file_proto_llm_llm_proto_rawDescOnce sync.Once

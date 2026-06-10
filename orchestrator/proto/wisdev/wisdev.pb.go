@@ -6105,7 +6105,7 @@ const file_proto_wisdev_wisdev_proto_rawDesc = "" +
 	"\x06Search\x12\x15.wisdev.SearchRequest\x1a\x16.wisdev.SearchResponse\"\x00\x12?\n" +
 	"\fStreamSearch\x12\x15.wisdev.SearchRequest\x1a\x14.wisdev.SearchUpdate\"\x000\x01\x12T\n" +
 	"\x0fIterativeSearch\x12\x1e.wisdev.IterativeSearchRequest\x1a\x1f.wisdev.IterativeSearchResponse\"\x00\x12@\n" +
-	"\rReRankResults\x12\x15.wisdev.ReRankRequest\x1a\x16.wisdev.ReRankResponse\"\x00BDZBgithub.com/wisdev/wisdev-agent-os/orchestrator/proto/wisdev;wisdevb\x06proto3"
+	"\rReRankResults\x12\x15.wisdev.ReRankRequest\x1a\x16.wisdev.ReRankResponse\"\x00BDZBgithub.com/bharathvbcr/wisdev-arc/orchestrator/proto/wisdev;wisdevb\x06proto3"
 
 var (
 	file_proto_wisdev_wisdev_proto_rawDescOnce sync.Once

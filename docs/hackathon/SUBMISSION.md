@@ -19,7 +19,7 @@ Judge quick test (no login):
 
 ```powershell
 git clone https://github.com/bharathvbcr/WisDev.git
-cd WisDev
+cd wisdev-arc
 .\wisdev.cmd check
 .\wisdev.cmd "What evidence supports RAG for scientific literature?"
 ```

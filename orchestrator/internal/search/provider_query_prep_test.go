@@ -3,7 +3,7 @@ package search
 import (
 	"testing"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/researchquery"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/researchquery"
 )
 
 func TestParallelSearchQueryPreparationCorrectsTypos(t *testing.T) {

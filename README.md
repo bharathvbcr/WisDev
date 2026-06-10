@@ -2,7 +2,7 @@
   <img src="assets/trident_logo.png" alt="WisDev 3D Trident Logo" width="320">
 </p>
 
-# WisDev Research Runtime
+# WisDev ARC — Agent Research Core
 
 [![Gemini](https://img.shields.io/badge/Gemini-Vertex%20AI-blue)](https://cloud.google.com/vertex-ai)
 [![ADK](https://img.shields.io/badge/Google-ADK%20Go-green)](https://google.github.io/adk-docs/)
@@ -11,13 +11,13 @@
 **Open-source autonomous research agent** — Google ADK + MCP + Gemini on GCP.  
 Built for the [Google for Startups AI Agents Challenge](https://googleforstartupsaiagents.devpost.com/) · Live product: [ScholarLM](https://scholarlm-vbcr.web.app)
 
-WisDev Research Runtime is the open-source WisDev YOLO research agent runtime and the public project identity for this extracted runtime. It is a terminal-first agent stack for planning, executing, and synthesizing evidence-grounded research tasks across academic sources.
+WisDev ARC (Agent Research Core) is the open-source WisDev YOLO research agent runtime and the public project identity for this extracted runtime. It is a terminal-first agent stack for planning, executing, and synthesizing evidence-grounded research tasks across academic sources.
 
 ### Judge / hackathon quickstart (60 seconds)
 
 ```powershell
 git clone https://github.com/bharathvbcr/WisDev.git
-cd WisDev
+cd wisdev-arc
 .\wisdev.cmd check
 .\wisdev.cmd "What evidence supports RAG for scientific literature?"
 ```
@@ -40,6 +40,7 @@ The runtime target is Go plus optional Python only:
 
 - [Architecture](#architecture)
 - [Repository Layout](#repository-layout)
+- [Install](#install)
 - [Quick Start](#quick-start)
 - [CLI Reference](#cli-reference)
 - [Configuration](#configuration)
@@ -129,12 +130,41 @@ docs/                             Migration status and release checklist
 scripts/                          Local verification helpers
 ```
 
+## Install
+
+One-line install (downloads the latest release binary when available, otherwise builds from source with Go 1.25+):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bharathvbcr/WisDev/main/scripts/install.sh | bash
+```
+
+```powershell
+irm https://raw.githubusercontent.com/bharathvbcr/WisDev/main/scripts/install.ps1 | iex
+```
+
+From a checkout, `scripts/install.sh` / `scripts\install.ps1` (or `make install-cli`) do the same with a source-build fallback. Release binaries for linux/macOS/windows (amd64 + arm64) are published from tags by `.github/workflows/release.yml`. Overrides: `WISDEV_VERSION` (tag), `WISDEV_INSTALL_DIR`, `WISDEV_FROM_SOURCE=1`.
+
+Then verify and run:
+
+```bash
+wisdev check
+wisdev "What evidence supports RAG for scientific literature?"
+```
+
+### Use from Claude Code / Cursor (MCP)
+
+```bash
+claude mcp add wisdev -- wisdev mcp
+```
+
+See [`docs/MCP_CLIENTS.md`](docs/MCP_CLIENTS.md) for Cursor and Claude Desktop configs. MCP stdio keeps stdout protocol-clean; logs go to stderr.
+
 ## Quick Start
 
 ### Windows / PowerShell
 
 ```powershell
-cd wisdev-agent-os
+cd wisdev-arc
 copy .env.example .env
 .\scripts\verify.ps1 -StaticRelease
 .\scripts\verify.ps1 -Go -PythonContract
@@ -146,7 +176,7 @@ make install-cli
 ### Unix-like Shell
 
 ```bash
-cd wisdev-agent-os
+cd wisdev-arc
 cp .env.example .env
 make test-all
 make cli-help
@@ -155,28 +185,28 @@ make cli-help
 ### Run a Local Offline YOLO Smoke
 
 ```powershell
-cd wisdev-agent-os
+cd wisdev-arc
 .\scripts\verify.ps1 -SmokeLocal
 ```
 
 Equivalent direct command:
 
 ```powershell
-cd wisdev-agent-os
+cd wisdev-arc
 wisdev search --offline --max-iterations 1 "map retrieval augmented research agent evidence"
 ```
 
 ### Run the Go Server
 
 ```powershell
-cd wisdev-agent-os\orchestrator
+cd wisdev-arc\orchestrator
 go run ./cmd/server
 ```
 
 ### Call an Already-running Orchestrator
 
 ```powershell
-cd wisdev-agent-os
+cd wisdev-arc
 .\wisdev.cmd --remote "map the evidence for retrieval augmented research agents"
 ```
 
@@ -190,7 +220,7 @@ The shorthand above runs the embedded Go agent locally and defaults to
 `openalex,arxiv`, so it replaces the longer form:
 
 ```powershell
-cd wisdev-agent-os
+cd wisdev-arc
 .\wisdev.cmd "map retrieval augmented research agent evidence"
 ```
 
@@ -313,7 +343,7 @@ import (
     "context"
     "fmt"
 
-    "github.com/wisdev/wisdev-agent-os/orchestrator/pkg/wisdev"
+    "github.com/bharathvbcr/wisdev-arc/orchestrator/pkg/wisdev"
 )
 
 func main() {
@@ -437,7 +467,7 @@ Useful lookup:
 
 ```powershell
 gitnexus list
-gitnexus context -r wisdev-agent-os -u "Property:orchestrator/internal/wisdev/workflow_agent.go:WisDevWorkflowAgent.executor"
+gitnexus context -r wisdev-arc -u "Property:orchestrator/internal/wisdev/workflow_agent.go:WisDevWorkflowAgent.executor"
 ```
 
 The index is stored in `.gitnexus/` and refreshed with `.\scripts\gitnexus.ps1 index` after code edits.

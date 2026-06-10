@@ -1,7 +1,7 @@
 package rag
 
 import (
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
 
 // RRF performs Reciprocal Rank Fusion on multiple result sets.

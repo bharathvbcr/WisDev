@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
 
 // EvidenceSpan anchors a claim to a specific sentence of source text, so that

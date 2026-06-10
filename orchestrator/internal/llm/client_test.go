@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
+	llmv1 "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm"
 	"google.golang.org/genai"
 
 	"github.com/stretchr/testify/assert"

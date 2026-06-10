@@ -110,6 +110,17 @@ func initLogger() {
 // Logger returns the global structured logger.
 func Logger() *slog.Logger { return logger }
 
+// SetLogger replaces the global structured logger and the slog default.
+// CLI front-ends that reserve stdout for a wire protocol (e.g. MCP stdio)
+// use this to reroute telemetry away from stdout.
+func SetLogger(l *slog.Logger) {
+	if l == nil {
+		return
+	}
+	logger = l
+	slog.SetDefault(l)
+}
+
 // FromCtx returns a logger pre-populated with the OTel trace ID from ctx.
 // Prefer this over the global slog functions inside request handlers so that
 // trace correlation is automatic.

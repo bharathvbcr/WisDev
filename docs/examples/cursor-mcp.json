@@ -9,7 +9,7 @@
         "--provider",
         "openalex,arxiv"
       ],
-      "cwd": "C:\\path\\to\\WisDev\\orchestrator"
+      "cwd": "C:\\path\\to\\wisdev-arc\\orchestrator"
     }
   }
 }

@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	internalsearch "github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	internalsearch "github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
 
 const (

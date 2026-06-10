@@ -18,7 +18,7 @@
 | CLI launcher (`wisdev.cmd`, `npm run wisdev`) | ✅ |
 | CLI UX (spinner, `-q`/`-v`/`-j`, grouped help) | ✅ |
 | Hackathon demo + record prep | ✅ `ops:hackathon:demo-cli`, `ops:hackathon:record-prep` |
-| OSS sync script | ✅ `wisdev-agent-os/scripts/sync-wisdev-oss.ps1` |
+| OSS sync script | ✅ `wisdev-arc/scripts/sync-wisdev-oss.ps1` |
 | ADK + MCP + YOLO runtime | ✅ |
 | Submission doc package | ✅ `docs/hackathon/*` |
 | Live MCP status in ScholarLM UI | ✅ |

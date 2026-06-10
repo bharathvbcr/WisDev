@@ -28,7 +28,7 @@ No more `go run ./cmd/wisdev` unless you are hacking the CLI itself.
 ## Examples
 
 ```powershell
-cd wisdev-agent-os
+cd wisdev-arc
 .\wisdev.cmd check
 .\wisdev.cmd tui
 .\wisdev.cmd "RAG for scientific literature"
@@ -37,7 +37,7 @@ cd wisdev-agent-os
 ```
 
 ```bash
-cd wisdev-agent-os
+cd wisdev-arc
 ./wisdev check
 ./wisdev tui
 ./wisdev "RAG for scientific literature"

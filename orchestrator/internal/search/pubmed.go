@@ -41,20 +41,47 @@ type PubMedSearchResponse struct {
 	} `json:"esearchresult"`
 }
 
+type PubMedSummaryItem struct {
+	Title           string `json:"title"`
+	Source          string `json:"source"`
+	FullJournalName string `json:"fulljournalname"`
+	Authors         []struct {
+		Name string `json:"name"`
+	} `json:"authors"`
+	ArticleIds []struct {
+		IdType string `json:"idtype"`
+		Value  string `json:"value"`
+	} `json:"articleids"`
+	PubDate string `json:"pubdate"`
+}
+
 type PubMedSummaryResponse struct {
-	Result map[string]struct {
-		Title           string `json:"title"`
-		Source          string `json:"source"`
-		FullJournalName string `json:"fulljournalname"`
-		Authors         []struct {
-			Name string `json:"name"`
-		} `json:"authors"`
-		ArticleIds []struct {
-			IdType string `json:"idtype"`
-			Value  string `json:"value"`
-		} `json:"articleids"`
-		PubDate string `json:"pubdate"`
-	} `json:"result"`
+	Result map[string]json.RawMessage `json:"result"`
+}
+
+func (r PubMedSummaryResponse) item(id string) (PubMedSummaryItem, bool) {
+	raw, ok := r.Result[id]
+	if !ok || len(raw) == 0 || string(raw) == "null" {
+		return PubMedSummaryItem{}, false
+	}
+
+	var item PubMedSummaryItem
+	if err := json.Unmarshal(raw, &item); err != nil {
+		slog.Warn("pubmed summary item decode failed; skipping malformed item",
+			"service", "go_orchestrator",
+			"runtime", "go",
+			"component", "search_pubmed",
+			"operation", "decode_summary",
+			"stage", "pubmed_summary_item_decode_failed",
+			"provider", "pubmed",
+			"result", "degraded",
+			"error_code", "PUBMED_SUMMARY_ITEM_DECODE_FAILED",
+			"pubmed_id", id,
+			"error", err,
+		)
+		return PubMedSummaryItem{}, false
+	}
+	return item, true
 }
 
 type pubMedFetchResponse struct {
@@ -109,6 +136,9 @@ func (p *PubMedProvider) Search(ctx context.Context, query string, opts SearchOp
 
 	if resp1.StatusCode != http.StatusOK {
 		p.RecordFailure()
+		if providerHTTPErrorKind(resp1) == "rate_limit" {
+			return nil, providerHTTPStatusError("pubmed", resp1)
+		}
 		return nil, providerError("pubmed", "search HTTP %d", resp1.StatusCode)
 	}
 
@@ -141,6 +171,9 @@ func (p *PubMedProvider) Search(ctx context.Context, query string, opts SearchOp
 
 	if resp2.StatusCode != http.StatusOK {
 		p.RecordFailure()
+		if providerHTTPErrorKind(resp2) == "rate_limit" {
+			return nil, providerHTTPStatusError("pubmed", resp2)
+		}
 		return nil, providerError("pubmed", "summary HTTP %d", resp2.StatusCode)
 	}
 
@@ -168,7 +201,7 @@ func (p *PubMedProvider) Search(ctx context.Context, query string, opts SearchOp
 
 	var papers []Paper
 	for _, id := range ids {
-		if data, ok := summaryRes.Result[id]; ok {
+		if data, ok := summaryRes.item(id); ok {
 			var doi string
 			for _, aid := range data.ArticleIds {
 				if aid.IdType == "doi" {

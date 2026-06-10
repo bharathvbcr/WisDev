@@ -16,9 +16,9 @@ import (
 	"google.golang.org/genai"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/policy"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
-	wisdevpb "github.com/wisdev/wisdev-agent-os/orchestrator/proto/wisdev"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/policy"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
+	wisdevpb "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/wisdev"
 )
 
 type mockSessionStore struct {

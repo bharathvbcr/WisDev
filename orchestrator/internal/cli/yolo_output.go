@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	agent "github.com/wisdev/wisdev-agent-os/orchestrator/pkg/wisdev"
+	agent "github.com/bharathvbcr/wisdev-arc/orchestrator/pkg/wisdev"
 )
 
 func printYOLOResult(stdout, stderr io.Writer, result *agent.YOLOResult, quiet, verbose bool) error {

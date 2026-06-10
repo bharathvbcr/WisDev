@@ -13,8 +13,8 @@ import (
 	"time"
 	"unicode"
 
-	internalwisdev "github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
-	agent "github.com/wisdev/wisdev-agent-os/orchestrator/pkg/wisdev"
+	internalwisdev "github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
+	agent "github.com/bharathvbcr/wisdev-arc/orchestrator/pkg/wisdev"
 )
 
 var (

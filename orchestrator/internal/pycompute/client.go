@@ -9,8 +9,8 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/stackconfig"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/resilience"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/stackconfig"
 	"strings"
 	"time"
 

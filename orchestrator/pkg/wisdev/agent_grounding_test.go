@@ -3,7 +3,7 @@ package wisdev
 import (
 	"testing"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/rag"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/rag"
 )
 
 func TestGroundingStatsFromStructuredAnswer(t *testing.T) {

@@ -18,8 +18,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
-	internalsearch "github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/resilience"
+	internalsearch "github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
 
 type testMemoryStore struct {

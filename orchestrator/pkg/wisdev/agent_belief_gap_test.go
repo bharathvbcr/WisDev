@@ -3,7 +3,7 @@ package wisdev
 import (
 	"testing"
 
-	internal "github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
+	internal "github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
 )
 
 func TestFromInternalBeliefStateMinimalView(t *testing.T) {

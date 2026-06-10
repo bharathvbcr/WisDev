@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/evidence"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/evidence"
 )
 
 func TestBuildClaimProvenance(t *testing.T) {

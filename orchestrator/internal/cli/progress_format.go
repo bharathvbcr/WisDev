@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	internal "github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
-	agent "github.com/wisdev/wisdev-agent-os/orchestrator/pkg/wisdev"
+	internal "github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
+	agent "github.com/bharathvbcr/wisdev-arc/orchestrator/pkg/wisdev"
 )
 
 func (s *tuiState) handleProgressEvent(event agent.ProgressEvent) {

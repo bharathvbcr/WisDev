@@ -3,7 +3,7 @@ package llm
 import (
 	"testing"
 
-	llmpb "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
+	llmpb "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm"
 )
 
 func TestApplyGeneratePolicy(t *testing.T) {

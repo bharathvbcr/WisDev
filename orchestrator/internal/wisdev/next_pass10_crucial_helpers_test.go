@@ -3,7 +3,7 @@ package wisdev
 import (
 	"testing"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/evidence"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/evidence"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

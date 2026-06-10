@@ -35,7 +35,7 @@ Password: [Devpost private testing field only — do not commit]
 
 ```bash
 git clone https://github.com/bharathvbcr/WisDev.git
-cd WisDev
+cd wisdev-arc
 ./wisdev check
 ./wisdev "What evidence supports RAG for scientific literature?"
 ```
@@ -65,7 +65,7 @@ Windows binary (no Go):
 ## Option C — MCP (for technical judges)
 
 ```powershell
-cd WisDev
+cd wisdev-arc
 .\wisdev.cmd setup --write .cursor\mcp.json
 .\wisdev.cmd mcp
 ```

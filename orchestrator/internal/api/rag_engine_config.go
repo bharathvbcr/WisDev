@@ -5,8 +5,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/rag"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/rag"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
 )
 
 func buildRAGEngine(cfg ServerConfig, agentGateway *wisdev.AgentGateway) *rag.Engine {

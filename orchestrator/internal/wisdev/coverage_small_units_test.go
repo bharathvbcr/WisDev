@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/policy"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/policy"
 )
 
 func TestRewriteWisdevRequestPath(t *testing.T) {

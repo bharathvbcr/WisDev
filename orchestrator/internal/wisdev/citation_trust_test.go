@@ -3,7 +3,7 @@ package wisdev
 import (
 	"testing"
 
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/evidence/citations"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/evidence/citations"
 )
 
 func TestNormalizeCitationVerificationStatus(t *testing.T) {

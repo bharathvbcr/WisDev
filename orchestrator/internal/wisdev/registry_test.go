@@ -2,7 +2,7 @@ package wisdev
 
 import (
 	"encoding/json"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 	"testing"
 
 	"github.com/stretchr/testify/assert"

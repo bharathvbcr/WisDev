@@ -29,7 +29,7 @@ func TestPubMedProvider(t *testing.T) {
 				if strings.Contains(req.URL.Path, "esearch") {
 					fmt.Fprint(rec, `{"esearchresult":{"idlist":["123","456"]}}`)
 				} else if strings.Contains(req.URL.Path, "esummary") {
-					fmt.Fprint(rec, `{"result":{"123":{"title":"P1","source":"Methods Mol Biol","fulljournalname":"Methods in molecular biology","authors":[{"name":"Ada Lovelace"},{"name":"Grace Hopper"}],"pubdate":"2019 Aug 28","articleids":[{"idtype":"doi","value":"10.1/1"}]},"456":{"title":"P2","pubdate":"2020","authors":[{"name":"Ada Lovelace"}]}}}`)
+					fmt.Fprint(rec, `{"result":{"uids":["123","456"],"123":{"title":"P1","source":"Methods Mol Biol","fulljournalname":"Methods in molecular biology","authors":[{"name":"Ada Lovelace"},{"name":"Grace Hopper"}],"pubdate":"2019 Aug 28","articleids":[{"idtype":"doi","value":"10.1/1"}]},"456":{"title":"P2","pubdate":"2020","authors":[{"name":"Ada Lovelace"}]}}}`)
 				} else if strings.Contains(req.URL.Path, "efetch") {
 					fmt.Fprint(rec, `<PubmedArticleSet>
 						<PubmedArticle>
@@ -68,6 +68,30 @@ func TestPubMedProvider(t *testing.T) {
 		assert.Equal(t, []string{"Ada Lovelace"}, papers[1].Authors)
 		assert.Equal(t, 2020, papers[1].Year)
 		assert.Equal(t, "PubMed abstract two.", papers[1].Abstract)
+	})
+
+	t.Run("Search skips malformed summary item", func(t *testing.T) {
+		SharedHTTPClient = &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				rec := httptest.NewRecorder()
+				rec.Header().Set("Content-Type", "application/json")
+				switch {
+				case strings.Contains(req.URL.Path, "esearch"):
+					fmt.Fprint(rec, `{"esearchresult":{"idlist":["123","456"]}}`)
+				case strings.Contains(req.URL.Path, "esummary"):
+					fmt.Fprint(rec, `{"result":{"uids":["123","456"],"123":{"title":"P1","pubdate":"2021"},"456":["malformed"]}}`)
+				case strings.Contains(req.URL.Path, "efetch"):
+					fmt.Fprint(rec, `<PubmedArticleSet></PubmedArticleSet>`)
+				}
+				return rec.Result(), nil
+			}),
+		}
+		p := NewPubMedProvider()
+		papers, err := p.Search(context.Background(), "test", SearchOpts{})
+		assert.NoError(t, err)
+		assert.Len(t, papers, 1)
+		assert.Equal(t, "pubmed:123", papers[0].ID)
+		assert.Equal(t, "P1", papers[0].Title)
 	})
 
 	t.Run("Search continues when abstract fetch fails", func(t *testing.T) {
@@ -121,6 +145,21 @@ func TestPubMedProvider(t *testing.T) {
 		_, err := p.Search(context.Background(), "test", SearchOpts{})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "search HTTP 403")
+	})
+
+	t.Run("Search Rate Limit Error Is Classified", func(t *testing.T) {
+		SharedHTTPClient = &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				rec := httptest.NewRecorder()
+				rec.Header().Set("Retry-After", "9")
+				rec.WriteHeader(http.StatusTooManyRequests)
+				return rec.Result(), nil
+			}),
+		}
+		p := NewPubMedProvider()
+		_, err := p.Search(context.Background(), "test", SearchOpts{})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "rate limit exceeded (429)")
 	})
 
 	t.Run("Summary HTTP Error", func(t *testing.T) {

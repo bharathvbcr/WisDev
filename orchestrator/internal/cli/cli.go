@@ -8,15 +8,17 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
-	internalwisdev "github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/envload"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
-	agent "github.com/wisdev/wisdev-agent-os/orchestrator/pkg/wisdev"
+	internalwisdev "github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/envload"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/telemetry"
+	agent "github.com/bharathvbcr/wisdev-arc/orchestrator/pkg/wisdev"
 )
 
 const defaultBaseURL = "http://127.0.0.1:8081"
@@ -386,6 +388,18 @@ func runMCPWithIO(args []string, stdin io.Reader, stdout, stderr io.Writer) erro
 	if stderr != nil {
 		note(stderr, "WisDev MCP stdio ready (Ctrl+C to stop). Tools: wisdevSearchPapers, wisdevPaperLookup, wisdevEvidenceSearch, wisdevAuthorSearch")
 	}
+
+	// MCP stdio reserves stdout for JSON-RPC frames; the telemetry package's
+	// init() points both its package logger and the slog default at stdout,
+	// so reroute both here.
+	logSink := stderr
+	if logSink == nil {
+		logSink = io.Discard
+	}
+	previousLogger := telemetry.Logger()
+	telemetry.SetLogger(slog.New(slog.NewJSONHandler(logSink, nil)))
+	defer telemetry.SetLogger(previousLogger)
+
 	srv := internalwisdev.NewMCPServer(registry)
 	return srv.RunStdio(context.Background(), stdin, stdout)
 }

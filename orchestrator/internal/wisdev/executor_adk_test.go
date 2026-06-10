@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/adk/agent"
-	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/policy"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/policy"
 )
 
 func TestPlanExecutor_ADKIntegration(t *testing.T) {

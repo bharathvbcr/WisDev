@@ -26,10 +26,11 @@ func (h *HealthHandler) Liveness(w http.ResponseWriter, r *http.Request) {
 // It checks connections to the LLM sidecar and local Go services.
 func (h *HealthHandler) Readiness(w http.ResponseWriter, r *http.Request) {
 	status := struct {
-		Ready    bool            `json:"ready"`
-		Sidecar  bool            `json:"sidecar"`
-		Services map[string]bool `json:"services"`
-		Version  string          `json:"version"`
+		Ready     bool            `json:"ready"`
+		Sidecar   bool            `json:"sidecar"`
+		LLMDirect map[string]any  `json:"llmDirect,omitempty"`
+		Services  map[string]bool `json:"services"`
+		Version   string          `json:"version"`
 	}{
 		Ready:   true,
 		Version: "1.1.0-go",
@@ -52,6 +53,9 @@ func (h *HealthHandler) Readiness(w http.ResponseWriter, r *http.Request) {
 		// Even if external sidecar is down, we are "Ready" if local Go logic is up
 		status.Sidecar = false
 		// status.Ready = false // Optional: depend on sidecar for total readiness
+	}
+	if h.llmClient != nil {
+		status.LLMDirect = h.llmClient.DirectProviderStatus(ctx)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

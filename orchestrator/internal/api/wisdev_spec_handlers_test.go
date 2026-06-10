@@ -24,6 +24,7 @@ import (
 )
 
 func TestWisDev_SpecializedHandlers(t *testing.T) {
+	wisdev.ResetQueryPreparationStateForTest()
 	mux, gw := newWisDevSpecHarness(t)
 
 	t.Run("tooling and plan utility routes", func(t *testing.T) {
@@ -755,6 +756,7 @@ func TestWisDevResearchRoutes_Autonomous_LiveLoopSuccess(t *testing.T) {
 }
 
 func TestWisDevResearchRoutes_Autonomous_LiveLoopDegradedFallback(t *testing.T) {
+	wisdev.ResetQueryPreparationStateForTest()
 	reg := internalsearch.NewProviderRegistry()
 	reg.Register(&mockSearchProvider{
 		name: "live_route_fallback",

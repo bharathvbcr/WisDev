@@ -1,18 +1,42 @@
-.PHONY: cli-help install-cli smoke-local smoke-run test-go test-wisdev test-python test-python-contract test-all tidy serve
+.PHONY: cli-help install-cli check demo tui tui-demo smoke-local smoke-run smoke-mcp build-cli test-go test-wisdev test-python test-python-contract test-all tidy serve wisdev
 
-.PHONY: gitnexus-index gitnexus-status gitnexus-refresh
+WISDEV := node scripts/run-wisdev.mjs
 
 cli-help:
-	cd orchestrator && go run ./cmd/wisdev --help
+	$(WISDEV) --help
 
 install-cli:
 	cd orchestrator && go install ./cmd/wisdev
 
-smoke-local:
-	cd orchestrator && go run ./cmd/wisdev yolo --local --offline --max-iterations 1 "map open source research agent evidence"
+check:
+	$(WISDEV) check
 
-smoke-run:
-	cd orchestrator && go run ./cmd/wisdev search --offline --max-iterations 1 "map open source research agent evidence"
+demo:
+	$(WISDEV) demo --offline
+
+tui:
+	$(WISDEV) tui
+
+tui-demo:
+	$(WISDEV) tui --demo --autostart
+
+wisdev:
+	$(WISDEV) $(ARGS)
+
+smoke-local:
+	$(WISDEV) --offline --max-iterations 1 "map open source research agent evidence"
+
+smoke-run: smoke-local
+
+smoke-mcp:
+	cd orchestrator && go test ./internal/wisdev -run TestMCPServerStdio -count=1
+
+doctor-cli: check
+
+demo-cli: demo
+
+build-cli:
+	powershell -ExecutionPolicy Bypass -File ./scripts/build-wisdev-cli.ps1 -Version 0.1.0-hackathon
 
 serve:
 	cd orchestrator && go run ./cmd/server

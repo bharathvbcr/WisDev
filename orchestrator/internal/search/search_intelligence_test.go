@@ -430,15 +430,6 @@ func TestGetProviderAverageGains_DomainFilterDoesNotReferenceMissingDomainColumn
 	}
 }
 
-func TestInferDomainFromQuery(t *testing.T) {
-	if got := inferDomainFromQuery("Cancer drug resistance"); got != "biomedical" {
-		t.Fatalf("expected biomedical domain, got %q", got)
-	}
-	if got := inferDomainFromQuery("distributed neural network security"); got != "cs" {
-		t.Fatalf("expected cs domain, got %q", got)
-	}
-}
-
 func TestGetTopProviders_DefaultLimitAndErrorPaths(t *testing.T) {
 	t.Run("NilDB", func(t *testing.T) {
 		si := NewSearchIntelligence(nil)

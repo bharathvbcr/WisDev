@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/researchquery"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/telemetry"
 	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
@@ -397,7 +398,7 @@ func (r *ProviderRegistry) Register(p SearchProvider) {
 	defer r.mu.Unlock()
 	name := p.Name()
 	r.providers[name] = p
-	r.breakers[name] = resilience.NewCircuitBreaker(name)
+	r.breakers[name] = resilience.NewSearchCircuitBreaker(name)
 
 	cap := defaultProviderConcurrency(name)
 	r.adaptiveCaps[name] = cap
@@ -594,10 +595,10 @@ func (r *ProviderRegistry) ResolveRequestedProviders(names []string) ([]SearchPr
 			})
 			continue
 		}
-		if breaker := r.breakers[name]; breaker != nil && breaker.State() == resilience.StateOpen {
+		if breaker := r.breakers[name]; breaker != nil && !breaker.Admit() {
 			warnings = append(warnings, ProviderWarning{
 				Provider: name,
-				Message:  "requested provider is temporarily unavailable",
+				Message:  "requested provider is temporarily unavailable (circuit breaker open)",
 			})
 			continue
 		}
@@ -791,7 +792,8 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 	// accidental fan-outs with empty strings that consume API quota on every
 	// registered provider. The wisdev.ParallelSearch wrapper has its own guard,
 	// but direct callers of this lower-level function also need protection.
-	if strings.TrimSpace(query) == "" {
+	query = strings.TrimSpace(query)
+	if query == "" {
 		return SearchResult{
 			Papers:    []Paper{},
 			Providers: map[string]int{},
@@ -801,6 +803,7 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 			}},
 		}
 	}
+	query = researchquery.PrepareForProviderSearch(query)
 	if reg == nil {
 		return SearchResult{
 			Papers:    []Paper{},
@@ -895,14 +898,14 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 		sem := reg.semaphores[p.Name()]
 		reg.mu.RUnlock()
 
-		if breaker != nil && breaker.State() == resilience.StateOpen {
+		if breaker != nil && !breaker.Admit() {
 			logProviderSearchFailure(ctx, "circuit_breaker_open", p.Name(), query, opts,
 				"result", "failure",
 				"error_code", "CIRCUIT_BREAKER_OPEN",
 			)
 			results <- ProviderResult{
 				Provider: p.Name(),
-				Err:      fmt.Errorf("circuit breaker open"),
+				Err:      fmt.Errorf("circuit breaker open for %s", p.Name()),
 			}
 			continue
 		}
@@ -1070,7 +1073,7 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 	}
 
 	if opts.QualitySort {
-		ScoreQuality(deduped)
+		ScoreQuality(deduped, query)
 	}
 
 	limitApplied := len(deduped) > limit
@@ -1253,10 +1256,41 @@ func normaliseTitle(title string) string {
 // ============================================================
 
 // ScoreQuality modifies Paper.Score in-place by blending RRF score
-// with a log-damped citation signal. Papers are re-sorted descending.
-func ScoreQuality(papers []Paper) {
-	const citationWeight = 0.15
-	const maxCitations = 10_000.0
+// with a log-damped citation signal, recency, and author impact (h-factor/influential citations).
+// Papers are re-sorted descending.
+func ScoreQuality(papers []Paper, query string) {
+	lowerQuery := strings.ToLower(query)
+
+	// Detect query intent
+	isRecent := containsAny(lowerQuery, "recent", "new", "latest", "state of the art", "sota", "current", "trending", "2024", "2025", "2026", "modern", "recent advances", "recent progress", "newly")
+	isCited := containsAny(lowerQuery, "classic", "foundational", "seminal", "most cited", "highly cited", "citation", "popular", "famous", "landmark", "influential", "pioneer", "key papers", "seminal work")
+	isAuthorImpact := containsAny(lowerQuery, "h-index", "hindex", "h-factor", "h factor", "author impact", "prestigious", "h-value")
+
+	// Base weights — default favors recent publications unless query asks for classics.
+	citationWeight := 0.18
+	recencyWeight := 0.24
+	authorImpactWeight := 0.08
+	baseWeight := 0.50
+
+	// Adjust weights dynamically based on detected intent
+	if isRecent {
+		baseWeight = 0.35
+		citationWeight = 0.15
+		recencyWeight = 0.40
+		authorImpactWeight = 0.10
+	} else if isCited {
+		baseWeight = 0.30
+		citationWeight = 0.50
+		recencyWeight = 0.05
+		authorImpactWeight = 0.15
+	} else if isAuthorImpact {
+		baseWeight = 0.30
+		citationWeight = 0.20
+		recencyWeight = 0.10
+		authorImpactWeight = 0.40
+	}
+
+	const maxInfluential = 500.0
 
 	for i := range papers {
 		// Infer evidence level if missing
@@ -1264,12 +1298,25 @@ func ScoreQuality(papers []Paper) {
 			papers[i].EvidenceLevel = InferEvidenceLevel(papers[i])
 		}
 
-		cit := math.Min(float64(papers[i].CitationCount), maxCitations)
-		citNorm := math.Log1p(cit) / math.Log1p(maxCitations) // 0–1
-		papers[i].Score = papers[i].Score*(1-citationWeight) + citNorm*citationWeight
+		citNorm := CitationNorm(papers[i].CitationCount)
+		recencyNorm := RecencyNorm(papers[i].Year)
+
+		inf := math.Min(float64(papers[i].InfluentialCitationCount), maxInfluential)
+		authorImpactScore := math.Log1p(inf) / math.Log1p(maxInfluential)
+
+		papers[i].Score = papers[i].Score*baseWeight +
+			citNorm*citationWeight +
+			recencyNorm*recencyWeight +
+			authorImpactScore*authorImpactWeight
 	}
 
 	sort.Slice(papers, func(i, j int) bool {
+		if papers[i].Score == papers[j].Score {
+			if papers[i].Year == papers[j].Year {
+				return papers[i].CitationCount > papers[j].CitationCount
+			}
+			return papers[i].Year > papers[j].Year
+		}
 		return papers[i].Score > papers[j].Score
 	})
 }

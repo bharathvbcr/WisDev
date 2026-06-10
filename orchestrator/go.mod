@@ -24,6 +24,7 @@ require (
 	go.temporal.io/api v1.44.1
 	go.temporal.io/sdk v1.31.0
 	golang.org/x/sync v0.20.0
+	golang.org/x/term v0.44.0
 	google.golang.org/adk v1.0.0
 	google.golang.org/genai v1.52.0
 	google.golang.org/grpc v1.79.3
@@ -103,7 +104,7 @@ require (
 	golang.org/x/crypto v0.49.0 // indirect
 	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/oauth2 v0.36.0
-	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/api v0.273.0

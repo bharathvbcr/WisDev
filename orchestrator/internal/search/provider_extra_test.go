@@ -216,8 +216,43 @@ func TestBoostByClicks_Extra(t *testing.T) {
 
 func TestScoreQuality_Inferred(t *testing.T) {
 	papers := []Paper{{Title: "Systematic Review of something"}}
-	ScoreQuality(papers)
+	ScoreQuality(papers, "")
 	assert.Equal(t, "systematic-review", papers[0].EvidenceLevel)
+}
+
+func TestScoreQuality_QueryIntents(t *testing.T) {
+	currentYear := time.Now().Year()
+
+	t.Run("Recent query intent prefers newer papers", func(t *testing.T) {
+		papers := []Paper{
+			{ID: "old_highly_cited", Year: currentYear - 10, CitationCount: 1000, Score: 0.5},
+			{ID: "new_less_cited", Year: currentYear, CitationCount: 5, Score: 0.5},
+		}
+		// With a query requesting "latest trends", the new paper should get a significant boost
+		ScoreQuality(papers, "latest trends in AI")
+		// The new paper should rank first because of the high recencyWeight (0.40)
+		assert.Equal(t, "new_less_cited", papers[0].ID)
+	})
+
+	t.Run("Cited query intent prefers highly cited papers", func(t *testing.T) {
+		papers := []Paper{
+			{ID: "old_highly_cited", Year: currentYear - 10, CitationCount: 5000, Score: 0.5},
+			{ID: "new_less_cited", Year: currentYear, CitationCount: 5, Score: 0.5},
+		}
+		// With a query requesting "classic foundational papers", the highly cited paper should dominate
+		ScoreQuality(papers, "classic foundational papers")
+		assert.Equal(t, "old_highly_cited", papers[0].ID)
+	})
+
+	t.Run("Author impact query intent prefers high influential citations", func(t *testing.T) {
+		papers := []Paper{
+			{ID: "medium_citations_highly_influential", Year: currentYear - 2, CitationCount: 100, InfluentialCitationCount: 80, Score: 0.5},
+			{ID: "high_citations_low_influential", Year: currentYear - 2, CitationCount: 200, InfluentialCitationCount: 2, Score: 0.5},
+		}
+		// With a query requesting "high h-index authors", the paper with more influential citations should rank higher
+		ScoreQuality(papers, "high h-index prestigious authors")
+		assert.Equal(t, "medium_citations_highly_influential", papers[0].ID)
+	})
 }
 
 func TestParallelSearch_Extra(t *testing.T) {
@@ -263,13 +298,28 @@ func TestParallelSearch_Extra(t *testing.T) {
 		regCB.Register(&MockProvider{name: "p1"})
 		cb := regCB.breakers["p1"]
 		for i := 0; i < 6; i++ {
-			_ = cb.Call(context.Background(), func(context.Context) error { return errors.New("fail") })
+			_ = cb.Call(context.Background(), func(context.Context) error { return errors.New("upstream 503") })
 		}
 		assert.Equal(t, resilience.StateOpen, cb.State())
 
 		res := ParallelSearch(context.Background(), regCB, "q", SearchOpts{})
 		assert.NotEmpty(t, res.Warnings)
 		assert.Contains(t, res.Warnings[0].Message, "circuit breaker open")
+	})
+
+	t.Run("Circuit breaker recovers after reset timeout", func(t *testing.T) {
+		regCB := NewProviderRegistry()
+		regCB.Register(&MockProvider{name: "p1", papers: []Paper{{ID: "recovered-1", Title: "Recovered"}}})
+		cb := regCB.breakers["p1"]
+		cb.ConfigureTesting(1, 15*time.Millisecond)
+		_ = cb.Call(context.Background(), func(context.Context) error { return errors.New("upstream 503") })
+		assert.Equal(t, resilience.StateOpen, cb.State())
+
+		time.Sleep(25 * time.Millisecond)
+		res := ParallelSearch(context.Background(), regCB, "q", SearchOpts{})
+		assert.Empty(t, res.Warnings)
+		assert.Len(t, res.Papers, 1)
+		assert.Equal(t, "recovered-1", res.Papers[0].ID)
 	})
 
 	t.Run("Requested providers are hard constraints", func(t *testing.T) {

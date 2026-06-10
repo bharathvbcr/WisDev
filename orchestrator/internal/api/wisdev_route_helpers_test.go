@@ -282,6 +282,7 @@ func TestWisDev_MapHelpers(t *testing.T) {
 }
 
 func TestWisDev_AgentHelpers(t *testing.T) {
+	wisdev.ResetQueryPreparationStateForTest()
 	t.Run("defaultAgentQuestionSequence", func(t *testing.T) {
 		questions := defaultAgentQuestionSequence("systematic review of sleep interventions and memory outcomes in adults", "medicine")
 		if assert.NotEmpty(t, questions) {

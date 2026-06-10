@@ -354,6 +354,7 @@ func TestRunModularParallelSearchDelegatesToCanonicalWisdevSearch(t *testing.T) 
 }
 
 func TestAutonomousResearchRouteReturnsEnvelope(t *testing.T) {
+	wisdev.ResetQueryPreparationStateForTest()
 	originalRunUnifiedResearchLoop := runUnifiedResearchLoop
 	t.Cleanup(func() {
 		runUnifiedResearchLoop = originalRunUnifiedResearchLoop
@@ -566,6 +567,7 @@ func TestAutonomousResearchRouteMarksLoopFailureAsDegradedFallback(t *testing.T)
 }
 
 func TestDeepResearchRouteUsesAutonomousLoopGapLedger(t *testing.T) {
+	wisdev.ResetQueryPreparationStateForTest()
 	originalRetrieveCanonicalPapers := wisdev.RetrieveCanonicalPapers
 	originalRunUnifiedResearchLoop := runUnifiedResearchLoop
 	t.Cleanup(func() {
@@ -1139,6 +1141,7 @@ func TestDeepResearchRouteReturnsBudgetExhaustedAnswerStatusFromRuntime(t *testi
 }
 
 func TestDeepResearchRouteFailsWhenUnifiedLoopFails(t *testing.T) {
+	wisdev.ResetQueryPreparationStateForTest()
 	originalRetrieveCanonicalPapers := wisdev.RetrieveCanonicalPapers
 	originalRunUnifiedResearchLoop := runUnifiedResearchLoop
 	t.Cleanup(func() {
@@ -1438,6 +1441,7 @@ func TestAutonomousResearchRouteHonorsExplicitAllowlistForAutonomousAugmentation
 }
 
 func TestAutonomousResearchRouteGenerateOnlyAllowlistUsesSeedHypothesesWithoutProposeCalls(t *testing.T) {
+	wisdev.ResetQueryPreparationStateForTest()
 	originalRetrieveCanonicalPapers := wisdev.RetrieveCanonicalPapers
 	originalProposeAutonomousHypotheses := proposeAutonomousHypotheses
 	t.Cleanup(func() {
@@ -1594,6 +1598,7 @@ func TestAutonomousResearchRouteGenerateOnlyAllowlistUsesSeedHypothesesWithoutPr
 }
 
 func TestAutonomousResearchRouteFallsBackToOriginalQuery(t *testing.T) {
+	wisdev.ResetQueryPreparationStateForTest()
 	originalRunUnifiedResearchLoop := runUnifiedResearchLoop
 	t.Cleanup(func() {
 		runUnifiedResearchLoop = originalRunUnifiedResearchLoop
@@ -2090,6 +2095,7 @@ func TestAutonomousResearchRouteLoopUsesProfileSearchBudget(t *testing.T) {
 }
 
 func TestAutonomousResearchRouteLoopUsesProfileSearchTermCap(t *testing.T) {
+	wisdev.ResetQueryPreparationStateForTest()
 	var searchQueriesMu sync.Mutex
 	searchQueries := make([]string, 0, 4)
 	cappedProvider := &mockSearchProvider{
@@ -2175,6 +2181,7 @@ func TestAutonomousResearchRouteLoopUsesProfileSearchTermCap(t *testing.T) {
 }
 
 func TestAutonomousResearchRouteUsesUnifiedRuntimeProfileSearchTermCap(t *testing.T) {
+	wisdev.ResetQueryPreparationStateForTest()
 	originalRunUnifiedResearchLoop := runUnifiedResearchLoop
 	t.Cleanup(func() {
 		runUnifiedResearchLoop = originalRunUnifiedResearchLoop

@@ -17,8 +17,9 @@ WisDev Research Runtime is the open-source WisDev YOLO research agent runtime an
 
 ```powershell
 git clone https://github.com/bharathvbcr/WisDev.git
-cd WisDev\orchestrator
-go run ./cmd/wisdev yolo --local --provider openalex,arxiv "What evidence supports RAG for scientific literature?"
+cd WisDev
+.\wisdev.cmd check
+.\wisdev.cmd "What evidence supports RAG for scientific literature?"
 ```
 
 Full submission package: [`docs/hackathon/SUBMISSION.md`](docs/hackathon/SUBMISSION.md) · [Demo script](docs/hackathon/DEMO_SCRIPT.md) · [Architecture](docs/hackathon/ARCHITECTURE.md) · [Judge access](docs/hackathon/JUDGE_ACCESS.md)
@@ -138,9 +139,8 @@ copy .env.example .env
 .\scripts\verify.ps1 -StaticRelease
 .\scripts\verify.ps1 -Go -PythonContract
 
-cd orchestrator
-go run ./cmd/wisdev --help
-go install ./cmd/wisdev
+.\wisdev.cmd --help
+make install-cli
 ```
 
 ### Unix-like Shell
@@ -176,8 +176,8 @@ go run ./cmd/server
 ### Call an Already-running Orchestrator
 
 ```powershell
-cd wisdev-agent-os\orchestrator
-go run ./cmd/wisdev yolo "map the evidence for retrieval augmented research agents"
+cd wisdev-agent-os
+.\wisdev.cmd --remote "map the evidence for retrieval augmented research agents"
 ```
 
 ### Run Local Mode With Selected Providers
@@ -190,8 +190,8 @@ The shorthand above runs the embedded Go agent locally and defaults to
 `openalex,arxiv`, so it replaces the longer form:
 
 ```powershell
-cd wisdev-agent-os\orchestrator
-go run ./cmd/wisdev yolo --local --provider openalex,arxiv "map retrieval augmented research agent evidence"
+cd wisdev-agent-os
+.\wisdev.cmd "map retrieval augmented research agent evidence"
 ```
 
 ## CLI Reference
@@ -199,14 +199,17 @@ go run ./cmd/wisdev yolo --local --provider openalex,arxiv "map retrieval augmen
 Current extracted CLI:
 
 ```text
-wisdev search "task"
-wisdev run search: "task"
-wisdev search [--offline] [--provider openalex,arxiv] "task"
-wisdev run [--offline] [--provider openalex,arxiv] search: "task"
-wisdev yolo [--url http://127.0.0.1:8081] [--json] "task"
-wisdev yolo --local [--offline] [--provider openalex,arxiv] [--json] "task"
+wisdev "question"
+wisdev check
+wisdev tui
+wisdev demo [--offline]
+wisdev mcp
+wisdev setup --write .cursor/mcp.json
 wisdev serve
 ```
+
+Full CLI reference: [`docs/CLI.md`](docs/CLI.md).  
+MCP stdio for Cursor, Claude Code, and Codex: [`docs/MCP_CLIENTS.md`](docs/MCP_CLIENTS.md).
 
 Environment:
 

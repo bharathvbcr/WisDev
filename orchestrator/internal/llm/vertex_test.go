@@ -330,7 +330,7 @@ func TestVertexClient(t *testing.T) {
 		resetModelsFromTempDir()
 		mm.ExpectedCalls = nil
 		mm.Calls = nil
-		recordVertexProviderRateLimit(time.Now())
+		recordVertexProviderRateLimit("", time.Now())
 
 		_, err := vc.GenerateStructured(ctx, "", "prompt", "", `{"type":"object"}`, 0.3, 512)
 		is.Error(err)
@@ -607,4 +607,38 @@ func TestNewVertexClientUsesSecretManagerAPIKeyWithoutProject(t *testing.T) {
 	assert.Equal(t, "env:GOOGLE_API_KEY", client.CredentialSource())
 	assert.Equal(t, genai.BackendGeminiAPI, capturedConfig.Backend)
 	assert.Equal(t, "env-api-key", capturedConfig.APIKey)
+}
+
+func TestVertexProviderRateLimitIsScopedPerModel(t *testing.T) {
+	resetVertexStructuredRateLimitForTest()
+	t.Cleanup(resetVertexStructuredRateLimitForTest)
+
+	recordVertexProviderRateLimit(" Model-X ", time.Now())
+
+	assert.Greater(t, VertexProviderRateLimitRemainingForModel("model-x"), time.Duration(0))
+	assert.Greater(t, VertexProviderRateLimitRemainingForModel("MODEL-X"), time.Duration(0))
+	assert.Zero(t, VertexProviderRateLimitRemainingForModel("model-y"))
+	assert.Greater(t, VertexProviderRateLimitRemaining(), time.Duration(0))
+}
+
+func TestVertexProviderRateLimitDefaultKeyAppliesToAllModels(t *testing.T) {
+	resetVertexStructuredRateLimitForTest()
+	t.Cleanup(resetVertexStructuredRateLimitForTest)
+
+	recordVertexProviderRateLimit("", time.Now())
+
+	assert.Greater(t, VertexProviderRateLimitRemainingForModel(""), time.Duration(0))
+	assert.Greater(t, VertexProviderRateLimitRemainingForModel("model-y"), time.Duration(0))
+	assert.Greater(t, VertexProviderRateLimitRemaining(), time.Duration(0))
+}
+
+func TestResetVertexStructuredRateLimitClearsAllModelCooldowns(t *testing.T) {
+	recordVertexProviderRateLimit("model-x", time.Now())
+	recordVertexProviderRateLimit("", time.Now())
+
+	resetVertexStructuredRateLimitForTest()
+
+	assert.Zero(t, VertexProviderRateLimitRemaining())
+	assert.Zero(t, VertexProviderRateLimitRemainingForModel("model-x"))
+	assert.Zero(t, VertexProviderRateLimitRemainingForModel(""))
 }

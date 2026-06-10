@@ -230,8 +230,12 @@ func (s *MCPServer) dispatch(ctx context.Context, req mcpRequest) (any, *mcpErro
 		return s.handleToolsList()
 	case "tools/call":
 		return s.handleToolsCall(ctx, req.Params)
+	case "resources/list":
+		return map[string]any{"resources": []any{}}, nil
+	case "prompts/list":
+		return map[string]any{"prompts": []any{}}, nil
 	case "ping":
-		return map[string]any{"pong": true}, nil
+		return map[string]any{}, nil
 	default:
 		return nil, &mcpError{Code: mcpErrMethodNotFound, Message: "method not found: " + req.Method}
 	}
@@ -273,6 +277,11 @@ func (s *MCPServer) allTools() []mcpTool {
 		mcpEvidenceSearchTool(),
 		mcpAuthorSearchTool(),
 	}
+}
+
+// ListTools returns the MCP tools exposed by this server.
+func (s *MCPServer) ListTools() []mcpTool {
+	return s.allTools()
 }
 
 type mcpToolCallParams struct {

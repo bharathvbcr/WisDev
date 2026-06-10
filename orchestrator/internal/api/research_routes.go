@@ -5,11 +5,30 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
 )
+
+// researchLoopRequestTimeout bounds the synchronous research routes
+// (/wisdev/research/deep and /wisdev/research/autonomous) so a stalled loop
+// cannot hold the HTTP request open indefinitely. Override with
+// WISDEV_RESEARCH_LOOP_TIMEOUT_SECONDS (60–3600).
+var researchLoopRequestTimeout = resolveResearchLoopRequestTimeout()
+
+func resolveResearchLoopRequestTimeout() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("WISDEV_RESEARCH_LOOP_TIMEOUT_SECONDS")); raw != "" {
+		if seconds, err := strconv.Atoi(raw); err == nil && seconds >= 60 && seconds <= 3600 {
+			return time.Duration(seconds) * time.Second
+		}
+	}
+	return 10 * time.Minute
+}
 
 var runUnifiedResearchLoop = func(
 	ctx context.Context,
@@ -18,6 +37,11 @@ var runUnifiedResearchLoop = func(
 	req wisdev.LoopRequest,
 	onEvent func(wisdev.PlanExecutionEvent),
 ) (*wisdev.LoopResult, error) {
+	if researchLoopRequestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, researchLoopRequestTimeout)
+		defer cancel()
+	}
 	result, err := runtime.RunLoop(ctx, req, plane, onEvent)
 	if err != nil {
 		return nil, err
@@ -101,11 +125,16 @@ func (s *wisdevServer) registerResearchRoutes(mux *http.ServeMux, agentGateway *
 			})
 			return
 		}
-		query := strings.TrimSpace(req.Query)
-		if query == "" {
+		rawQuery := strings.TrimSpace(req.Query)
+		if rawQuery == "" {
 			WriteError(w, http.StatusBadRequest, ErrInvalidParameters, "query is required", nil)
 			return
 		}
+		var llmClient *llm.Client
+		if agentGateway != nil {
+			llmClient = agentGateway.LLMClient
+		}
+		originalQuery, query, _ := wisdev.PrepareJobResearchQuery(r.Context(), rawQuery, strings.TrimSpace(req.DomainHint), llmClient, false)
 		userID, authErr := resolveAuthorizedUserID(r, strings.TrimSpace(req.UserID))
 		if authErr != nil {
 			logWisdevRouteError(r, "wisdev deep research authorization failed",
@@ -167,6 +196,7 @@ func (s *wisdevServer) registerResearchRoutes(mux *http.ServeMux, agentGateway *
 		seedQueries := buildDeepResearchSeedQueries(query, req.Categories, domainHint)
 		loopReq := wisdev.LoopRequest{
 			Query:           query,
+			OriginalQuery:   originalQuery,
 			SeedQueries:     seedQueries,
 			Domain:          domainHint,
 			ProjectID:       firstNonEmpty(req.SessionID, "deep_"+wisdev.NewTraceID()),
@@ -307,14 +337,22 @@ func (s *wisdevServer) registerResearchRoutes(mux *http.ServeMux, agentGateway *
 			return
 		}
 
-		query := strings.TrimSpace(req.Query)
-		if query == "" {
-			query = wisdev.ResolveSessionSearchQuery(req.Session.Query, req.Session.CorrectedQuery, req.Session.OriginalQuery)
+		originalQuery := wisdev.ResolveSessionQueryText("", wisdev.AsOptionalString(req.Session.OriginalQuery))
+		if originalQuery == "" {
+			originalQuery = strings.TrimSpace(req.Query)
 		}
-		if query == "" {
+		if originalQuery == "" {
+			originalQuery = wisdev.ResolveSessionSearchQuery(req.Session.Query, req.Session.CorrectedQuery, req.Session.OriginalQuery)
+		}
+		if originalQuery == "" {
 			WriteError(w, http.StatusBadRequest, ErrInvalidParameters, "query is required", nil)
 			return
 		}
+		var llmClient *llm.Client
+		if agentGateway != nil {
+			llmClient = agentGateway.LLMClient
+		}
+		originalQuery, query, _ := wisdev.PrepareJobResearchQuery(r.Context(), originalQuery, strings.TrimSpace(req.Session.DetectedDomain), llmClient, false)
 		userID, authErr := resolveAuthorizedUserID(r, strings.TrimSpace(req.UserID))
 		if authErr != nil {
 			logWisdevRouteError(r, "wisdev autonomous research authorization failed",
@@ -434,6 +472,7 @@ func (s *wisdevServer) registerResearchRoutes(mux *http.ServeMux, agentGateway *
 			)
 			loopReq := wisdev.LoopRequest{
 				Query:                       query,
+				OriginalQuery:               originalQuery,
 				SeedQueries:                 plannedQueries,
 				Domain:                      strings.TrimSpace(req.Session.DetectedDomain),
 				ProjectID:                   sessionID,

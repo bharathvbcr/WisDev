@@ -2,7 +2,6 @@ package search
 
 import (
 	"context"
-	"strings"
 
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
 )
@@ -26,9 +25,14 @@ func (pr *ProviderRouter) Route(ctx context.Context, query string, domain string
 		return nil
 	}
 
-	normalizedDomain := strings.TrimSpace(strings.ToLower(domain))
+	normalizedDomain := NormalizeRoutingDomain(domain)
+	if normalizedDomain == "" || normalizedDomain == "general" {
+		if inferred := InferDomainFromQuery(query); inferred != "" && inferred != "general" {
+			normalizedDomain = inferred
+		}
+	}
 	if normalizedDomain == "" {
-		normalizedDomain = pr.SelectByQueryType(query)
+		normalizedDomain = "general"
 	}
 
 	domainProviders := pr.registry.ProvidersFor(normalizedDomain)
@@ -100,31 +104,9 @@ func (pr *ProviderRouter) lookupProviders(names []string, domain string, allowed
 
 // SelectByQueryType uses keywords in the query to suggest providers.
 func (pr *ProviderRouter) SelectByQueryType(query string) string {
-	return inferDomainFromQuery(query)
+	return InferDomainFromQuery(query)
 }
 
 func inferDomainFromQuery(query string) string {
-	query = strings.ToLower(query)
-
-	// Medical / Biological
-	if containsAny(query, "cancer", "disease", "drug", "clinical", "patient", "treatment", "virus", "gene", "genome", "protein") {
-		return "biomedical"
-	}
-
-	// Computer Science / Math
-	if containsAny(query, "algorithm", "software", "computing", "neural", "network", "distributed", "database", "security") {
-		return "cs"
-	}
-
-	// Physics / Astronomy
-	if containsAny(query, "galaxy", "quantum", "gravity", "particle", "black hole", "star", "telescope", "cosmology", "astrophysics") {
-		return "physics"
-	}
-
-	// Economics / Social Science
-	if containsAny(query, "market", "economy", "social", "policy", "political", "finance") {
-		return "social"
-	}
-
-	return "general"
+	return InferDomainFromQuery(query)
 }

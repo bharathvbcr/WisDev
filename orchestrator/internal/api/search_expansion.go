@@ -95,7 +95,7 @@ func (h *SearchHandler) HandleSPLADEExpansion(w http.ResponseWriter, r *http.Req
 	}
 
 	start := time.Now()
-	enhanced := wisdev.ExpandQuery(query)
+	enhanced := wisdev.ExpandQueryWithContext(r.Context(), query, wisdev.GlobalLLMClient)
 
 	resp := wisdev.SPLADEExpansionResponse{
 		Original:  enhanced.Original,

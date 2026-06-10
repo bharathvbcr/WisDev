@@ -29,69 +29,59 @@ Email:    judge.wisdev2026@scholarlm.dev
 Password: [Devpost private testing field only — do not commit]
 ```
 
-> **Created** in Firebase Auth (`scholarlm-vbcr`). Store the password in Devpost **Testing access** / private notes only.
-
-From the ScholarLM repo root (requires Application Default Credentials):
-
-```powershell
-$env:HACKATHON_JUDGE_EMAIL = "judge.wisdev2026@yourdomain.com"
-$env:HACKATHON_JUDGE_PASSWORD = "your-secure-password"
-npm run ops:hackathon:judge-user
-npm run ops:hackathon:preflight -- --require-judge-auth
-```
-
 ---
 
 ## Option B — CLI (no login, runs locally)
 
-Judges with Go 1.25+ installed can run the open-source agent directly:
-
 ```bash
 git clone https://github.com/bharathvbcr/WisDev.git
 cd WisDev
-cp .env.example .env
-cd orchestrator
-go run ./cmd/wisdev yolo --local --provider openalex,arxiv "What evidence supports RAG for scientific literature?"
+./wisdev check
+./wisdev "What evidence supports RAG for scientific literature?"
 ```
 
-Offline smoke (no network):
+Windows:
 
-```bash
-go run ./cmd/wisdev yolo --local --offline "smoke test query"
+```powershell
+.\wisdev.cmd check
+.\wisdev.cmd "What evidence supports RAG for scientific literature?"
+```
+
+Offline smoke:
+
+```powershell
+.\wisdev.cmd demo --offline
+```
+
+Windows binary (no Go):
+
+```powershell
+.\scripts\build-wisdev-cli.ps1
+.\dist\wisdev.exe check
 ```
 
 ---
 
-## Option C — MCP endpoint (for technical judges)
+## Option C — MCP (for technical judges)
 
-With the orchestrator server running:
+```powershell
+cd WisDev
+.\wisdev.cmd setup --write .cursor\mcp.json
+.\wisdev.cmd mcp
+```
 
-```bash
-cd WisDev/orchestrator
-go run ./cmd/server
+See [`docs/MCP_CLIENTS.md`](../MCP_CLIENTS.md).
+
+### HTTP (orchestrator server running)
+
+```powershell
+.\wisdev.cmd serve
 ```
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `http://127.0.0.1:8081/wisdev/mcp` | POST | MCP JSON-RPC (tools/list, tools/call) |
-| `http://127.0.0.1:8081/wisdev/mcp/status` | GET | ADK + MCP live status |
-| `http://127.0.0.1:8081/.well-known/agent-card.json` | GET | A2A agent discovery |
-
-Example MCP tool call:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "tools/call",
-  "params": {
-    "name": "wisdevSearchPapers",
-    "arguments": { "query": "transformer retrieval augmented generation", "limit": 5 }
-  }
-}
-```
-
-Legacy alias `scholarlmSearchPapers` is also accepted.
+| `http://127.0.0.1:8081/wisdev/mcp` | POST | MCP JSON-RPC |
+| `http://127.0.0.1:8081/wisdev/mcp/status` | GET | ADK + MCP status |
 
 ---
 
@@ -99,6 +89,6 @@ Legacy alias `scholarlmSearchPapers` is also accepted.
 
 - Agent **acts** (multi-step search, not single-shot chat)
 - **MCP tools** invoked for retrieval
-- **ADK** runtime orchestrates the loop (`config/wisdev-adk.yaml`)
+- **ADK** runtime orchestrates the loop
 - **Gemini** powers reasoning and synthesis
 - Evidence-grounded output with traceable paper references

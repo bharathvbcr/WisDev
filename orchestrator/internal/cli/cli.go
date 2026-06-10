@@ -13,6 +13,9 @@ import (
 	"strings"
 	"time"
 
+	internalwisdev "github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/envload"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
 	agent "github.com/wisdev/wisdev-agent-os/orchestrator/pkg/wisdev"
 )
 
@@ -20,55 +23,58 @@ const defaultBaseURL = "http://127.0.0.1:8081"
 const defaultRunProviders = "openalex,arxiv"
 
 func Run(args []string, stdout, stderr io.Writer) error {
-	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+	envload.LoadDotEnvFiles()
+	if len(args) == 0 {
 		printUsage(stdout)
 		return nil
 	}
+	if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		if len(args) == 1 {
+			printUsage(stdout)
+			return nil
+		}
+		return runHelp(args[1:], stdout)
+	}
+	if args[0] == "--version" || args[0] == "-v" || args[0] == "version" {
+		return runVersion(stdout)
+	}
+
+	args = normalizeInvocation(args)
 
 	switch args[0] {
 	case "run":
-		return runShortcut(args[1:], stdout)
+		return runShortcut(args[1:], stdout, stderr)
 	case "search":
-		return runShortcut(args[1:], stdout)
+		return runShortcut(args[1:], stdout, stderr)
 	case "yolo":
-		return runYOLO(args[1:], stdout)
+		return runYOLO(args[1:], stdout, stderr)
 	case "serve":
-		fmt.Fprintln(stdout, "Run the orchestrator server with: go run ./cmd/server")
-		return nil
+		return runServe(stdout, stderr)
+	case "mcp":
+		return runMCP(args[1:], stdout, stderr)
+	case "mcp-config":
+		return runMCPConfig(args[1:], stdout)
+	case "doctor":
+		return runDoctor(args[1:], stdout)
+	case "providers":
+		return runProviders(args[1:], stdout)
+	case "demo":
+		return runDemo(args[1:], stdout, stderr)
+	case "tui":
+		return runTUI(args[1:], stdout, stderr)
 	default:
 		printUsage(stderr)
+		if suggestion := suggestCommand(args[0]); suggestion != "" {
+			userError(stderr, "Unknown command %q. Did you mean %q? Try: wisdev help %s", args[0], suggestion, suggestion)
+		}
 		return fmt.Errorf("unknown command %q", args[0])
 	}
 }
 
-func printUsage(w io.Writer) {
-	fmt.Fprintln(w, `WisDev Research Runtime
-
-Usage:
-  wisdev search "task"
-  wisdev run search: "task"
-  wisdev search [--offline] [--provider openalex,arxiv] "task"
-  wisdev run [--offline] [--provider openalex,arxiv] search: "task"
-  wisdev yolo [--url http://127.0.0.1:8081] [--json] "task"
-  wisdev yolo --local [--offline] [--provider openalex,arxiv] [--json] "task"
-  wisdev serve
-
-Environment:
-  WISDEV_ORCHESTRATOR_URL  local orchestrator base URL
-
-By default the CLI preserves the extracted HTTP compatibility surface. Use
---local to run through the embedded pkg/wisdev facade without starting the
-orchestrator server.
-
-The run shorthand uses local mode and defaults to the OpenAlex and arXiv
-providers, so "wisdev search query" and "wisdev run search: query" are equivalent to
-"wisdev yolo --local --provider openalex,arxiv query".`)
-}
-
-func runShortcut(args []string, stdout io.Writer) error {
+func runShortcut(args []string, stdout, stderr io.Writer) error {
 	normalized := normalizeRunArgs(args)
 	yoloArgs := append([]string{"--local", "--provider", defaultRunProviders}, normalized...)
-	return runYOLO(yoloArgs, stdout)
+	return runYOLO(yoloArgs, stdout, stderr)
 }
 
 func normalizeRunArgs(args []string) []string {
@@ -93,14 +99,20 @@ func normalizeRunArgs(args []string) []string {
 	return normalized
 }
 
-func runYOLO(args []string, stdout io.Writer) error {
+func runYOLO(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("yolo", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	baseURL := fs.String("url", envOrDefault("WISDEV_ORCHESTRATOR_URL", defaultBaseURL), "orchestrator base URL")
 	jsonOut := fs.Bool("json", false, "emit raw JSON response")
+	quiet := fs.Bool("quiet", false, "print only the final answer")
+	verbose := fs.Bool("verbose", false, "print queries and top papers on stderr")
 	timeout := fs.Duration("timeout", 5*time.Minute, "request timeout")
-	local := fs.Bool("local", false, "run through the embedded WisDev agent instead of HTTP")
+	local := fs.Bool("local", false, "run locally (default; kept for compatibility)")
+	remote := fs.Bool("remote", false, "use remote orchestrator HTTP API")
 	offline := fs.Bool("offline", false, "disable network-backed search providers in local mode")
+	fs.BoolVar(jsonOut, "j", false, "emit raw JSON response")
+	fs.BoolVar(quiet, "q", false, "print only the final answer")
+	fs.BoolVar(verbose, "v", false, "print queries and top papers on stderr")
 	providers := fs.String("provider", "", "comma-separated built-in provider names for local mode")
 	domain := fs.String("domain", "", "research domain hint for local mode")
 	projectID := fs.String("project-id", "", "project or session id for local mode")
@@ -110,18 +122,27 @@ func runYOLO(args []string, stdout io.Writer) error {
 	maxUniquePapers := fs.Int("max-unique-papers", 20, "maximum unique papers retained locally")
 	disablePlanning := fs.Bool("disable-planning", false, "disable programmatic planning in local mode")
 	disableHypotheses := fs.Bool("disable-hypotheses", false, "disable hypothesis generation in local mode")
+	noEnhance := fs.Bool("no-enhance", false, "disable query grammar, typo, and acronym enhancement")
+	stages := fs.Bool("stages", false, "stream research loop stage events to stderr during local runs")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	task := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if task == "" {
-		return errors.New("missing YOLO task")
+		return errors.New("missing research question")
 	}
-	if *local {
-		return runLocalYOLO(stdout, localYOLOOptions{
+	if *local && *remote {
+		return errors.New("use either --local or --remote, not both")
+	}
+	runLocal := !*remote
+	if runLocal {
+		return runLocalYOLO(stdout, stderr, localYOLOOptions{
 			task:              task,
 			jsonOut:           *jsonOut,
+			quiet:             *quiet,
+			verbose:           *verbose,
+			showStages:        *stages || *verbose,
 			offline:           *offline,
 			providers:         splitCSV(*providers),
 			timeout:           *timeout,
@@ -131,9 +152,14 @@ func runYOLO(args []string, stdout io.Writer) error {
 			maxSearchTerms:    *maxSearchTerms,
 			hitsPerSearch:     *hitsPerSearch,
 			maxUniquePapers:   *maxUniquePapers,
-			disablePlanning:   *disablePlanning,
-			disableHypotheses: *disableHypotheses,
+			disablePlanning:     *disablePlanning,
+			disableHypotheses:   *disableHypotheses,
+			disableQueryEnhance: *noEnhance,
 		})
+	}
+
+	if !*jsonOut && !*quiet {
+		note(stderr, "Submitting YOLO task to %s", strings.TrimRight(*baseURL, "/"))
 	}
 
 	payload := map[string]any{
@@ -154,28 +180,36 @@ func runYOLO(args []string, stdout io.Writer) error {
 	}
 
 	var lastErr error
-	for _, endpoint := range endpoints {
-		responseBody, status, err := postJSON(*baseURL, endpoint, body, *timeout)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if status >= 200 && status < 300 {
-			if *jsonOut {
-				fmt.Fprintln(stdout, string(responseBody))
-				return nil
+	progressErr := runWithProgress(stderr, "Waiting for orchestrator response", func() error {
+		for _, endpoint := range endpoints {
+			responseBody, status, postErr := postJSON(*baseURL, endpoint, body, *timeout)
+			if postErr != nil {
+				lastErr = postErr
+				continue
 			}
-			return printResponse(stdout, responseBody)
+			if status >= 200 && status < 300 {
+				if *jsonOut {
+					fmt.Fprintln(stdout, string(responseBody))
+					return nil
+				}
+				if *quiet {
+					return printResponse(stdout, responseBody)
+				}
+				return printResponse(stdout, responseBody)
+			}
+			lastErr = fmt.Errorf("%s returned HTTP %d: %s", endpoint, status, strings.TrimSpace(string(responseBody)))
 		}
-		lastErr = fmt.Errorf("%s returned HTTP %d: %s", endpoint, status, strings.TrimSpace(string(responseBody)))
-	}
-
-	return fmt.Errorf("YOLO request failed against %s: %w", strings.TrimRight(*baseURL, "/"), lastErr)
+		return fmt.Errorf("YOLO request failed against %s: %w", strings.TrimRight(*baseURL, "/"), lastErr)
+	})
+	return progressErr
 }
 
 type localYOLOOptions struct {
 	task              string
 	jsonOut           bool
+	quiet             bool
+	verbose           bool
+	showStages        bool
 	offline           bool
 	providers         []string
 	timeout           time.Duration
@@ -185,31 +219,73 @@ type localYOLOOptions struct {
 	maxSearchTerms    int
 	hitsPerSearch     int
 	maxUniquePapers   int
-	disablePlanning   bool
-	disableHypotheses bool
+	disablePlanning     bool
+	disableHypotheses   bool
+	disableQueryEnhance bool
 }
 
-func runLocalYOLO(stdout io.Writer, opts localYOLOOptions) error {
+func runLocalYOLO(stdout, stderr io.Writer, opts localYOLOOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 	defer cancel()
 
+	if !opts.jsonOut && !opts.quiet {
+		printSection(stderr, "WisDev YOLO")
+		note(stderr, "  task: %s", opts.task)
+		if opts.offline {
+			note(stderr, "  mode: offline smoke")
+		} else if len(opts.providers) > 0 {
+			note(stderr, "  providers: %s", strings.Join(opts.providers, ", "))
+		} else {
+			note(stderr, "  providers: all built-in")
+		}
+		if opts.showStages {
+			printSection(stderr, "Stages")
+		}
+		fmt.Fprintln(stderr)
+	}
+
 	agentOpts := []agent.Option{}
+	llmClient := resolveResearchLLMClient()
+	agentOpts = append(agentOpts, agent.WithLLMClient(llmClient))
 	if opts.offline {
 		agentOpts = append(agentOpts, agent.WithNoSearchProviders())
 	} else if len(opts.providers) > 0 {
 		agentOpts = append(agentOpts, agent.WithProviderNames(opts.providers...))
 	}
 
-	result, err := agent.NewAgent(agentOpts...).RunYOLO(ctx, agent.YOLORequest{
-		Task:              opts.task,
-		Domain:            opts.domain,
-		ProjectID:         opts.projectID,
-		MaxIterations:     opts.maxIterations,
-		MaxSearchTerms:    opts.maxSearchTerms,
-		HitsPerSearch:     opts.hitsPerSearch,
-		MaxUniquePapers:   opts.maxUniquePapers,
-		DisablePlanning:   opts.disablePlanning,
-		DisableHypotheses: opts.disableHypotheses,
+	var result *agent.YOLOResult
+	err := withQuietAgentLogs(func() error {
+		progressLabel := "Running local YOLO loop"
+		if opts.showStages {
+			progressLabel = "Running local YOLO loop (stage log below)"
+		}
+		return runWithProgress(stderr, progressLabel, func() error {
+			var runErr error
+			runErr = withGlobalResearchLLMClient(llmClient, func() error {
+				var innerErr error
+				yoloReq := agent.YOLORequest{
+				Task:                opts.task,
+				OriginalQuery:       opts.task,
+				Domain:              opts.domain,
+				ProjectID:           opts.projectID,
+				MaxIterations:       opts.maxIterations,
+				MaxSearchTerms:      opts.maxSearchTerms,
+				HitsPerSearch:       opts.hitsPerSearch,
+				MaxUniquePapers:     opts.maxUniquePapers,
+				DisablePlanning:     opts.disablePlanning,
+				DisableHypotheses:   opts.disableHypotheses,
+				DisableQueryEnhance: opts.disableQueryEnhance,
+				}
+				if opts.showStages {
+					yoloReq.OnProgress = func(event agent.ProgressEvent) {
+						printCLIProgressEvent(stderr, event)
+					}
+				}
+				result, innerErr = agent.NewAgent(agentOpts...).RunYOLO(ctx, yoloReq)
+				return innerErr
+			})
+			return runErr
+		})
 	})
 	if err != nil {
 		return err
@@ -224,17 +300,7 @@ func runLocalYOLO(stdout io.Writer, opts localYOLOOptions) error {
 		return nil
 	}
 
-	if strings.TrimSpace(result.FinalAnswer) != "" {
-		fmt.Fprintln(stdout, result.FinalAnswer)
-		return nil
-	}
-	fmt.Fprintf(stdout, "WisDev YOLO completed: iterations=%d papers=%d converged=%t stopReason=%s\n",
-		result.Iterations,
-		result.PapersFound,
-		result.Converged,
-		firstNonEmpty(result.StopReason, "not_reported"),
-	)
-	return nil
+	return printYOLOResult(stdout, stderr, result, opts.quiet, opts.verbose)
 }
 
 func postJSON(baseURL, endpoint string, body []byte, timeout time.Duration) ([]byte, int, error) {
@@ -290,13 +356,38 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			return trimmed
-		}
+
+func runMCP(args []string, stdout, stderr io.Writer) error {
+	return runMCPWithIO(args, os.Stdin, stdout, stderr)
+}
+
+func runMCPWithIO(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	offline := fs.Bool("offline", false, "disable network-backed search providers")
+	providers := fs.String("provider", "", "comma-separated built-in provider names")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
-	return ""
+	if len(fs.Args()) > 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+
+	var registry *search.ProviderRegistry
+	switch {
+	case *offline:
+		registry = search.NewProviderRegistry()
+	case strings.TrimSpace(*providers) != "":
+		registry = search.BuildRegistry(splitCSV(*providers)...)
+	default:
+		registry = search.BuildRegistry()
+	}
+
+	if stderr != nil {
+		note(stderr, "WisDev MCP stdio ready (Ctrl+C to stop). Tools: wisdevSearchPapers, wisdevPaperLookup, wisdevEvidenceSearch, wisdevAuthorSearch")
+	}
+	srv := internalwisdev.NewMCPServer(registry)
+	return srv.RunStdio(context.Background(), stdin, stdout)
 }
 
 func splitCSV(value string) []string {

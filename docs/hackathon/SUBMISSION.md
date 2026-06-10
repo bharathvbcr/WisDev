@@ -7,6 +7,25 @@
 
 ---
 
+## Before you submit (2 min)
+
+```powershell
+cd scholarlm
+npm run ops:hackathon:record-prep
+npm run ops:hackathon:submit-gate -- --require-video-url
+```
+
+Judge quick test (no login):
+
+```powershell
+git clone https://github.com/bharathvbcr/WisDev.git
+cd WisDev
+.\wisdev.cmd check
+.\wisdev.cmd "What evidence supports RAG for scientific literature?"
+```
+
+---
+
 ## Devpost fields (copy/paste)
 
 ### Project title
@@ -28,6 +47,8 @@ https://github.com/bharathvbcr/WisDev
 ### Video URL
 
 `[UPLOAD TO YOUTUBE/VIMEO — see DEMO_SCRIPT.md — paste link here]`
+
+> Before Devpost: `npm run ops:hackathon:submit-gate -- --require-video-url`
 
 ### Theme
 
@@ -86,7 +107,7 @@ Query → Plan → Search → Analyze → Synthesize → Report
 ### What we built for this challenge
 
 - Net-new autonomous agent on **Google ADK for Go**
-- **MCP tool server** with ADK function-tool bridge for secure external agent integration
+- **MCP tool server** with ADK function-tool bridge plus **stdio transport** (`wisdev mcp`) for Cursor, Claude Code, and Codex
 - Production deployment on **GCP Cloud Run** with observability and reliability baselines
 - Open-sourced the runtime so the agent is inspectable and extensible
 
@@ -112,5 +133,6 @@ See live tracker: [`STATUS.md`](./STATUS.md)
 - [ ] Export architecture diagram: `npm run ops:hackathon:diagram` (from ScholarLM repo root)
 - [ ] Create judge demo account: `npm run ops:hackathon:judge-user` (see `JUDGE_ACCESS.md`)
 - [ ] Verify stack: `npm run ops:hackathon:preflight -- --require-judge-auth`
+- [ ] MCP stdio smoke: `npm run ops:hackathon:mcp-stdio`
 - [ ] Paste video URL into Devpost
 - [ ] Submit before deadline (7:00 PM CDT June 11)

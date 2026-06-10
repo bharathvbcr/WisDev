@@ -11,7 +11,9 @@ func TestRunPrintsHelp(t *testing.T) {
 	if err := Run([]string{"--help"}, &stdout, &bytes.Buffer{}); err != nil {
 		t.Fatalf("run returned error: %v", err)
 	}
-	for _, fragment := range []string{"wisdev search", "wisdev run search:", "wisdev yolo --local"} {
+	for _, fragment := range []string{
+		"WisDev", "Essentials", `wisdev "your research question"`, "wisdev check", "wisdev mcp", "wisdev help",
+	} {
 		if !strings.Contains(stdout.String(), fragment) {
 			t.Fatalf("expected usage to contain %q, got %q", fragment, stdout.String())
 		}
@@ -26,8 +28,38 @@ func TestSearchShortcutRequiresTask(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected missing task error")
 	}
-	if !strings.Contains(err.Error(), "missing YOLO task") {
+	if !strings.Contains(err.Error(), "missing research question") {
 		t.Fatalf("expected missing task error, got %v", err)
+	}
+}
+
+func TestBareQuestionRunsSearch(t *testing.T) {
+	var stdout bytes.Buffer
+	err := Run([]string{
+		"--offline",
+		"--json",
+		"--max-iterations", "1",
+		"--max-search-terms", "1",
+		"--hits-per-search", "1",
+		"--disable-planning",
+		"--disable-hypotheses",
+		"map evidence for open source research agents",
+	}, &stdout, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+	if !strings.Contains(stdout.String(), `"iterations": 1`) {
+		t.Fatalf("expected search json output, got %q", stdout.String())
+	}
+}
+
+func TestCheckAliasRunsDoctor(t *testing.T) {
+	var stdout bytes.Buffer
+	if err := Run([]string{"check", "--json"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("check alias failed: %v", err)
+	}
+	if !strings.Contains(stdout.String(), `"checks"`) {
+		t.Fatalf("expected doctor json, got %q", stdout.String())
 	}
 }
 
@@ -60,7 +92,7 @@ func TestRunShortcutRequiresTask(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected missing task error")
 	}
-	if !strings.Contains(err.Error(), "missing YOLO task") {
+	if !strings.Contains(err.Error(), "missing research question") {
 		t.Fatalf("expected missing task error, got %v", err)
 	}
 }
@@ -103,12 +135,12 @@ func TestNormalizeRunArgsStripsSearchPrefix(t *testing.T) {
 	}
 }
 
-func TestRunYOLOLocalRequiresTask(t *testing.T) {
-	err := Run([]string{"yolo", "--local"}, &bytes.Buffer{}, &bytes.Buffer{})
+func TestRunYOLORequiresTask(t *testing.T) {
+	err := Run([]string{"yolo"}, &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil {
 		t.Fatal("expected missing task error")
 	}
-	if !strings.Contains(err.Error(), "missing YOLO task") {
+	if !strings.Contains(err.Error(), "missing research question") {
 		t.Fatalf("expected missing task error, got %v", err)
 	}
 }
@@ -117,7 +149,6 @@ func TestRunYOLOLocalOfflineJSON(t *testing.T) {
 	var stdout bytes.Buffer
 	err := Run([]string{
 		"yolo",
-		"--local",
 		"--offline",
 		"--json",
 		"--max-iterations", "1",
@@ -135,6 +166,27 @@ func TestRunYOLOLocalOfflineJSON(t *testing.T) {
 		if !strings.Contains(output, fragment) {
 			t.Fatalf("expected output to contain %s, got %q", fragment, output)
 		}
+	}
+}
+
+func TestHelpUnknownTopicSuggestsCommand(t *testing.T) {
+	err := Run([]string{"help", "serch"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("expected unknown help topic error")
+	}
+	if !strings.Contains(err.Error(), "Did you mean") {
+		t.Fatalf("expected suggestion in error, got %v", err)
+	}
+}
+
+func TestUnknownCommandSuggestsHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := Run([]string{"serch"}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected unknown command error")
+	}
+	if !strings.Contains(stderr.String(), "Did you mean") {
+		t.Fatalf("expected suggestion in stderr, got %q", stderr.String())
 	}
 }
 

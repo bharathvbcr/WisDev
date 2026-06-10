@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/pycompute"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/researchquery"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
 	llmv1 "github.com/wisdev/wisdev-agent-os/orchestrator/proto/llm"
@@ -135,8 +136,9 @@ func (e *Engine) retrievePapers(ctx context.Context, req AnswerRequest) (*Canoni
 }
 
 func (e *Engine) retrieveProviderPapers(ctx context.Context, req AnswerRequest) *CanonicalRetrievalResult {
+	searchQuery := researchquery.PrepareForProviderSearch(req.Query)
 	result := &CanonicalRetrievalResult{
-		QueryUsed: strings.TrimSpace(req.Query),
+		QueryUsed: searchQuery,
 		Backend:   "go-rag",
 	}
 	if e.searchReg == nil {
@@ -152,7 +154,7 @@ func (e *Engine) retrieveProviderPapers(ctx context.Context, req AnswerRequest) 
 		searchOpts.Limit = 10
 	}
 
-	searchResult := search.ParallelSearch(ctx, e.searchReg, req.Query, searchOpts)
+	searchResult := search.ParallelSearch(ctx, e.searchReg, searchQuery, searchOpts)
 	result.Papers = searchResult.Papers
 	if len(searchResult.Warnings) > 0 {
 		result.RetrievalTrace = make([]map[string]any, 0, len(searchResult.Warnings))
@@ -169,8 +171,8 @@ func (e *Engine) retrieveProviderPapers(ctx context.Context, req AnswerRequest) 
 		return result
 	}
 
-	slog.Info("insufficient papers found, triggering provider query expansion", "query", req.Query)
-	expandedQuery := strings.TrimSpace(req.Query + " academic research peer-reviewed")
+	slog.Info("insufficient papers found, triggering provider query expansion", "query", searchQuery)
+	expandedQuery := strings.TrimSpace(searchQuery + " academic research peer-reviewed")
 	expandedResult := search.ParallelSearch(ctx, e.searchReg, expandedQuery, searchOpts)
 	result.Papers = dedupPapers(append(result.Papers, expandedResult.Papers...))
 	result.RetrievalTrace = append(result.RetrievalTrace, map[string]any{
@@ -212,7 +214,7 @@ func (e *Engine) expandWithMemoryQueries(ctx context.Context, req AnswerRequest,
 	}
 
 	for _, memoryQuery := range primer.RecommendedQueries {
-		normalized := strings.TrimSpace(memoryQuery)
+		normalized := researchquery.PrepareForProviderSearch(memoryQuery)
 		if normalized == "" {
 			continue
 		}

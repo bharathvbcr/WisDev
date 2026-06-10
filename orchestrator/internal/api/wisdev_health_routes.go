@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"net/http"
+	"time"
 
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
 )
@@ -29,6 +31,14 @@ func (s *wisdevServer) registerHealthRoutes(mux *http.ServeMux, agentGateway *wi
 		runtimeMeta := agentGateway.RuntimeMetadata()
 		adkReady := runtimeMeta["ready"] == true
 
+		llmDirect := map[string]any{"configured": false}
+		mcpStatus := agentGateway.MCPStatus()
+		if agentGateway.LLMClient != nil {
+			probeCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			llmDirect = agentGateway.LLMClient.DirectProviderStatus(probeCtx)
+			cancel()
+		}
+
 		traceID := writeEnvelope(w, "health", map[string]any{
 			"ok":                adkReady,
 			"ready":             adkReady,
@@ -37,6 +47,8 @@ func (s *wisdevServer) registerHealthRoutes(mux *http.ServeMux, agentGateway *wi
 			"controlPlane":      "go",
 			"workerPlane":       "python-docs",
 			"adk":               runtimeMeta,
+			"mcp":               mcpStatus,
+			"llmDirect":         llmDirect,
 			"journalPath":       s.gateway.Journal.Path(),
 			"journalIndex":      s.gateway.Journal.IndexPath(),
 			"journalBackend":    map[bool]string{true: "postgres_indexed", false: "file_indexed"}[s.gateway.DB != nil],

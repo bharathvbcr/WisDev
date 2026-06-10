@@ -58,6 +58,8 @@ type Client struct {
 
 	tokenSource  oauth2.TokenSource
 	VertexDirect *VertexClient // optional: bypasses Python sidecar for structured output
+	// OpenAICompatible provides local OpenAI-compatible / Ollama structured output.
+	OpenAICompatible *OpenAICompatibleClient
 }
 
 type RuntimeDependency struct {
@@ -172,8 +174,9 @@ func (c *Client) clone() *Client {
 		timeout:      c.timeout,
 		conn:         c.conn,
 		client:       c.client,
-		tokenSource:  c.tokenSource,
-		VertexDirect: c.VertexDirect,
+		tokenSource:        c.tokenSource,
+		VertexDirect:       c.VertexDirect,
+		OpenAICompatible:   c.OpenAICompatible,
 	}
 }
 
@@ -209,11 +212,31 @@ func (c *Client) TransportName() string {
 
 // ProviderCooldownRemaining reports a known direct-provider cooldown for
 // callers that can avoid optional fan-out and use deterministic fallbacks.
+// It aggregates conservatively across all models; prefer
+// ProviderCooldownRemainingForModel when the model is known.
+//
+// The cooldown reflects the Vertex *direct* provider's rate-limit state, so it
+// is only meaningful when StructuredOutput would actually take that path. In
+// http-json sidecar transport mode the request bypasses Vertex direct entirely
+// (see StructuredOutput), so a Vertex 429 must not degrade sidecar-routed
+// requests to canned fallbacks — report no cooldown in that mode.
 func (c *Client) ProviderCooldownRemaining() time.Duration {
-	if c == nil || c.VertexDirect == nil {
+	if c == nil || c.VertexDirect == nil || c.useHTTPTransport() {
 		return 0
 	}
 	return VertexProviderRateLimitRemaining()
+}
+
+// ProviderCooldownRemainingForModel reports a known direct-provider cooldown
+// scoped to the given model (plus any model-agnostic "default" cooldown), so
+// a rate limit on one model does not degrade requests for other models. Like
+// ProviderCooldownRemaining, it reports no cooldown when the client routes
+// through the http-json sidecar, since that path never touches Vertex direct.
+func (c *Client) ProviderCooldownRemainingForModel(model string) time.Duration {
+	if c == nil || c.VertexDirect == nil || c.useHTTPTransport() {
+		return 0
+	}
+	return VertexProviderRateLimitRemainingForModel(model)
 }
 
 func IsProviderRateLimitError(err error) bool {
@@ -463,7 +486,7 @@ func (c *Client) guardRecoverableStructuredOutput(ctx context.Context, req *llmp
 	if c == nil || c.VertexDirect == nil || !isRecoverableStructuredRequest(req) {
 		return func() {}, nil
 	}
-	if remaining := c.ProviderCooldownRemaining(); remaining > 0 {
+	if remaining := c.ProviderCooldownRemainingForModel(req.GetModel()); remaining > 0 {
 		return nil, fmt.Errorf("%w; retry after %s", errStructuredProviderCoolingDown, remaining.Round(time.Millisecond))
 	}
 	release, err := acquireRecoverableStructuredSlot(ctx)
@@ -495,10 +518,18 @@ func (c *Client) StructuredOutput(ctx context.Context, req *llmpb.StructuredRequ
 	}
 	coldStart := IsColdStartWindow()
 
-	// Prefer native Gemini SDK path for proper controlled generation.
-	// When the transport is explicitly http-json (sidecar mode), skip VertexDirect
-	// so the request routes through the HTTP sidecar for lower latency.
-	if c.VertexDirect != nil && !c.useHTTPTransport() {
+	// Prefer native direct providers for schema-constrained generation.
+	// When the transport is explicitly http-json (sidecar mode), skip direct
+	// providers so the request routes through the HTTP sidecar for lower latency.
+	if c.hasDirectStructuredProvider() && !c.useHTTPTransport() {
+		mode := ResolveLLMProviderMode()
+		if mode == LLMProviderModeHybrid && HybridStructuredOutputPrefersCloud(req) {
+			return c.structuredOutputCloudFirst(ctx, req, start, coldStart)
+		}
+		if c.OpenAICompatible != nil && (mode == LLMProviderModeLocal || mode == LLMProviderModeHybrid) {
+			return c.structuredOutputLocalFirst(ctx, req, start, coldStart)
+		}
+
 		release, guardErr := c.guardRecoverableStructuredOutput(ctx, req)
 		if guardErr != nil {
 			slog.Warn("llm recoverable structured output skipped before provider call",
@@ -546,6 +577,129 @@ func (c *Client) StructuredOutput(ctx context.Context, req *llmpb.StructuredRequ
 	resp, err := c.structuredOutputViaSidecar(ctx, req)
 	telemetry.RecordLLMBudgetRequest("structured", req.GetModel(), err, time.Since(start), int64(req.GetLatencyBudgetMs()), coldStart)
 	return resp, err
+}
+
+func (c *Client) hasDirectStructuredProvider() bool {
+	if c == nil {
+		return false
+	}
+	return c.OpenAICompatible != nil || c.VertexDirect != nil
+}
+
+func (c *Client) structuredOutputLocalFirst(ctx context.Context, req *llmpb.StructuredRequest, start time.Time, coldStart bool) (*llmpb.StructuredResponse, error) {
+	resp, err := c.structuredOutputOpenAICompatible(ctx, req)
+	if err == nil {
+		telemetry.RecordLLMBudgetRequest("structured_openai_compatible", req.GetModel(), nil, time.Since(start), int64(req.GetLatencyBudgetMs()), coldStart)
+		return resp, nil
+	}
+	slog.Warn("llm structured output openai compatible failed; attempting fallback",
+		"component", "llm.client",
+		"operation", "structured_output",
+		"stage", "openai_compatible_fallback",
+		"model", req.GetModel(),
+		"backend", c.OpenAICompatible.BackendName(),
+		"error", err.Error(),
+	)
+	if c.VertexDirect != nil {
+		release, guardErr := c.guardRecoverableStructuredOutput(ctx, req)
+		if guardErr == nil {
+			defer release()
+			vertexResp, vertexErr := c.structuredOutputDirect(ctx, req)
+			if vertexErr == nil {
+				telemetry.RecordLLMBudgetRequest("structured_openai_vertex_fallback", req.GetModel(), nil, time.Since(start), int64(req.GetLatencyBudgetMs()), coldStart)
+				return vertexResp, nil
+			}
+			err = fmt.Errorf("openai compatible structured output failed: %w; vertex fallback failed: %v", err, vertexErr)
+		}
+	}
+	sidecarResp, sidecarErr := c.structuredOutputViaSidecar(ctx, req)
+	if sidecarErr == nil {
+		telemetry.RecordLLMBudgetRequest("structured_openai_sidecar_fallback", req.GetModel(), nil, time.Since(start), int64(req.GetLatencyBudgetMs()), coldStart)
+		return sidecarResp, nil
+	}
+	err = fmt.Errorf("openai compatible structured output failed: %w; sidecar fallback failed: %v", err, sidecarErr)
+	telemetry.RecordLLMBudgetRequest("structured_openai_compatible", req.GetModel(), err, time.Since(start), int64(req.GetLatencyBudgetMs()), coldStart)
+	return nil, err
+}
+
+func (c *Client) structuredOutputCloudFirst(ctx context.Context, req *llmpb.StructuredRequest, start time.Time, coldStart bool) (*llmpb.StructuredResponse, error) {
+	var err error
+	if c.VertexDirect != nil {
+		release, guardErr := c.guardRecoverableStructuredOutput(ctx, req)
+		if guardErr == nil {
+			defer release()
+			vertexResp, vertexErr := c.structuredOutputDirect(ctx, req)
+			if vertexErr == nil {
+				telemetry.RecordLLMBudgetRequest("structured_hybrid_cloud_primary", req.GetModel(), nil, time.Since(start), int64(req.GetLatencyBudgetMs()), coldStart)
+				return vertexResp, nil
+			}
+			err = vertexErr
+			slog.Warn("llm hybrid cloud-primary structured output failed; attempting local fallback",
+				"component", "llm.client",
+				"operation", "structured_output",
+				"stage", "hybrid_cloud_local_fallback",
+				"model", req.GetModel(),
+				"request_class", req.GetRequestClass(),
+				"error", vertexErr.Error(),
+			)
+		} else {
+			err = guardErr
+		}
+	}
+	if c.OpenAICompatible != nil {
+		resp, localErr := c.structuredOutputOpenAICompatible(ctx, req)
+		if localErr == nil {
+			telemetry.RecordLLMBudgetRequest("structured_hybrid_cloud_local_fallback", req.GetModel(), nil, time.Since(start), int64(req.GetLatencyBudgetMs()), coldStart)
+			return resp, nil
+		}
+		if err != nil {
+			err = fmt.Errorf("cloud structured output failed: %w; local fallback failed: %v", err, localErr)
+		} else {
+			err = localErr
+		}
+	}
+	sidecarResp, sidecarErr := c.structuredOutputViaSidecar(ctx, req)
+	if sidecarErr == nil {
+		telemetry.RecordLLMBudgetRequest("structured_hybrid_cloud_sidecar_fallback", req.GetModel(), nil, time.Since(start), int64(req.GetLatencyBudgetMs()), coldStart)
+		return sidecarResp, nil
+	}
+	if err != nil {
+		err = fmt.Errorf("%w; sidecar fallback failed: %v", err, sidecarErr)
+	} else {
+		err = sidecarErr
+	}
+	telemetry.RecordLLMBudgetRequest("structured_hybrid_cloud_primary", req.GetModel(), err, time.Since(start), int64(req.GetLatencyBudgetMs()), coldStart)
+	return nil, err
+}
+
+func (c *Client) structuredOutputOpenAICompatible(ctx context.Context, req *llmpb.StructuredRequest) (*llmpb.StructuredResponse, error) {
+	start := time.Now()
+	result, inputTokens, outputTokens, err := c.OpenAICompatible.generateStructuredWithTokens(
+		ctx,
+		req.GetModel(),
+		req.GetPrompt(),
+		req.GetSystemPrompt(),
+		req.GetJsonSchema(),
+		req.GetTemperature(),
+		req.GetMaxTokens(),
+		req.GetServiceTier(),
+		req.ThinkingBudget,
+		req.GetRequestClass(),
+		req.GetRetryProfile(),
+	)
+	latencyMs := time.Since(start).Milliseconds()
+	if err != nil {
+		return nil, err
+	}
+	modelUsed := c.OpenAICompatible.resolveModel(req.GetModel())
+	return &llmpb.StructuredResponse{
+		JsonResult:   result,
+		ModelUsed:    modelUsed,
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		SchemaValid:  true,
+		LatencyMs:    latencyMs,
+	}, nil
 }
 
 // structuredOutputDirect calls Gemini natively via VertexClient, using
@@ -776,6 +930,13 @@ func (c *Client) warmUpProbe(ctx context.Context, warnOnFailure bool) error {
 // exponential backoff. This is designed to be called during server startup
 // where the sidecar may need a few seconds to become ready.
 func (c *Client) WarmUpWithRetry(ctx context.Context, maxAttempts int) error {
+	if err := c.WarmUpDirectProvider(ctx); err != nil {
+		slog.Warn("llm direct provider warm-up probe failed",
+			"component", "llm.client",
+			"operation", "warm_up_direct_provider",
+			"error", err.Error(),
+		)
+	}
 	if c == nil {
 		return errNilClient
 	}

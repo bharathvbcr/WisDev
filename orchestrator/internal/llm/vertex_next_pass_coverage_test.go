@@ -670,10 +670,47 @@ func TestClientProviderCooldownRemainingReflectsVertexDirectCooldown(t *testing.
 	t.Cleanup(resetVertexStructuredRateLimitForTest)
 
 	assert.Zero(t, (&Client{}).ProviderCooldownRemaining())
-	recordVertexProviderRateLimit(time.Now())
+	recordVertexProviderRateLimit("", time.Now())
 
 	client := &Client{VertexDirect: &VertexClient{}}
 	assert.Greater(t, client.ProviderCooldownRemaining(), time.Duration(0))
+}
+
+func TestClientProviderCooldownRemainingForModelScopesToModel(t *testing.T) {
+	resetVertexStructuredRateLimitForTest()
+	t.Cleanup(resetVertexStructuredRateLimitForTest)
+
+	var nilClient *Client
+	assert.Zero(t, nilClient.ProviderCooldownRemainingForModel("model-x"))
+	assert.Zero(t, (&Client{}).ProviderCooldownRemainingForModel("model-x"))
+
+	recordVertexProviderRateLimit("model-x", time.Now())
+
+	client := &Client{VertexDirect: &VertexClient{}}
+	assert.Greater(t, client.ProviderCooldownRemainingForModel("model-x"), time.Duration(0))
+	assert.Zero(t, client.ProviderCooldownRemainingForModel("model-y"))
+	assert.Greater(t, client.ProviderCooldownRemaining(), time.Duration(0))
+}
+
+// TestClientProviderCooldownIgnoredInHTTPTransportMode locks the rule that a
+// Vertex-direct rate-limit cooldown must not gate requests that route through
+// the http-json sidecar (which never touches Vertex direct). Without this, a
+// process-global Vertex 429 would wrongly degrade sidecar-routed callers (e.g.
+// WisDev snowball/hypothesis generation) to canned fallbacks.
+func TestClientProviderCooldownIgnoredInHTTPTransportMode(t *testing.T) {
+	resetVertexStructuredRateLimitForTest()
+	t.Cleanup(resetVertexStructuredRateLimitForTest)
+
+	recordVertexProviderRateLimit("model-x", time.Now())
+
+	httpClient := &Client{VertexDirect: &VertexClient{}, transport: transportHTTPJSON}
+	assert.Zero(t, httpClient.ProviderCooldownRemaining())
+	assert.Zero(t, httpClient.ProviderCooldownRemainingForModel("model-x"))
+
+	// A gRPC-transport client that does use Vertex direct still observes it.
+	grpcClient := &Client{VertexDirect: &VertexClient{}, transport: transportGRPC}
+	assert.Greater(t, grpcClient.ProviderCooldownRemaining(), time.Duration(0))
+	assert.Greater(t, grpcClient.ProviderCooldownRemainingForModel("model-x"), time.Duration(0))
 }
 
 func TestIsProviderRateLimitError(t *testing.T) {

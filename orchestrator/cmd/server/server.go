@@ -13,6 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/api"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/envload"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/resilience"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
@@ -67,6 +68,7 @@ var (
 )
 
 func Run(ctx context.Context, version string) error {
+	envload.LoadDotEnvFiles()
 	projectID, projectSource := resolveProjectIDWithSource(ctx)
 	slog.Info("go orchestrator booting",
 		"version", version,
@@ -136,6 +138,7 @@ func Run(ctx context.Context, version string) error {
 
 	journal := newRuntimeJournalFn(dbProvider)
 	llmClient := newLLMClientFn()
+	llm.WireDirectProviders(ctx, llmClient)
 	if err := warmUpLLMClientFn(ctx, llmClient); err != nil {
 		slog.Warn("llm sidecar warm-up did not complete before startup",
 			"component", "cmd.server",
@@ -147,6 +150,7 @@ func Run(ctx context.Context, version string) error {
 	searchRegistry.SetDB(dbProvider)
 	searchRegistry.SetRedis(redisClient)
 	wisdev.GlobalSearchRegistry = searchRegistry
+	wisdev.GlobalLLMClient = llmClient
 	citationGate := wisdev.ResolveCitationBrokerGateConfig()
 	slog.Info("go orchestrator runtime services initialized",
 		"database_enabled", dbPool != nil,

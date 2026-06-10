@@ -31,6 +31,12 @@ func (answer *StructuredAnswer) RenderText() string {
 }
 
 func RenderAnswerSections(sections []AnswerSection) string {
+	return RenderAnswerSectionsWithCitations(sections, nil)
+}
+
+// RenderAnswerSectionsWithCitations renders structured answer sections and appends
+// inline citation parentheticals from resolve when evidence IDs are present.
+func RenderAnswerSectionsWithCitations(sections []AnswerSection, resolve func(evidenceIDs []string) string) string {
 	var text strings.Builder
 	for _, section := range sections {
 		heading := strings.TrimSpace(section.Heading)
@@ -38,9 +44,19 @@ func RenderAnswerSections(sections []AnswerSection) string {
 			text.WriteString("## " + heading + "\n\n")
 		}
 		for _, sentence := range section.Sentences {
-			if claimText := strings.TrimSpace(sentence.Text); claimText != "" {
-				text.WriteString(claimText + " ")
+			claimText := strings.TrimSpace(sentence.Text)
+			if claimText == "" {
+				continue
 			}
+			if resolve != nil {
+				if cite := strings.TrimSpace(resolve(sentence.EvidenceIDs)); cite != "" && !strings.Contains(claimText, cite) {
+					if !strings.HasSuffix(claimText, ".") && !strings.HasSuffix(claimText, "!") && !strings.HasSuffix(claimText, "?") {
+						claimText += "."
+					}
+					claimText += " " + cite
+				}
+			}
+			text.WriteString(claimText + " ")
 		}
 		text.WriteString("\n\n")
 	}

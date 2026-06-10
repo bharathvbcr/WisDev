@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/search"
 	"log/slog"
 	"net/http"
@@ -68,6 +69,7 @@ type YoloJob struct {
 	TraceID                       string
 	UserID                        string
 	Query                         string
+	OriginalQuery                 string
 	ProjectID                     string
 	Status                        string
 	Mode                          string // "yolo" | "guided"
@@ -928,6 +930,7 @@ func runWisDevPipeline(ctx context.Context, job *YoloJob, loop AutonomousLoopInt
 
 	loopReq := wisdev.LoopRequest{
 		Query:              job.Query,
+		OriginalQuery:      firstNonEmptyTrimmed(job.OriginalQuery, job.Query),
 		Domain:             job.Domain,
 		ProjectID:          firstNonEmptyTrimmed(job.ProjectID, job.ID),
 		DurableJobID:       job.ID,
@@ -1272,16 +1275,26 @@ func WisDevJobHandler(w http.ResponseWriter, r *http.Request) {
 	traceID := resolveWisdevRouteTraceID(r, "")
 	jobID := newWisDevJobID("job")
 	ctx, cancel := context.WithCancel(context.Background())
+	rawQuery := strings.TrimSpace(req.Query)
+	var llmClient *llm.Client
+	if GlobalYoloGateway != nil {
+		llmClient = GlobalYoloGateway.LLMClient
+	}
+	originalQuery, searchQuery, detectedDomain := wisdev.PrepareJobResearchQuery(r.Context(), rawQuery, req.Domain, llmClient, false)
+	if strings.TrimSpace(detectedDomain) != "" {
+		req.Domain = detectedDomain
+	}
 	job := &YoloJob{
-		ID:          jobID,
-		TraceID:     traceID,
-		UserID:      userID,
-		Query:       req.Query,
-		ProjectID:   req.ProjectID,
-		Status:      "running",
-		Mode:        req.Mode,
-		ServiceTier: req.ServiceTier,
-		Domain:      req.Domain,
+		ID:            jobID,
+		TraceID:       traceID,
+		UserID:        userID,
+		Query:         searchQuery,
+		OriginalQuery: originalQuery,
+		ProjectID:     req.ProjectID,
+		Status:        "running",
+		Mode:          req.Mode,
+		ServiceTier:   req.ServiceTier,
+		Domain:        req.Domain,
 		InitialMemoryTiers: firstNonNilMemoryTiers(
 			req.InitialMemoryTiers,
 			req.MemoryTiers,
@@ -1397,10 +1410,13 @@ func WisDevStreamHandler(w http.ResponseWriter, r *http.Request) {
 				if !terminalEventSeen {
 					terminalEvent, ok := job.terminalUnifiedEventSnapshot()
 					if !ok {
+						// Only journal a terminal event we synthesized here; a
+						// recorded snapshot was already journaled by the
+						// pipeline, and re-appending it duplicates the entry.
 						terminalEvent = buildSyntheticUnifiedStreamClosedEvent(job)
 						job.setTerminalUnifiedEvent(terminalEvent)
+						appendUnifiedAutonomousJournalEvent(job, terminalEvent)
 					}
-					appendUnifiedAutonomousJournalEvent(job, terminalEvent)
 					payload, _ := json.Marshal(markSyntheticUnifiedTerminalEvent(terminalEvent, "channel_closed_before_terminal_delivery"))
 					_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
 					flusher.Flush()
@@ -1750,15 +1766,25 @@ func (h *WisDevHandler) WisDevScheduleRunHandler(w http.ResponseWriter, r *http.
 	jobID := newWisDevJobID("job_cron")
 	traceID := wisdev.NewTraceID()
 	ctx, cancel := context.WithCancel(context.Background())
+	var llmClient *llm.Client
+	if h.gateway != nil {
+		llmClient = h.gateway.LLMClient
+	}
+	originalQuery, searchQuery, detectedDomain := wisdev.PrepareJobResearchQuery(r.Context(), query, "general", llmClient, false)
+	domain := "general"
+	if strings.TrimSpace(detectedDomain) != "" {
+		domain = detectedDomain
+	}
 	job := &YoloJob{
 		ID:            jobID,
 		TraceID:       traceID,
 		UserID:        "internal-service",
-		Query:         query,
+		Query:         searchQuery,
+		OriginalQuery: originalQuery,
 		ProjectID:     projectID,
 		Status:        "running",
 		Mode:          "yolo",
-		Domain:        "general",
+		Domain:        domain,
 		UnifiedEvents: make(chan UnifiedEvent, 1024),
 		Cancel:        cancel,
 		CreatedAt:     time.Now(),

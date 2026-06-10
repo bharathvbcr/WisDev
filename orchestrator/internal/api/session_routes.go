@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/telemetry"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/wisdev"
 )
@@ -324,14 +325,27 @@ func (s *wisdevServer) registerSessionRoutes(mux *http.ServeMux, agentGateway *w
 		now := time.Now().UnixMilli()
 		sessionID := newAgentSessionID()
 		correctedQuery := strings.TrimSpace(req.CorrectedQuery)
+		planningQuery := strings.TrimSpace(req.Query)
+		detectedDomain := strings.TrimSpace(req.DetectedDomain)
+		var llmClient *llm.Client
+		if agentGateway != nil {
+			llmClient = agentGateway.LLMClient
+		}
+		originalQuery, correctedQuery, planningQuery, detectedDomain = wisdev.ApplyEarlySessionQueryPrep(
+			r.Context(),
+			originalQuery,
+			correctedQuery,
+			planningQuery,
+			detectedDomain,
+			llmClient,
+			false,
+		)
 		if correctedQuery == "" {
 			correctedQuery = originalQuery
 		}
-		planningQuery := strings.TrimSpace(req.Query)
 		if planningQuery == "" {
 			planningQuery = wisdev.ResolveSessionQueryText(correctedQuery, originalQuery)
 		}
-		detectedDomain := strings.TrimSpace(req.DetectedDomain)
 		questions, questionSequence, minQuestions, maxQuestions := defaultAgentQuestionPlan(correctedQuery, detectedDomain, req.SecondaryDomains)
 		complexityScore := wisdev.EstimateComplexityScore(correctedQuery)
 		expertiseLevel := "intermediate"

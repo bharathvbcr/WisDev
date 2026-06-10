@@ -84,9 +84,13 @@ var vertexGenerateContentSlots = make(chan struct{}, vertexGenerateContentMaxCon
 const vertexProviderRateLimitBackoff = 60 * time.Second
 const structuredThinkingDisableMaxOutputTokens int32 = 256
 
+// vertexProviderRateLimitDefaultKey is used when a rate limit is recorded or
+// queried without a known model name.
+const vertexProviderRateLimitDefaultKey = "default"
+
 var (
 	vertexProviderRateLimitMu    sync.Mutex
-	vertexProviderRateLimitUntil time.Time
+	vertexProviderRateLimitUntil = map[string]time.Time{}
 	vertexProviderCooldownLogMu  sync.Mutex
 	vertexProviderCooldownLogAt  = map[string]time.Time{}
 )
@@ -652,7 +656,7 @@ func (v *VertexClient) GenerateText(ctx context.Context, modelID, prompt, system
 			return nil, callCtx.Err()
 		}
 		attempt++
-		if remaining := vertexProviderRateLimitRemaining(time.Now()); remaining > 0 {
+		if remaining := vertexProviderRateLimitRemainingForModel(modelID, time.Now()); remaining > 0 {
 			err := fmt.Errorf("vertex text generation rate limited; retry after %s", remaining.Round(time.Millisecond))
 			if shouldLogVertexProviderCooldownSkip("generate_text", modelID, "", v.backend, time.Now()) {
 				slog.Warn("vertex text generation skipped during provider cooldown",
@@ -697,7 +701,7 @@ func (v *VertexClient) GenerateText(ctx context.Context, modelID, prompt, system
 		if limiterErr != nil {
 			return nil, limiterErr
 		}
-		if remaining := vertexProviderRateLimitRemaining(time.Now()); remaining > 0 {
+		if remaining := vertexProviderRateLimitRemainingForModel(modelID, time.Now()); remaining > 0 {
 			releaseSlot()
 			err := fmt.Errorf("vertex text generation rate limited; retry after %s", remaining.Round(time.Millisecond))
 			if shouldLogVertexProviderCooldownSkip("generate_text", modelID, "", v.backend, time.Now()) {
@@ -735,7 +739,7 @@ func (v *VertexClient) GenerateText(ctx context.Context, modelID, prompt, system
 				"error_class", errClass,
 				"error", err.Error(),
 			)
-			if remaining, opened := recordVertexProviderRateLimitIfNeeded(errClass, time.Now()); opened {
+			if remaining, opened := recordVertexProviderRateLimitIfNeeded(modelID, errClass, time.Now()); opened {
 				slog.Warn("vertex text generation provider cooldown opened",
 					"component", "llm.vertex",
 					"operation", "generate_text",
@@ -1006,20 +1010,60 @@ func vertexRetryDelay(errorClass string) time.Duration {
 	}
 }
 
+func vertexProviderRateLimitModelKey(model string) string {
+	key := strings.ToLower(strings.TrimSpace(model))
+	if key == "" {
+		return vertexProviderRateLimitDefaultKey
+	}
+	return key
+}
+
 func vertexProviderRateLimitRemaining(now time.Time) time.Duration {
 	vertexProviderRateLimitMu.Lock()
 	defer vertexProviderRateLimitMu.Unlock()
-	if now.Before(vertexProviderRateLimitUntil) {
-		return time.Until(vertexProviderRateLimitUntil)
+	var remaining time.Duration
+	for _, until := range vertexProviderRateLimitUntil {
+		if now.Before(until) {
+			if r := until.Sub(now); r > remaining {
+				remaining = r
+			}
+		}
 	}
-	return 0
+	return remaining
 }
 
-// VertexProviderRateLimitRemaining reports the active process-wide Vertex
-// cooldown. Callers that can use deterministic fallbacks should check this
-// before starting optional LLM fan-out.
+func vertexProviderRateLimitRemainingForModel(model string, now time.Time) time.Duration {
+	key := vertexProviderRateLimitModelKey(model)
+	vertexProviderRateLimitMu.Lock()
+	defer vertexProviderRateLimitMu.Unlock()
+	var remaining time.Duration
+	for _, candidate := range []string{key, vertexProviderRateLimitDefaultKey} {
+		until, ok := vertexProviderRateLimitUntil[candidate]
+		if !ok || !now.Before(until) {
+			continue
+		}
+		if r := until.Sub(now); r > remaining {
+			remaining = r
+		}
+	}
+	return remaining
+}
+
+// VertexProviderRateLimitRemaining reports the maximum active Vertex cooldown
+// across all models (conservative process-wide aggregate). Callers that can
+// use deterministic fallbacks should check this before starting optional LLM
+// fan-out. Prefer VertexProviderRateLimitRemainingForModel when the model for
+// the upcoming request is known.
 func VertexProviderRateLimitRemaining() time.Duration {
 	return vertexProviderRateLimitRemaining(time.Now())
+}
+
+// VertexProviderRateLimitRemainingForModel reports the active Vertex cooldown
+// for the given model. It accounts for both the model-specific cooldown and
+// any cooldown recorded under the "default" key (rate limits observed without
+// a known model), returning the larger of the two.
+func VertexProviderRateLimitRemainingForModel(model string) time.Duration {
+	return vertexProviderRateLimitRemainingForModel(model, time.Now())
 }
 
 func shouldLogVertexProviderCooldownSkip(operation, modelID, requestClass, backend string, now time.Time) bool {
@@ -1038,27 +1082,28 @@ func shouldLogVertexProviderCooldownSkip(operation, modelID, requestClass, backe
 	return true
 }
 
-func recordVertexProviderRateLimit(now time.Time) time.Duration {
+func recordVertexProviderRateLimit(model string, now time.Time) time.Duration {
+	key := vertexProviderRateLimitModelKey(model)
 	until := now.Add(vertexProviderRateLimitBackoff)
 	vertexProviderRateLimitMu.Lock()
-	if until.After(vertexProviderRateLimitUntil) {
-		vertexProviderRateLimitUntil = until
+	if until.After(vertexProviderRateLimitUntil[key]) {
+		vertexProviderRateLimitUntil[key] = until
 	}
-	remaining := time.Until(vertexProviderRateLimitUntil)
+	remaining := time.Until(vertexProviderRateLimitUntil[key])
 	vertexProviderRateLimitMu.Unlock()
 	return remaining
 }
 
-func recordVertexProviderRateLimitIfNeeded(errClass string, now time.Time) (time.Duration, bool) {
+func recordVertexProviderRateLimitIfNeeded(model, errClass string, now time.Time) (time.Duration, bool) {
 	if strings.TrimSpace(errClass) != "rate_limit" {
 		return 0, false
 	}
-	return recordVertexProviderRateLimit(now), true
+	return recordVertexProviderRateLimit(model, now), true
 }
 
 func resetVertexStructuredRateLimitForTest() {
 	vertexProviderRateLimitMu.Lock()
-	vertexProviderRateLimitUntil = time.Time{}
+	vertexProviderRateLimitUntil = map[string]time.Time{}
 	vertexProviderRateLimitMu.Unlock()
 	vertexProviderCooldownLogMu.Lock()
 	vertexProviderCooldownLogAt = map[string]time.Time{}
@@ -1137,7 +1182,7 @@ func (v *VertexClient) generateStructuredWithTokens(ctx context.Context, modelID
 			return structuredMiddlewareResult{}, callCtx.Err()
 		}
 		attempt++
-		if remaining := vertexProviderRateLimitRemaining(time.Now()); remaining > 0 {
+		if remaining := vertexProviderRateLimitRemainingForModel(modelID, time.Now()); remaining > 0 {
 			err := fmt.Errorf("vertex structured output rate limited; retry after %s", remaining.Round(time.Millisecond))
 			if shouldLogVertexProviderCooldownSkip("structured_output", modelID, requestClass, v.backend, time.Now()) {
 				slog.Warn("vertex structured output skipped during provider cooldown",
@@ -1179,7 +1224,7 @@ func (v *VertexClient) generateStructuredWithTokens(ctx context.Context, modelID
 		if limiterErr != nil {
 			return structuredMiddlewareResult{}, limiterErr
 		}
-		if remaining := vertexProviderRateLimitRemaining(time.Now()); remaining > 0 {
+		if remaining := vertexProviderRateLimitRemainingForModel(modelID, time.Now()); remaining > 0 {
 			releaseSlot()
 			err := fmt.Errorf("vertex structured output rate limited; retry after %s", remaining.Round(time.Millisecond))
 			if shouldLogVertexProviderCooldownSkip("structured_output", modelID, requestClass, v.backend, time.Now()) {
@@ -1213,7 +1258,7 @@ func (v *VertexClient) generateStructuredWithTokens(ctx context.Context, modelID
 				"error_class", errorClass,
 				"backend", v.backend,
 			)
-			if remaining, opened := recordVertexProviderRateLimitIfNeeded(errorClass, time.Now()); opened {
+			if remaining, opened := recordVertexProviderRateLimitIfNeeded(modelID, errorClass, time.Now()); opened {
 				slog.Warn("vertex structured output provider cooldown opened",
 					"model", modelID,
 					"request_class", requestClass,

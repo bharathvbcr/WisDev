@@ -45,8 +45,8 @@ func (swarmSearchProvider) Search(ctx context.Context, query string, opts search
 	return []search.Paper{
 		{
 			ID:       "paper-1",
-			Title:    "Sleep and memory consolidation",
-			Abstract: "Controlled studies report stronger recall after sleep.",
+			Title:    "Sleep and memory consolidation for " + query,
+			Abstract: "Controlled studies report stronger recall after sleep. " + query,
 			Source:   "swarm-search",
 			Score:    0.91,
 		},

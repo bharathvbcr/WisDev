@@ -49,9 +49,12 @@ function Invoke-PythonContractTests {
 }
 
 function Invoke-LocalSmoke {
+    $wisdev = Join-Path $RepoRoot "scripts\wisdev.ps1"
+    & $wisdev check --json
+    & $wisdev --offline --max-iterations 1 "map open source research agent evidence"
     Push-Location (Join-Path $RepoRoot "orchestrator")
     try {
-        go run ./cmd/wisdev search --offline --max-iterations 1 "map open source research agent evidence"
+        go test ./internal/wisdev -run TestMCPServerStdio -count=1
     } finally {
         Pop-Location
     }

@@ -196,7 +196,7 @@ func (si *SearchIntelligence) getProviderAverageGains(ctx context.Context, domai
 		if err := rows.Scan(&provider, &query, &informationGain); err != nil {
 			return nil, err
 		}
-		if inferDomainFromQuery(query) != trimmedDomain {
+		if !DomainsMatchForRouting(inferDomainFromQuery(query), trimmedDomain) {
 			continue
 		}
 		totalGainByProvider[provider] += informationGain

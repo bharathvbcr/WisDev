@@ -7,13 +7,24 @@ Record at **1080p**, show your face OR terminal + browser (either works). Upload
 ## Pre-flight (before recording)
 
 ```powershell
-cd C:\Users\bhara\Downloads\Code\WisDev\orchestrator
+cd C:\Users\bhara\Downloads\Code\scholarlm
 
-# Terminal 1 — local YOLO smoke (no server needed)
-go run ./cmd/wisdev yolo --local --provider openalex,arxiv "What evidence supports mixture-of-experts for long-context retrieval?"
+# Rehearse the full narrated CLI sequence (doctor + verbose YOLO)
+npm run ops:hackathon:demo-cli
+
+# Offline smoke only (no network)
+npm run ops:hackathon:demo-cli -- --offline
+
+# Or from WisDev repo root:
+cd WisDev
+.\wisdev.cmd demo
+.\wisdev.cmd demo --offline
+
+# Optional interactive TUI (autostarts offline demo query — good for B-roll)
+make tui-demo
 
 # Optional Terminal 2 — MCP status (if server running)
-go run ./cmd/server
+.\wisdev.cmd serve
 # curl http://127.0.0.1:8081/wisdev/mcp/status
 ```
 
@@ -47,7 +58,8 @@ Have ready:
 Run:
 
 ```powershell
-go run ./cmd/wisdev yolo --local --provider openalex,arxiv "What evidence supports retrieval-augmented generation for scientific literature?"
+cd WisDev
+.\wisdev.cmd demo
 ```
 
 **Narrate while it runs:**
@@ -63,9 +75,9 @@ go run ./cmd/wisdev yolo --local --provider openalex,arxiv "What evidence suppor
 
 ## Scene 4 — MCP + ADK (1:45–2:20)
 
-**[Screen: GitHub WisDev repo → `orchestrator/internal/wisdev/mcp_server.go` OR live `/wisdev/mcp/status`]**
+**[Screen: `.\wisdev.cmd mcp` in terminal OR Cursor MCP tools panel OR live `/wisdev/mcp/status`]**
 
-> "WisDev exposes academic tools through the Model Context Protocol — search papers, lookup metadata, retrieve evidence for claims. These are wired into Google ADK as native function tools, so any ADK agent or MCP client like Cursor can call them securely."
+> "WisDev exposes academic tools through the Model Context Protocol — search papers, lookup metadata, retrieve evidence for claims. We ship stdio MCP for Cursor and Claude Code, and wire the same tools into Google ADK as native function tools."
 
 Show tool names:
 - `wisdevSearchPapers`

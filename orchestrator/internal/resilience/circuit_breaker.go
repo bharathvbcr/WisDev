@@ -50,6 +50,19 @@ func NewCircuitBreaker(name string) *CircuitBreaker {
 	}
 }
 
+// NewSearchCircuitBreaker creates a breaker tuned for academic provider fan-out.
+// Research loops issue many independent queries; the breaker should tolerate brief
+// upstream blips and recover quickly between batches.
+func NewSearchCircuitBreaker(name string) *CircuitBreaker {
+	return &CircuitBreaker{
+		name:             name,
+		maxFailures:      5,
+		resetTimeout:     20 * time.Second,
+		successThreshold: 1,
+		state:            StateClosed,
+	}
+}
+
 // State returns the current state of the circuit breaker.
 func (cb *CircuitBreaker) State() CircuitBreakerState {
 	cb.mu.RLock()
@@ -57,33 +70,49 @@ func (cb *CircuitBreaker) State() CircuitBreakerState {
 	return cb.state
 }
 
+func (cb *CircuitBreaker) maybeTransitionHalfOpenLocked() {
+	if cb.state != StateOpen || time.Since(cb.lastFailureTime) <= cb.resetTimeout {
+		return
+	}
+	cb.state = StateHalfOpen
+	cb.successCount = 0
+	cb.failureCount = 0
+	slog.Info("circuit_breaker_half_open",
+		"service", "go_orchestrator",
+		"runtime", "go",
+		"component", "resilience",
+		"operation", "circuit_breaker_transition",
+		"stage", "half_open",
+		"breaker", cb.name,
+		"state", cb.state,
+		"result", "probe_allowed",
+	)
+}
+
+// Admit reports whether a request may proceed. It also transitions open breakers
+// to half-open once the reset timeout elapses so recovery is not blocked by
+// callers that only inspect State().
+func (cb *CircuitBreaker) Admit() bool {
+	if cb == nil {
+		return true
+	}
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.maybeTransitionHalfOpenLocked()
+	return cb.state != StateOpen
+}
+
 // Call executes a function with circuit breaker protection.
 // If the circuit is open, fails fast without attempting the call.
 func (cb *CircuitBreaker) Call(ctx context.Context, fn func(context.Context) error) error {
 	cb.mu.Lock()
-
-	// Check if we need to transition to half-open
-	if cb.state == StateOpen && time.Since(cb.lastFailureTime) > cb.resetTimeout {
-		cb.state = StateHalfOpen
-		cb.successCount = 0
-		cb.failureCount = 0
-		slog.Info("circuit_breaker_half_open",
-			"service", "go_orchestrator",
-			"runtime", "go",
-			"component", "resilience",
-			"operation", "circuit_breaker_transition",
-			"stage", "half_open",
-			"breaker", cb.name,
-			"state", cb.state,
-			"result", "probe_allowed",
-		)
-	}
+	cb.maybeTransitionHalfOpenLocked()
 
 	// Reject if open
 	if cb.state == StateOpen {
 		err := fmt.Errorf("circuit breaker %s is open", cb.name)
 		telemetry.RecordCircuitBreakerTrip(cb.name, string(cb.state), err)
-		slog.Error("circuit_breaker_open_reject",
+		slog.Warn("circuit_breaker_open_reject",
 			"service", "go_orchestrator",
 			"runtime", "go",
 			"component", "resilience",
@@ -120,16 +149,37 @@ func (cb *CircuitBreaker) Call(ctx context.Context, fn func(context.Context) err
 
 // recordFailure increments failure counter and may transition to open state.
 func (cb *CircuitBreaker) recordFailure(err error) {
+	if !ShouldTripCircuitBreaker(err) {
+		return
+	}
+
 	cb.failureCount++
 	cb.lastFailureTime = time.Now()
 	cb.lastFailureError = err
 	cb.successCount = 0 // Reset success counter
 
+	if cb.state == StateHalfOpen {
+		cb.state = StateOpen
+		telemetry.RecordCircuitBreakerTrip(cb.name, string(cb.state), err)
+		slog.Warn("circuit_breaker_reopened_from_half_open",
+			"service", "go_orchestrator",
+			"runtime", "go",
+			"component", "resilience",
+			"operation", "circuit_breaker_transition",
+			"stage", "open",
+			"breaker", cb.name,
+			"state", cb.state,
+			"result", "probe_failed",
+			"error", err,
+		)
+		return
+	}
+
 	// Transition to open if threshold reached
 	if cb.failureCount >= cb.maxFailures && cb.state != StateOpen {
 		cb.state = StateOpen
 		telemetry.RecordCircuitBreakerTrip(cb.name, string(cb.state), err)
-		slog.Error("circuit_breaker_tripped",
+		slog.Warn("circuit_breaker_tripped",
 			"service", "go_orchestrator",
 			"runtime", "go",
 			"component", "resilience",
@@ -153,6 +203,21 @@ func (cb *CircuitBreaker) recordSuccess() {
 	// Transition to closed if threshold reached (only in half-open)
 	if cb.state == StateHalfOpen && cb.successCount >= cb.successThreshold {
 		cb.state = StateClosed
+	}
+}
+
+// ConfigureTesting adjusts breaker thresholds. Intended for tests only.
+func (cb *CircuitBreaker) ConfigureTesting(maxFailures int, resetTimeout time.Duration) {
+	if cb == nil {
+		return
+	}
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if maxFailures > 0 {
+		cb.maxFailures = maxFailures
+	}
+	if resetTimeout > 0 {
+		cb.resetTimeout = resetTimeout
 	}
 }
 

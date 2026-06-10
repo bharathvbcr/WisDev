@@ -338,18 +338,14 @@ func TestRecoverableStructuredRequestClassification(t *testing.T) {
 }
 
 func TestStructuredOutputSkipsRecoverableDirectCallDuringCooldown(t *testing.T) {
-	vertexProviderRateLimitMu.Lock()
-	previousCooldown := vertexProviderRateLimitUntil
-	vertexProviderRateLimitUntil = time.Now().Add(time.Minute)
-	vertexProviderRateLimitMu.Unlock()
+	resetVertexStructuredRateLimitForTest()
+	t.Cleanup(resetVertexStructuredRateLimitForTest)
+	recordVertexProviderRateLimit("gemini-2.5-flash", time.Now())
 	recoverableStructuredPaceMu.Lock()
 	previousLastStart := recoverableStructuredLastStart
 	recoverableStructuredLastStart = time.Time{}
 	recoverableStructuredPaceMu.Unlock()
 	defer func() {
-		vertexProviderRateLimitMu.Lock()
-		vertexProviderRateLimitUntil = previousCooldown
-		vertexProviderRateLimitMu.Unlock()
 		recoverableStructuredPaceMu.Lock()
 		recoverableStructuredLastStart = previousLastStart
 		recoverableStructuredPaceMu.Unlock()

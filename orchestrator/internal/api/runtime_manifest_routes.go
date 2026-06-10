@@ -2,12 +2,25 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/llm"
 	"github.com/wisdev/wisdev-agent-os/orchestrator/internal/stackconfig"
 )
+
+func stringValue(raw any) string {
+	if raw == nil {
+		return ""
+	}
+	switch typed := raw.(type) {
+	case string:
+		return typed
+	default:
+		return fmt.Sprint(typed)
+	}
+}
 
 type dependencyStatus struct {
 	Name      string `json:"name"`
@@ -66,26 +79,45 @@ func RegisterRuntimeManifestRoutes(mux *http.ServeMux, llmClient *llm.Client) {
 			return
 		}
 
-		dependency := dependencyStatus{
+		dependencies := []dependencyStatus{{
 			Name:      "python_sidecar",
 			Target:    stackconfig.ResolveGRPCTarget("python_sidecar"),
 			Transport: "grpc-protobuf",
 			Status:    "disabled",
-		}
+		}}
+		llmDirect := map[string]any{"configured": false}
 		if llmClient != nil {
 			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 			defer cancel()
-			dependency.Status = "ok"
+			dependencies[0].Status = "ok"
 			if _, err := llmClient.Health(ctx); err != nil {
-				dependency.Status = "unavailable"
+				dependencies[0].Status = "unavailable"
+			}
+			llmDirect = llmClient.DirectProviderStatus(ctx)
+			if configured, _ := llmDirect["configured"].(bool); configured {
+				localStatus := "ok"
+				if healthy, _ := llmDirect["healthy"].(bool); !healthy {
+					localStatus = "unavailable"
+				} else if modelAvailable, ok := llmDirect["modelAvailable"].(bool); ok && !modelAvailable {
+					localStatus = "degraded"
+				}
+				dependencies = append(dependencies, dependencyStatus{
+					Name:      "local_llm",
+					Target:    stringValue(llmDirect["credentialSource"]),
+					Transport: stringValue(llmDirect["transport"]),
+					Status:    localStatus,
+				})
 			}
 		}
 
 		status := "ok"
 		code := http.StatusOK
-		if dependency.Status == "unavailable" {
-			status = "degraded"
-			code = http.StatusServiceUnavailable
+		for _, dependency := range dependencies {
+			if dependency.Status == "unavailable" {
+				status = "degraded"
+				code = http.StatusServiceUnavailable
+				break
+			}
 		}
 
 		writeJSONResponse(w, code, map[string]any{
@@ -93,7 +125,8 @@ func RegisterRuntimeManifestRoutes(mux *http.ServeMux, llmClient *llm.Client) {
 			"status":          status,
 			"manifestVersion": stackconfig.Manifest.Version,
 			"environment":     stackconfig.CurrentOverlayName(),
-			"dependencies":    []dependencyStatus{dependency},
+			"dependencies":    dependencies,
+			"llmDirect":       llmDirect,
 			"transport":       "http-json",
 			"latencyMs":       0,
 			"lastCheckedAt":   time.Now().UnixMilli(),

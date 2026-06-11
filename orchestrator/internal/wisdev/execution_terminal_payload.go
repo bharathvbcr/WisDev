@@ -198,9 +198,14 @@ func terminalSourceArtifactMaps(category string, sources []Source) []map[string]
 			relevanceReason := terminalSourceRelevanceReason(source, category)
 			item["relevanceReason"] = relevanceReason
 			item["whyItMatters"] = relevanceReason
-			item["relevanceChecked"] = true
+			// Only claim a relevance check when a real score exists; a
+			// grouping reason alone previously rendered as a "0%" badge
+			// with a "Not checked" tooltip in the result cards.
 			if relevanceScore := terminalSourceRelevanceScore(source); relevanceScore > 0 {
 				item["relevanceScore"] = relevanceScore
+				item["relevanceChecked"] = true
+			} else {
+				item["relevanceChecked"] = false
 			}
 		}
 		items = append(items, item)

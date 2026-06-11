@@ -3,10 +3,110 @@ package wisdev
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/rag"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
+
+// citationAbbreviations are lowercased word forms that precede a period without
+// ending a sentence, so the prose sentence splitter must not break on them.
+var citationAbbreviations = map[string]struct{}{
+	"al": {}, "et": {}, "eg": {}, "ie": {}, "vs": {}, "cf": {}, "fig": {}, "figs": {},
+	"no": {}, "nos": {}, "dr": {}, "prof": {}, "ed": {}, "eds": {}, "pp": {}, "vol": {},
+	"est": {}, "approx": {}, "ca": {}, "inc": {}, "ltd": {}, "jr": {}, "sr": {}, "st": {},
+}
+
+// trailingAlphaWord returns the run of letters immediately preceding index i.
+func trailingAlphaWord(runes []rune, i int) string {
+	start := i
+	for start > 0 && unicode.IsLetter(runes[start-1]) {
+		start--
+	}
+	return string(runes[start:i])
+}
+
+// isProseSentenceBoundary reports whether the terminator rune at index i ends a
+// sentence rather than sitting inside a citation, abbreviation, initial, or
+// decimal number. depth is the current parenthesis/bracket nesting.
+func isProseSentenceBoundary(runes []rune, i, depth int) bool {
+	if depth > 0 {
+		return false
+	}
+	j := i + 1
+	for j < len(runes) && (runes[j] == ' ' || runes[j] == '\t') {
+		j++
+	}
+	if j >= len(runes) {
+		return true
+	}
+	if runes[i] == '.' {
+		if i > 0 && unicode.IsDigit(runes[i-1]) && unicode.IsDigit(runes[j]) {
+			return false // decimal like 5.2
+		}
+		word := trailingAlphaWord(runes, i)
+		if _, ok := citationAbbreviations[strings.ToLower(word)]; ok {
+			return false
+		}
+		if r := []rune(word); len(r) == 1 && unicode.IsUpper(r[0]) {
+			return false // author initial like "F."
+		}
+	}
+	next := runes[j]
+	return unicode.IsUpper(next) || unicode.IsDigit(next) ||
+		next == '"' || next == '\'' || next == '(' || next == '[' || next == '#' || next == '-'
+}
+
+// citationSafeProseSentences splits prose into sentences without breaking inside
+// parenthetical citations ("(Author, 1999; 12 citations)"), author initials
+// ("Philip F."), "et al.", common abbreviations, or decimals — the period sites
+// that previously mangled inline citations into dangling fragments. A limit <= 0
+// means no cap (the enrichment path must not drop trailing sentences).
+func citationSafeProseSentences(text string, limit int) []string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	runes := []rune(text)
+	var sentences []string
+	var current strings.Builder
+	depth := 0
+	flush := func() {
+		s := strings.TrimSpace(current.String())
+		current.Reset()
+		if s == "" {
+			return
+		}
+		if len(s) < 24 && len(sentences) > 0 {
+			// Re-attach a too-short tail to the previous sentence rather than emit
+			// it as a standalone fragment that would get its own citation.
+			sentences[len(sentences)-1] = strings.TrimSpace(sentences[len(sentences)-1] + " " + s)
+			return
+		}
+		sentences = append(sentences, s)
+	}
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		current.WriteRune(r)
+		switch r {
+		case '(', '[':
+			depth++
+		case ')', ']':
+			if depth > 0 {
+				depth--
+			}
+		case '.', '!', '?':
+			if isProseSentenceBoundary(runes, i, depth) {
+				flush()
+			}
+		}
+	}
+	flush()
+	if limit > 0 && len(sentences) > limit {
+		sentences = sentences[:limit]
+	}
+	return sentences
+}
 
 const sentenceCitationMinParagraphLen = 280
 
@@ -177,13 +277,28 @@ func enrichParagraphWithCitations(paragraph string, papers []search.Paper, evide
 	if answerNumberedCitationRe.MatchString(paragraph) && answerYearCitationRe.MatchString(paragraph) {
 		return paragraph
 	}
+	// Trust the synthesizer's own grounding: when the model already attached an
+	// author-year citation (rendered from its per-sentence evidenceIds), the
+	// paragraph IS source-linked. Re-deriving citations by lexical token overlap
+	// here previously stamped a false "requires verification" warning over
+	// semantically (not lexically) grounded prose and piled on duplicate
+	// citations. Leave the model's grounding intact instead.
+	if answerYearCitationRe.MatchString(paragraph) {
+		return paragraph
+	}
 	if len(paragraph) >= sentenceCitationMinParagraphLen {
-		sentences := splitEvidenceSentences(paragraph, 6)
+		sentences := citationSafeProseSentences(paragraph, 0)
 		if len(sentences) >= 2 {
 			parts := make([]string, 0, len(sentences))
 			for _, sentence := range sentences {
 				sentence = strings.TrimSpace(sentence)
 				if sentence == "" {
+					continue
+				}
+				// Leave sentences that already carry a citation or marker intact so
+				// enrichment never stacks a second citation onto them.
+				if answerNumberedCitationRe.MatchString(sentence) || answerYearCitationRe.MatchString(sentence) {
+					parts = append(parts, sentence)
 					continue
 				}
 				if !strings.HasSuffix(sentence, ".") && !strings.HasSuffix(sentence, "!") && !strings.HasSuffix(sentence, "?") {
@@ -318,7 +433,7 @@ func enrichProseAnswerWithInlineCitationsForQuery(query string, text string, pap
 	if !strings.Contains(result, "> Inline citations") {
 		result = "> Inline citations use numbered references [n] with author-year metadata; bibliography at end.\n\n" + result
 	}
-	return polishSynthesisText(result)
+	return polishSynthesisText(dedupeCitationArtifacts(result))
 }
 
 func isNumberedResearchListItem(line string) bool {

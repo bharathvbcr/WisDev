@@ -52,17 +52,36 @@ func NewAgentSwarmCoordinator(
 	searchReg *search.ProviderRegistry,
 	rag *rag.Engine,
 ) *AgentSwarmCoordinator {
+	unleashed := unleashedBudgetMode()
 	if cfg.HypothesisCount == 0 {
 		cfg.HypothesisCount = 7
+		if unleashed {
+			cfg.HypothesisCount = 12
+		}
 	}
 	if cfg.ParallelismCount == 0 {
 		cfg.ParallelismCount = 3
+		if unleashed {
+			cfg.ParallelismCount = 5
+		}
 	}
 	if cfg.MaxIterations == 0 {
 		cfg.MaxIterations = 5
+		if unleashed {
+			cfg.MaxIterations = 14
+		}
+	}
+	if cfg.TokenBudget == 0 {
+		cfg.TokenBudget = 50000
+		if unleashed {
+			cfg.TokenBudget = 150000
+		}
 	}
 	if cfg.TimeoutPerAgent == 0 {
 		cfg.TimeoutPerAgent = 30 * time.Second
+		if unleashed {
+			cfg.TimeoutPerAgent = 90 * time.Second
+		}
 	}
 
 	return &AgentSwarmCoordinator{

@@ -43,7 +43,7 @@ type GuardrailDecision struct {
 }
 
 func DefaultPolicyConfig() PolicyConfig {
-	return PolicyConfig{
+	cfg := PolicyConfig{
 		PolicyVersion:                   "go-policy-v1",
 		AllowLowRiskAutoRun:             true,
 		RequireConfirmationForMedium:    true,
@@ -55,6 +55,14 @@ func DefaultPolicyConfig() PolicyConfig {
 		MedicalProviderPriorityOverride: []string{"pubmed", "clinicaltrials", "semantic-scholar", "openalex", "crossref", "arxiv"},
 		CSProviderPriorityOverride:      []string{"semantic-scholar", "arxiv", "openalex", "crossref", "pubmed", "clinicaltrials"},
 	}
+	if unleashedPolicyMode() {
+		// Credit-rich "unleashed" runs: lift the per-session ceilings so a long,
+		// elaborate research session is not throttled by the conservative defaults.
+		cfg.MaxToolCallsPerSession = 96
+		cfg.MaxScriptRunsPerSession = 8
+		cfg.MaxCostPerSessionCents = 500
+	}
+	return cfg
 }
 
 func NewBudgetState(cfg PolicyConfig) BudgetState {

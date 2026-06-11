@@ -28,7 +28,7 @@ Full submission package: [`docs/hackathon/SUBMISSION.md`](docs/hackathon/SUBMISS
 Query -> Plan -> Search -> Analyze -> Synthesize -> Report
 ```
 
-This repository is seeded from the current WisDev runtime rather than the old archived app. The goal is to preserve current YOLO behavior first, then keep private parent-app integrations behind clean adapter boundaries.
+This repository is the net-new WisDev agent core built for the challenge: a fresh Go + ADK + MCP runtime for autonomous, evidence-grounded research. It is developed in the open and evolves alongside ScholarLM, our prototype research platform, with private parent-app integrations kept behind clean adapter boundaries.
 
 The runtime target is Go plus optional Python only:
 

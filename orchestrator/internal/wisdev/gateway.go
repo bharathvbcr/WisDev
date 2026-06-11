@@ -544,14 +544,16 @@ func NewAgentGateway(db DBProvider, rdb redis.UniversalClient, journal *RuntimeJ
 	adkRuntime := LoadADKRuntime(registry)
 	if adkRuntime != nil && adkRuntime.Config.Policy != nil {
 		p := adkRuntime.Config.Policy
+		// In unleashed mode these YAML overrides may only RAISE the limits, so a
+		// low wisdev-adk.yaml cap cannot silently undo the unleashed policy.
 		if p.MaxToolCallsPerSession != nil {
-			policyCfg.MaxToolCallsPerSession = *p.MaxToolCallsPerSession
+			policyCfg.MaxToolCallsPerSession = reconcileUnleashedPolicyOverride(policyCfg.MaxToolCallsPerSession, *p.MaxToolCallsPerSession)
 		}
 		if p.MaxScriptRunsPerSession != nil {
-			policyCfg.MaxScriptRunsPerSession = *p.MaxScriptRunsPerSession
+			policyCfg.MaxScriptRunsPerSession = reconcileUnleashedPolicyOverride(policyCfg.MaxScriptRunsPerSession, *p.MaxScriptRunsPerSession)
 		}
 		if p.MaxCostPerSessionCents != nil {
-			policyCfg.MaxCostPerSessionCents = *p.MaxCostPerSessionCents
+			policyCfg.MaxCostPerSessionCents = reconcileUnleashedPolicyOverride(policyCfg.MaxCostPerSessionCents, *p.MaxCostPerSessionCents)
 		}
 		slog.Info("wisdev gateway: applied policy overrides from wisdev-adk.yaml",
 			"maxToolCalls", policyCfg.MaxToolCallsPerSession,
@@ -821,20 +823,10 @@ func (gw *AgentGateway) programmaticLoopExecutorDirect() func(context.Context, s
 }
 
 func sourcesFromAnyList(raw any) []Source {
-	items := firstArtifactMaps(raw)
-	out := make([]Source, 0, len(items))
-	for _, item := range items {
-		out = append(out, Source{
-			ID:      AsOptionalString(firstNonEmptyValue(item["id"], item["paperId"])),
-			Title:   AsOptionalString(item["title"]),
-			Summary: AsOptionalString(firstNonEmptyValue(item["summary"], item["abstract"])),
-			DOI:     AsOptionalString(item["doi"]),
-			ArxivID: AsOptionalString(firstNonEmptyValue(item["arxivId"], item["arxiv_id"])),
-			Source:  AsOptionalString(item["source"]),
-			Year:    toInt(item["year"]),
-		})
-	}
-	return out
+	// Full-fidelity conversion: dropping fields here (authors, link, score,
+	// citation counts) previously stripped author names and relevance scores
+	// from every step that round-tripped sources through this helper.
+	return ArtifactMapsToSources(firstArtifactMaps(raw))
 }
 
 func (gw *AgentGateway) CreateSession(ctx context.Context, userID string, query string) (*AgentSession, error) {

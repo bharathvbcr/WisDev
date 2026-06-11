@@ -9,10 +9,22 @@ import (
 )
 
 var (
-	answerNumberedCitationRe = regexp.MustCompile(`\[\d+\]`)
-	answerYearCitationRe     = regexp.MustCompile(`\([A-Za-z][^)]*,\s*(?:19|20)\d{2}`)
-	whitespaceBeforePeriodRe = regexp.MustCompile(`\s+\.`)
+	answerNumberedCitationRe   = regexp.MustCompile(`\[\d+\]`)
+	answerYearCitationRe       = regexp.MustCompile(`\([A-Za-z][^)]*,\s*(?:19|20)\d{2}`)
+	whitespaceBeforePeriodRe   = regexp.MustCompile(`\s+\.`)
+	repeatedGroundingWarningRe = regexp.MustCompile(`(?:\[requires verification against retrieved sources\]\s*){2,}`)
 )
+
+// dedupeCitationArtifacts collapses back-to-back grounding-warning tags that can
+// accumulate when enrichment runs over prose that already carries citations. The
+// citation-safe sentence splitter and the already-cited skip prevent the dangling
+// "et al. … NNN citations)" fragments at the source; this is a defensive final pass.
+func dedupeCitationArtifacts(text string) string {
+	if text == "" {
+		return text
+	}
+	return repeatedGroundingWarningRe.ReplaceAllString(text, groundingWarningTag+" ")
+}
 
 const (
 	minCitationOverlapScore = 2

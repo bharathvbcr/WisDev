@@ -304,7 +304,7 @@ func (v *VertexClient) GenerateWithFileSearch(ctx context.Context, req FileSearc
 	}
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
-		maxTokens = 1536
+		maxTokens = defaultOutputTokens(1536)
 	}
 	fileSearch := &genai.FileSearch{FileSearchStoreNames: storeNames}
 	if req.TopK > 0 {
@@ -952,7 +952,7 @@ func structuredThinkingConfigForModel(modelID string, thinkingBudget *int32, max
 }
 
 func shouldMinimizeStructuredThinking(modelID string, thinkingBudget *int32, maxOutputTokens int32) bool {
-	if maxOutputTokens <= 0 || maxOutputTokens > structuredThinkingDisableMaxOutputTokens {
+	if maxOutputTokens <= 0 || maxOutputTokens > structuredThinkingDisableCeiling(structuredThinkingDisableMaxOutputTokens) {
 		return false
 	}
 	if thinkingBudget != nil && *thinkingBudget != -1 {
@@ -1132,6 +1132,7 @@ func (v *VertexClient) generateStructuredWithTokens(ctx context.Context, modelID
 	if retryProfile == "" {
 		retryProfile = string(RetryProfileStandard)
 	}
+	maxTokens = liftStructuredOutputTokens(maxTokens)
 	var schemaValue any
 	if jsonSchemaStr != "" {
 		if parseErr := json.Unmarshal([]byte(jsonSchemaStr), &schemaValue); parseErr != nil {

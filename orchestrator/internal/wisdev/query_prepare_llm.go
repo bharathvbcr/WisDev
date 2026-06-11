@@ -390,7 +390,7 @@ Tasks:
 
 Query: %s`, query))
 
-	reqCtx, cancel := context.WithTimeout(ctx, researchQueryPrepTimeout)
+	reqCtx, cancel := context.WithTimeout(ctx, unleashedTimeout(researchQueryPrepTimeout))
 	defer cancel()
 
 	resp, err := c.llmClient.StructuredOutput(reqCtx, applyBrainStructuredPolicy(&llmv1.StructuredRequest{
@@ -454,7 +454,7 @@ Constraints:
 
 Query: %s`, query, maxVariations, opts.IncludeMeSH, opts.IncludeAbbreviations, opts.IncludeTemporal, targetAPIs, query))
 
-	reqCtx, cancel := context.WithTimeout(ctx, queryVariationGenerationTimeout)
+	reqCtx, cancel := context.WithTimeout(ctx, unleashedTimeout(queryVariationGenerationTimeout))
 	defer cancel()
 
 	resp, err := c.llmClient.StructuredOutput(reqCtx, applyBrainStructuredPolicy(&llmv1.StructuredRequest{

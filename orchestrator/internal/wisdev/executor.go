@@ -1438,6 +1438,21 @@ func (e *PlanExecutor) Execute(ctx context.Context, session *AgentSession, out c
 			step := result.Step
 			ownership := resultExecutionOwnership(result)
 			for idx, paper := range result.Sources {
+				// Full bibliographic payload: result cards rendered live from
+				// paper_found events must match the terminal payload, or
+				// streamed cards show "Author not available" until completion.
+				payload := sourceToArtifactMap(paper)
+				// Keep streamed events lean: full text and structure maps can
+				// be megabytes per paper and are never read by result cards.
+				delete(payload, "fullText")
+				delete(payload, "structureMap")
+				payload["paperId"] = paper.ID
+				payload["paperIndex"] = idx + 1
+				payload["laneId"] = result.LaneID
+				payload["attempt"] = result.Attempt
+				payload["degraded"] = result.Degraded
+				payload["delegated"] = ownership.ResultOrigin != executionOrigin
+				payload["fusionIntent"] = ownership.ResultFusionIntent
 				out <- enrichStepExecutionEvent(PlanExecutionEvent{
 					Type:      EventPaperFound,
 					TraceID:   NewTraceID(),
@@ -1445,20 +1460,7 @@ func (e *PlanExecutor) Execute(ctx context.Context, session *AgentSession, out c
 					PlanID:    session.Plan.PlanID,
 					StepID:    step.ID,
 					Message:   "paper found",
-					Payload: map[string]any{
-						"paperId":      paper.ID,
-						"paperIndex":   idx + 1,
-						"title":        paper.Title,
-						"source":       paper.Source,
-						"doi":          paper.DOI,
-						"link":         paper.Link,
-						"score":        paper.Score,
-						"laneId":       result.LaneID,
-						"attempt":      result.Attempt,
-						"degraded":     result.Degraded,
-						"delegated":    ownership.ResultOrigin != executionOrigin,
-						"fusionIntent": ownership.ResultFusionIntent,
-					},
+					Payload:   payload,
 					CreatedAt: NowMillis(),
 				}, ownership, result.Confidence)
 			}

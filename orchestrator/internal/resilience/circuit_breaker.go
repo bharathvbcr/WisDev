@@ -50,6 +50,21 @@ func NewCircuitBreaker(name string) *CircuitBreaker {
 	}
 }
 
+// NewCircuitBreakerWithConfig creates a breaker with an explicit failure
+// tolerance and reset window. Non-positive values fall back to the defaults.
+// Used to tune resilience for long, high-volume runs without changing the
+// default behavior of NewCircuitBreaker.
+func NewCircuitBreakerWithConfig(name string, maxFailures int, resetTimeout time.Duration) *CircuitBreaker {
+	cb := NewCircuitBreaker(name)
+	if maxFailures > 0 {
+		cb.maxFailures = maxFailures
+	}
+	if resetTimeout > 0 {
+		cb.resetTimeout = resetTimeout
+	}
+	return cb
+}
+
 // NewSearchCircuitBreaker creates a breaker tuned for academic provider fan-out.
 // Research loops issue many independent queries; the breaker should tolerate brief
 // upstream blips and recover quickly between batches.

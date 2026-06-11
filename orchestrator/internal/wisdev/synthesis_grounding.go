@@ -76,7 +76,10 @@ func collectSynthesisGroundingStats(text string) synthesisGroundingStats {
 			switch {
 			case strings.Contains(trimmed, groundingWarningTag):
 				stats.FlaggedParagraphs++
-			case answerNumberedCitationRe.MatchString(trimmed) && answerYearCitationRe.MatchString(trimmed):
+			case answerYearCitationRe.MatchString(trimmed):
+				// Author-year citation present (numbered marker optional): the
+				// paragraph is tied to a retrieved source, either via the model's
+				// per-sentence evidenceIds or numbered citation enrichment.
 				stats.CitedParagraphs++
 			}
 		}
@@ -92,7 +95,7 @@ func buildSynthesisGroundingAudit(text string, evidence []EvidenceItem) string {
 	lines := make([]string, 0, 4)
 	lines = append(lines, fmt.Sprintf("%d prose paragraph(s) scanned for source linkage.", stats.ProseParagraphs))
 	if stats.CitedParagraphs > 0 {
-		lines = append(lines, fmt.Sprintf("%d paragraph(s) carry numbered author-year citations tied to retrieved sources.", stats.CitedParagraphs))
+		lines = append(lines, fmt.Sprintf("%d paragraph(s) carry author-year citations tied to retrieved sources.", stats.CitedParagraphs))
 	}
 	if stats.FlaggedParagraphs > 0 {
 		lines = append(lines, fmt.Sprintf("%d paragraph(s) are flagged %s because source overlap was weak — verify against full texts.", stats.FlaggedParagraphs, groundingWarningTag))

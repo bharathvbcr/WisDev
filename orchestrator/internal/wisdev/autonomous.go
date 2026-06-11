@@ -641,7 +641,7 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 				executedQueries = appendUniqueLoopQuery(executedQueries, batchResult.Query)
 				beforeCount := len(papers)
 				var acceptedPapers []search.Paper
-				papers, acceptedPapers = admitSearchPapersForQuery(papers, req.Query, batchResult.Result.Papers, maxUniquePapers)
+				papers, acceptedPapers = admitSearchPapersForRetrievalQuery(papers, req.Query, batchResult.Query, batchResult.Result.Papers, maxUniquePapers)
 				recordLoopQueryCoverage(queryCoverage, batchResult.Query, acceptedPapers)
 				newCount += len(papers) - beforeCount
 				slog.Info("autonomous loop search result admitted",
@@ -1149,7 +1149,7 @@ func (l *AutonomousLoop) Run(ctx context.Context, req LoopRequest, onEvent ...fu
 			)
 			beforeCount := len(papers)
 			var acceptedPapers []search.Paper
-			papers, acceptedPapers = admitSearchPapersForQuery(papers, req.Query, batchResult.Result.Papers, maxUniquePapers)
+			papers, acceptedPapers = admitSearchPapersForRetrievalQuery(papers, req.Query, batchResult.Query, batchResult.Result.Papers, maxUniquePapers)
 			recordLoopQueryCoverage(queryCoverage, candidate, acceptedPapers)
 			if len(papers) > beforeCount {
 				retrievedMore = true
@@ -1500,13 +1500,19 @@ func enqueueExhaustiveContinuationQueries(req LoopRequest, pending *[]string, se
 }
 
 func resolveLoopSearchTermBudget(maxIterations int, maxSearchTerms int) int {
-	if maxSearchTerms > 0 {
-		return maxSearchTerms
+	base := 0
+	switch {
+	case maxSearchTerms > 0:
+		base = maxSearchTerms
+	case maxIterations > 0:
+		base = maxIterations
+	default:
+		return 0
 	}
-	if maxIterations > 0 {
-		return maxIterations
+	if unleashedBudgetMode() {
+		base = scaleUnleashedBudget(base, 3, 48)
 	}
-	return 0
+	return base
 }
 
 func resolveLoopQueryParallelism(mode string, planes ...ResearchExecutionPlane) int {
@@ -1998,7 +2004,7 @@ func (l *AutonomousLoop) closeRecursiveCoverageGaps(
 		for _, batchResult := range batchResults {
 			result.ExecutedQueries = appendUniqueLoopQuery(result.ExecutedQueries, batchResult.Query)
 			var acceptedPapers []search.Paper
-			result.Papers, acceptedPapers = admitSearchPapersForQuery(result.Papers, req.Query, batchResult.Result.Papers, maxUniquePapers)
+			result.Papers, acceptedPapers = admitSearchPapersForRetrievalQuery(result.Papers, req.Query, batchResult.Query, batchResult.Result.Papers, maxUniquePapers)
 			recordLoopQueryCoverage(result.QueryCoverage, batchResult.Query, acceptedPapers)
 		}
 		analysis, err := l.evaluateSufficiency(ctx, req.Query, result.Papers)
@@ -3676,12 +3682,13 @@ Instructions:
 4. Do not end sentences with ellipsis ("...") or stray "   ." artifacts; write complete thoughts.
 5. Do not invent new evidence beyond the verified evidence list.
 `, query, draft, critique.Reasoning, strings.Join(critique.MissingAspects, "; "), strings.Join(critique.MissingSourceTypes, "; "), strings.Join(critique.Contradictions, "; "), evidenceText)
-	refineCtx, cancel := context.WithTimeout(ctx, optionalCritiqueRefinementLatencyBudget)
+	refineBudget := unleashedTimeout(optionalCritiqueRefinementLatencyBudget)
+	refineCtx, cancel := context.WithTimeout(ctx, refineBudget)
 	defer cancel()
 	req := llm.ApplyGeneratePolicy(&llmv1.GenerateRequest{Prompt: prompt}, llm.ResolveRequestPolicy(llm.RequestPolicyInput{
 		RequestedTier:   "standard",
 		RequestClass:    string(llm.RequestClassStandard),
-		LatencyBudgetMs: int(optionalCritiqueRefinementLatencyBudget / time.Millisecond),
+		LatencyBudgetMs: int(refineBudget / time.Millisecond),
 	}))
 	resp, err := l.llmClient.Generate(refineCtx, req)
 	if err != nil {

@@ -43,6 +43,10 @@ func ResolveSearchBudget(qualityRaw string, mode WisDevMode) SearchBudget {
 		budget.MaxUniquePapers = 80
 	}
 
+	if unleashedBudgetMode() {
+		applyUnleashedSearchBudget(&budget)
+	}
+
 	return budget
 }
 
@@ -96,8 +100,13 @@ func BuildResearchExecutionProfile(
 	if maxIterations < 1 {
 		maxIterations = 1
 	}
-	if maxIterations > 12 {
-		maxIterations = 12
+	iterationCeiling := 12
+	unleashed := unleashedBudgetMode()
+	if unleashed {
+		iterationCeiling = 24
+	}
+	if maxIterations > iterationCeiling {
+		maxIterations = iterationCeiling
 	}
 
 	allocatedTokens := defaultAllocatedTokens(qualityMode, mode)
@@ -118,6 +127,12 @@ func BuildResearchExecutionProfile(
 		maxParallelism = 6
 	}
 
+	timeoutPerAgent := 30 * time.Second
+	if unleashed {
+		maxParallelism += 2
+		timeoutPerAgent = 90 * time.Second
+	}
+
 	return ResearchExecutionProfile{
 		Mode:                mode,
 		ServiceTier:         serviceTier,
@@ -130,13 +145,23 @@ func BuildResearchExecutionProfile(
 		MaxIterations:       maxIterations,
 		AllocatedTokens:     allocatedTokens,
 		MaxParallelism:      maxParallelism,
-		TimeoutPerAgent:     30 * time.Second,
+		TimeoutPerAgent:     timeoutPerAgent,
 		ComplexityScore:     complexity.Score,
 		EstimatedTokens:     complexity.EstimatedTokens,
 	}
 }
 
 func defaultHypothesisCount(qualityMode string, mode WisDevMode) int {
+	if unleashedBudgetMode() {
+		switch qualityMode {
+		case "fast":
+			return 8
+		case "quality":
+			return 12
+		default:
+			return 10
+		}
+	}
 	switch qualityMode {
 	case "fast":
 		return 4
@@ -148,6 +173,16 @@ func defaultHypothesisCount(qualityMode string, mode WisDevMode) int {
 }
 
 func defaultMaxIterations(qualityMode string, mode WisDevMode) int {
+	if unleashedBudgetMode() {
+		switch qualityMode {
+		case "fast":
+			return 6
+		case "quality":
+			return 20
+		default:
+			return 14
+		}
+	}
 	switch qualityMode {
 	case "fast":
 		return 2
@@ -159,6 +194,16 @@ func defaultMaxIterations(qualityMode string, mode WisDevMode) int {
 }
 
 func defaultAllocatedTokens(qualityMode string, mode WisDevMode) int {
+	if unleashedBudgetMode() {
+		switch qualityMode {
+		case "fast":
+			return 48000
+		case "quality":
+			return 200000
+		default:
+			return 120000
+		}
+	}
 	base := 40000
 	switch qualityMode {
 	case "fast":

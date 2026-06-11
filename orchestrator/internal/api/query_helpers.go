@@ -86,8 +86,12 @@ func BuildQueryIntroductionMarkdown(query string, papers []queryIntroductionPape
 	}
 
 	meta := BuildQueryIntroductionMeta(fieldLabel, papers, providersUsed)
+	themeDetails := collectCoreThemeDetails(papers)
 
-	themeBullets := buildMarkdownBullets(meta.CoreThemes)
+	themeBullets := buildAnnotatedThemeBullets(themeDetails, len(meta.CoreThemes))
+	if len(themeBullets) == 0 {
+		themeBullets = buildMarkdownBullets(meta.CoreThemes)
+	}
 	if len(themeBullets) == 0 {
 		themeBullets = []string{"- The evidence is still too sparse to separate stable sub-areas from one-off studies."}
 	}
@@ -120,10 +124,13 @@ func BuildQueryIntroductionMarkdown(query string, papers []queryIntroductionPape
 			providersSentence(buildProviderSet(papers, providersUsed)),
 		)
 	}
+	if len(themeDetails) > 0 {
+		providerSentence += " Bracketed numbers such as [1] cite the numbered sources grounding this brief."
+	}
 
 	return fmt.Sprintf(
 		"## What this field studies\n\n%s\n\n## Why it matters\n\n%s\n\n## Major themes in the evidence base\n\n%s\n\n## Open gaps and contested claims\n\n%s\n\n## Useful next research directions\n\n%s",
-		meta.Overview,
+		annotateThemeMentions(meta.Overview, themeDetails),
 		deriveWhyItMatters(meta),
 		strings.Join(themeBullets, "\n"),
 		strings.Join(questionBullets, "\n"),
@@ -620,48 +627,114 @@ func fieldSpecificApplicationDirection(field, fieldFamily string) (string, strin
 	}
 }
 
-func collectCoreThemes(papers []queryIntroductionPaper) []string {
-	coreThemes := make([]string, 0, 5)
-	for _, paper := range papers {
+// maxCitationMarkersPerTheme caps how many inline [n] markers a single theme
+// carries so the brief stays readable even when many papers share a theme.
+const maxCitationMarkersPerTheme = 3
+
+type queryIntroductionTheme struct {
+	Label     string
+	PaperRefs []int // 1-based indices into the request papers slice
+}
+
+func collectCoreThemeDetails(papers []queryIntroductionPaper) []queryIntroductionTheme {
+	themes := make([]queryIntroductionTheme, 0, 9)
+	positions := map[string]int{}
+	record := func(label string, ref int) {
+		pos, ok := positions[label]
+		if !ok {
+			positions[label] = len(themes)
+			themes = append(themes, queryIntroductionTheme{Label: label, PaperRefs: []int{ref}})
+			return
+		}
+		refs := themes[pos].PaperRefs
+		if len(refs) > 0 && refs[len(refs)-1] == ref {
+			return
+		}
+		themes[pos].PaperRefs = append(refs, ref)
+	}
+	for i, paper := range papers {
+		ref := i + 1
 		text := strings.ToLower(strings.TrimSpace(paper.Abstract + " " + paper.Summary + " " + paper.Title))
-		switch {
-		case containsAny(text, []string{"rlhf", "rlaif", "reward model", "reward-model", "preference optimization", "direct preference optimization", "dpo", "ppo", "preference dataset", "human preference", "human feedback"}):
-			coreThemes = appendIfMissing(coreThemes, "Preference data, reward modeling, and policy optimization")
+		if containsAny(text, []string{"rlhf", "rlaif", "reward model", "reward-model", "preference optimization", "direct preference optimization", "dpo", "ppo", "preference dataset", "human preference", "human feedback"}) {
+			record("Preference data, reward modeling, and policy optimization", ref)
 		}
-		switch {
-		case containsAny(text, []string{"alignment", "instruction following", "helpful", "harmless", "assistant behavior", "chatbot", "safety", "toxicity"}):
-			coreThemes = appendIfMissing(coreThemes, "Alignment behavior, safety, and instruction following")
+		if containsAny(text, []string{"alignment", "instruction following", "helpful", "harmless", "assistant behavior", "chatbot", "safety", "toxicity"}) {
+			record("Alignment behavior, safety, and instruction following", ref)
 		}
-		switch {
-		case containsAny(text, []string{"reward hacking", "specification gaming", "adversarial", "jailbreak", "multi-turn", "out-of-distribution", "ood"}):
-			coreThemes = appendIfMissing(coreThemes, "Reward hacking, robustness, and multi-turn evaluation")
+		if containsAny(text, []string{"reward hacking", "specification gaming", "adversarial", "jailbreak", "multi-turn", "out-of-distribution", "ood"}) {
+			record("Reward hacking, robustness, and multi-turn evaluation", ref)
 		}
-		switch {
-		case containsAny(text, []string{"benchmark", "evaluation", "metric", "accuracy", "precision", "recall"}):
-			coreThemes = appendIfMissing(coreThemes, "Benchmark design and evaluation quality")
+		if containsAny(text, []string{"benchmark", "evaluation", "metric", "accuracy", "precision", "recall"}) {
+			record("Benchmark design and evaluation quality", ref)
 		}
-		switch {
-		case containsAny(text, []string{"method", "framework", "protocol", "algorithm", "architecture", "pipeline"}):
-			coreThemes = appendIfMissing(coreThemes, "Method variation and protocol design")
+		if containsAny(text, []string{"method", "framework", "protocol", "algorithm", "architecture", "pipeline"}) {
+			record("Method variation and protocol design", ref)
 		}
-		switch {
-		case containsAny(text, []string{"robust", "replication", "reproducibility", "generaliz", "transfer", "ablation"}):
-			coreThemes = appendIfMissing(coreThemes, "Robustness, replication, and transfer")
+		if containsAny(text, []string{"robust", "replication", "reproducibility", "generaliz", "transfer", "ablation"}) {
+			record("Robustness, replication, and transfer", ref)
 		}
-		switch {
-		case containsAny(text, []string{"dataset", "cohort", "population", "setting", "domain"}):
-			coreThemes = appendIfMissing(coreThemes, "Dataset and setting effects")
+		if containsAny(text, []string{"dataset", "cohort", "population", "setting", "domain"}) {
+			record("Dataset and setting effects", ref)
 		}
-		switch {
-		case containsAny(text, []string{"application", "deployment", "clinical", "practice", "intervention", "policy", "translation"}):
-			coreThemes = appendIfMissing(coreThemes, "Applied and real-world evidence")
+		if containsAny(text, []string{"application", "deployment", "clinical", "practice", "intervention", "policy", "translation"}) {
+			record("Applied and real-world evidence", ref)
 		}
-		switch {
-		case containsAny(text, []string{"survey", "review", "meta-analysis", "systematic"}):
-			coreThemes = appendIfMissing(coreThemes, "Synthesis and review literature")
+		if containsAny(text, []string{"survey", "review", "meta-analysis", "systematic"}) {
+			record("Synthesis and review literature", ref)
 		}
 	}
+	return themes
+}
+
+func collectCoreThemes(papers []queryIntroductionPaper) []string {
+	details := collectCoreThemeDetails(papers)
+	coreThemes := make([]string, 0, len(details))
+	for _, theme := range details {
+		coreThemes = append(coreThemes, theme.Label)
+	}
 	return coreThemes
+}
+
+func formatCitationMarkers(refs []int, maxMarkers int) string {
+	if len(refs) == 0 {
+		return ""
+	}
+	if maxMarkers > 0 && len(refs) > maxMarkers {
+		refs = refs[:maxMarkers]
+	}
+	var builder strings.Builder
+	for _, ref := range refs {
+		fmt.Fprintf(&builder, "[%d]", ref)
+	}
+	return builder.String()
+}
+
+// annotateThemeMentions appends [n] markers after the first mention of each
+// theme label so the overview cites the papers that triggered the theme.
+func annotateThemeMentions(text string, themes []queryIntroductionTheme) string {
+	for _, theme := range themes {
+		markers := formatCitationMarkers(theme.PaperRefs, maxCitationMarkersPerTheme)
+		if markers == "" {
+			continue
+		}
+		text = strings.Replace(text, theme.Label, theme.Label+" "+markers, 1)
+	}
+	return text
+}
+
+func buildAnnotatedThemeBullets(themes []queryIntroductionTheme, maxThemes int) []string {
+	bullets := make([]string, 0, len(themes))
+	for _, theme := range themes {
+		if len(bullets) >= maxThemes {
+			break
+		}
+		bullet := "- " + theme.Label
+		if markers := formatCitationMarkers(theme.PaperRefs, maxCitationMarkersPerTheme); markers != "" {
+			bullet += " " + markers
+		}
+		bullets = append(bullets, bullet)
+	}
+	return bullets
 }
 
 func joinHumanList(values []string) string {

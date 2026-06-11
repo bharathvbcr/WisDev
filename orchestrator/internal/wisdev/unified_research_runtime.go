@@ -2048,11 +2048,18 @@ func mergeLiveReasoningGraph(base *ReasoningGraph, loopGraph *ReasoningGraph, lo
 	if parentForEvidence == "" && loopGraph != nil {
 		parentForEvidence = loopGraph.Root
 	}
+	evidenceLookup := evidenceSourceLookup(loopResult.Papers)
 	for idx, finding := range loopResult.Evidence {
 		nodeID := stableWisDevID("runtime-evidence", finding.SourceID, fmt.Sprintf("%d", idx), finding.Claim)
 		if reasoningNodeExists(merged, nodeID) {
 			continue
 		}
+		metadata := map[string]any{
+			"paperTitle": strings.TrimSpace(finding.PaperTitle),
+			"snippet":    finding.Snippet,
+			"status":     finding.Status,
+		}
+		enrichEvidenceNodeMetadata(metadata, finding, evidenceLookup)
 		merged.Nodes = append(merged.Nodes, ReasoningNode{
 			ID:         nodeID,
 			Text:       finding.Claim,
@@ -2062,10 +2069,7 @@ func mergeLiveReasoningGraph(base *ReasoningGraph, loopGraph *ReasoningGraph, lo
 			ParentID:   parentForEvidence,
 			Confidence: finding.Confidence,
 			SourceIDs:  dedupeTrimmedStrings([]string{finding.SourceID}),
-			Metadata: map[string]any{
-				"snippet": finding.Snippet,
-				"status":  finding.Status,
-			},
+			Metadata:   metadata,
 		})
 		if parentForEvidence != "" {
 			merged.Edges = append(merged.Edges, ReasoningEdge{From: parentForEvidence, To: nodeID, Label: "grounds"})

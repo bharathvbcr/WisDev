@@ -298,6 +298,99 @@ func UpdateSessionMemoryTiers(session *AgentSession, hypotheses []Hypothesis, ev
 }
 
 func BuildReasoningGraph(query string, hypotheses []Hypothesis, evidence []EvidenceFinding) *ReasoningGraph {
+	return BuildReasoningGraphWithSources(query, hypotheses, evidence, nil)
+}
+
+// evidenceSourceLookup indexes papers by id, doi, arxiv id, and lowercased
+// title so evidence nodes can be matched back to full bibliographic records.
+func evidenceSourceLookup(papers []search.Paper) map[string]search.Paper {
+	if len(papers) == 0 {
+		return nil
+	}
+	lookup := make(map[string]search.Paper, len(papers)*4)
+	add := func(key string, paper search.Paper) {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" {
+			return
+		}
+		if _, exists := lookup[key]; !exists {
+			lookup[key] = paper
+		}
+	}
+	for _, paper := range papers {
+		add(paper.ID, paper)
+		add(paper.DOI, paper)
+		add(paper.ArxivID, paper)
+		add(paper.Title, paper)
+	}
+	return lookup
+}
+
+func lookupEvidencePaper(item EvidenceFinding, lookup map[string]search.Paper) (search.Paper, bool) {
+	for _, key := range []string{item.SourceID, item.PaperTitle} {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" {
+			continue
+		}
+		if paper, ok := lookup[key]; ok {
+			return paper, true
+		}
+	}
+	return search.Paper{}, false
+}
+
+// enrichEvidenceNodeMetadata copies bibliographic fields from the matched
+// paper into evidence node metadata. Result cards built from reasoning-graph
+// nodes read these keys (authors, doi, year, link, publication, counts);
+// without them the graph-fallback path renders "Author not available".
+func enrichEvidenceNodeMetadata(metadata map[string]any, item EvidenceFinding, lookup map[string]search.Paper) {
+	if paperID := strings.TrimSpace(item.SourceID); paperID != "" {
+		metadata["paperId"] = paperID
+	}
+	if item.Year > 0 {
+		metadata["year"] = item.Year
+	}
+	paper, ok := lookupEvidencePaper(item, lookup)
+	if !ok {
+		return
+	}
+	setMetaString := func(key, value string) {
+		if value = strings.TrimSpace(value); value != "" {
+			metadata[key] = value
+		}
+	}
+	setMetaString("paperId", firstNonEmpty(strings.TrimSpace(item.SourceID), paper.ID))
+	setMetaString("doi", paper.DOI)
+	setMetaString("arxivId", paper.ArxivID)
+	setMetaString("link", paper.Link)
+	setMetaString("openAccessUrl", paper.OpenAccessUrl)
+	setMetaString("pdfUrl", paper.PdfUrl)
+	setMetaString("publication", paper.Venue)
+	setMetaString("abstract", paper.Abstract)
+	if len(paper.Authors) > 0 {
+		metadata["authors"] = append([]string(nil), paper.Authors...)
+	}
+	if paper.Year > 0 {
+		metadata["year"] = paper.Year
+	}
+	if paper.CitationCount > 0 {
+		metadata["citationCount"] = paper.CitationCount
+	}
+	if paper.ReferenceCount > 0 {
+		metadata["referenceCount"] = paper.ReferenceCount
+	}
+	if paper.InfluentialCitationCount > 0 {
+		metadata["influentialCitationCount"] = paper.InfluentialCitationCount
+	}
+	if len(paper.Keywords) > 0 {
+		metadata["keywords"] = append([]string(nil), paper.Keywords...)
+	}
+}
+
+// BuildReasoningGraphWithSources builds the reasoning graph and enriches each
+// evidence node's metadata with bibliographic fields from the matching paper.
+func BuildReasoningGraphWithSources(query string, hypotheses []Hypothesis, evidence []EvidenceFinding, papers []search.Paper) *ReasoningGraph {
+	lookup := evidenceSourceLookup(papers)
 	graph := &ReasoningGraph{
 		Query: strings.TrimSpace(query),
 		Nodes: []ReasoningNode{},
@@ -402,21 +495,23 @@ func BuildReasoningGraph(query string, hypotheses []Hypothesis, evidence []Evide
 		if trimmed := strings.TrimSpace(item.SourceID); trimmed != "" {
 			evidenceNodeIDsBySource[trimmed] = appendUniqueString(evidenceNodeIDsBySource[trimmed], evidenceID)
 		}
+		metadata := map[string]any{
+			"paperTitle":       strings.TrimSpace(item.PaperTitle),
+			"snippet":          strings.TrimSpace(item.Snippet),
+			"specialistType":   item.Specialist.Type,
+			"deepAnalysis":     item.Specialist.DeepAnalysis,
+			"verification":     item.Specialist.Verification,
+			"specialistNotes":  item.SpecialistNotes,
+			"specialistStatus": specialistVerificationStatus(item),
+		}
+		enrichEvidenceNodeMetadata(metadata, item, lookup)
 		appendNode(ReasoningNode{
 			ID:         evidenceID,
 			Type:       ReasoningNodeEvidence,
 			Label:      label,
 			Confidence: ClampFloat(item.Confidence, 0, 1),
 			SourceIDs:  trimStrings([]string{strings.TrimSpace(item.SourceID)}, 1),
-			Metadata: map[string]any{
-				"paperTitle":       strings.TrimSpace(item.PaperTitle),
-				"snippet":          strings.TrimSpace(item.Snippet),
-				"specialistType":   item.Specialist.Type,
-				"deepAnalysis":     item.Specialist.DeepAnalysis,
-				"verification":     item.Specialist.Verification,
-				"specialistNotes":  item.SpecialistNotes,
-				"specialistStatus": specialistVerificationStatus(item),
-			},
+			Metadata:   metadata,
 		})
 	}
 	for _, hypothesisID := range hypothesisIDs {
@@ -521,15 +616,16 @@ func SeedFindingsFromPapers(papers []search.Paper, maxSeeds int) []EvidenceFindi
 // UpdateReasoningGraphIncrementally merges new hypotheses and evidence into an existing
 // graph rather than rebuilding from scratch. Preserves node history and adds hypothesis
 // evolution edges (branched_into). On cold start (nil existing), delegates to BuildReasoningGraph.
-func UpdateReasoningGraphIncrementally(existing *ReasoningGraph, query string, newHypotheses []Hypothesis, newEvidence []EvidenceFinding, beliefs *BeliefState) *ReasoningGraph {
+func UpdateReasoningGraphIncrementally(existing *ReasoningGraph, query string, newHypotheses []Hypothesis, newEvidence []EvidenceFinding, beliefs *BeliefState, papers ...search.Paper) *ReasoningGraph {
 	if existing == nil || len(existing.Nodes) == 0 {
-		graph := BuildReasoningGraph(query, newHypotheses, newEvidence)
+		graph := BuildReasoningGraphWithSources(query, newHypotheses, newEvidence, papers)
 		addHypothesisEvolutionEdges(graph, newHypotheses)
 		if beliefs != nil {
 			graph = MergeBeliefStateIntoReasoningGraph(graph, beliefs)
 		}
 		return indexReasoningGraph(graph)
 	}
+	lookup := evidenceSourceLookup(papers)
 
 	if existing.NodesMap == nil {
 		indexReasoningGraph(existing)
@@ -628,16 +724,18 @@ func UpdateReasoningGraphIncrementally(existing *ReasoningGraph, query string, n
 			continue
 		}
 		evID := evidenceNodeID(item)
+		metadata := map[string]any{
+			"paperTitle": strings.TrimSpace(item.PaperTitle),
+			"snippet":    strings.TrimSpace(item.Snippet),
+		}
+		enrichEvidenceNodeMetadata(metadata, item, lookup)
 		appendNode(ReasoningNode{
 			ID:         evID,
 			Type:       ReasoningNodeEvidence,
 			Label:      label,
 			Confidence: ClampFloat(item.Confidence, 0, 1),
 			SourceIDs:  trimStrings([]string{strings.TrimSpace(item.SourceID)}, 1),
-			Metadata: map[string]any{
-				"paperTitle": strings.TrimSpace(item.PaperTitle),
-				"snippet":    strings.TrimSpace(item.Snippet),
-			},
+			Metadata:   metadata,
 		})
 	}
 
@@ -770,7 +868,7 @@ func SuggestExplorationTargets(graph *ReasoningGraph, hypotheses []Hypothesis, m
 }
 
 func BuildReasoningGraphWithPaperSeeds(query string, hypotheses []Hypothesis, evidence []EvidenceFinding, papers []search.Paper) *ReasoningGraph {
-	graph := BuildReasoningGraph(query, hypotheses, evidence)
+	graph := BuildReasoningGraphWithSources(query, hypotheses, evidence, papers)
 	if len(graph.Nodes) > 0 {
 		return graph
 	}
@@ -778,7 +876,7 @@ func BuildReasoningGraphWithPaperSeeds(query string, hypotheses []Hypothesis, ev
 	if len(seedEvidence) == 0 {
 		return graph
 	}
-	return BuildReasoningGraph(query, hypotheses, seedEvidence)
+	return BuildReasoningGraphWithSources(query, hypotheses, seedEvidence, papers)
 }
 
 func BuildArchitectureProgressPayload(session *AgentSession) map[string]any {
@@ -828,6 +926,7 @@ func UpdateSessionReasoningGraph(session *AgentSession, hypotheses []Hypothesis,
 			session.ReasoningGraph,
 			resolveSessionQuery(session),
 			hypotheses, evidence, session.BeliefState,
+			papers...,
 		)
 	} else {
 		session.ReasoningGraph = BuildReasoningGraphWithPaperSeeds(resolveSessionQuery(session), hypotheses, evidence, papers)
@@ -890,6 +989,14 @@ func evidenceFromGraph(graph *ReasoningGraph) []EvidenceFinding {
 			}
 			if value, ok := node.Metadata["snippet"].(string); ok {
 				finding.Snippet = strings.TrimSpace(value)
+			}
+			if year := toInt(node.Metadata["year"]); year > 0 {
+				finding.Year = year
+			}
+			if finding.SourceID == "" {
+				if value, ok := node.Metadata["paperId"].(string); ok {
+					finding.SourceID = strings.TrimSpace(value)
+				}
 			}
 		}
 		if finding.ID == "" {

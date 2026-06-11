@@ -405,3 +405,35 @@ class TestEmitterShapeRegression:
         leg = flatten_to_artifact_map(emit_build_claim_evidence_table({"claimEvidenceTable": 123}))
         assert isinstance(leg["claimEvidenceTable"], dict)
         assert set(leg["claimEvidenceTable"].keys()) == {"table", "rowCount"}
+
+
+class TestAuthorListNormalization:
+    """Authors arrive as plain strings or {name|displayName} dicts; both must
+    survive as clean name strings (str() on dicts produced "{'name': ...}")."""
+
+    def test_resolve_citations_unwraps_dict_authors(self):
+        bundle = emit_resolve_citations(
+            {
+                "canonicalSources": [
+                    {
+                        "id": "p1",
+                        "title": "Paper One",
+                        "doi": "10.1/one",
+                        "authors": [
+                            {"name": "Ada Lovelace"},
+                            {"displayName": "Grace Hopper"},
+                            "Katherine Johnson",
+                            {"affiliation": "no name key"},
+                            None,
+                        ],
+                    }
+                ]
+            }
+        )
+        citations = bundle.citation_bundle.canonical_sources
+        assert len(citations) == 1
+        assert citations[0].authors == [
+            "Ada Lovelace",
+            "Grace Hopper",
+            "Katherine Johnson",
+        ]

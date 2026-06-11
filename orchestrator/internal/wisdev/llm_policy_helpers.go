@@ -78,7 +78,7 @@ func wisdevRecoverableStructuredContext(ctx context.Context) (context.Context, c
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithTimeout(ctx, wisdevRecoverableStructuredTimeout)
+	return context.WithTimeout(ctx, unleashedTimeout(wisdevRecoverableStructuredTimeout))
 }
 
 func wisdevStructuredOutputCanUseDeterministicFallback(err error) bool {

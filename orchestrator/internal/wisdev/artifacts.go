@@ -339,7 +339,7 @@ func sourceToArtifactMap(source Source) map[string]any {
 	artifact := map[string]any{
 		"id":            source.ID,
 		"title":         source.Title,
-		"abstract":      firstNonEmpty(source.Summary, source.Title),
+		"abstract":      firstNonEmpty(source.Abstract, source.Summary, source.Title),
 		"summary":       source.Summary,
 		"link":          source.Link,
 		"doi":           source.DOI,
@@ -350,6 +350,27 @@ func sourceToArtifactMap(source Source) map[string]any {
 		"year":          source.Year,
 		"score":         source.Score,
 		"citationCount": source.CitationCount,
+	}
+	if strings.TrimSpace(source.Publication) != "" {
+		artifact["publication"] = source.Publication
+	}
+	if len(source.Keywords) > 0 {
+		artifact["keywords"] = append([]string(nil), source.Keywords...)
+	}
+	if source.Month > 0 {
+		artifact["month"] = source.Month
+	}
+	if strings.TrimSpace(source.OpenAccessUrl) != "" {
+		artifact["openAccessUrl"] = source.OpenAccessUrl
+	}
+	if strings.TrimSpace(source.PdfUrl) != "" {
+		artifact["pdfUrl"] = source.PdfUrl
+	}
+	if source.ReferenceCount > 0 {
+		artifact["referenceCount"] = source.ReferenceCount
+	}
+	if source.InfluentialCitationCount > 0 {
+		artifact["influentialCitationCount"] = source.InfluentialCitationCount
 	}
 	if strings.TrimSpace(source.FullText) != "" {
 		artifact["fullText"] = source.FullText
@@ -447,23 +468,63 @@ func ArtifactMapsToSources(items []map[string]any) []Source {
 	out := make([]Source, 0, len(items))
 	for _, item := range items {
 		out = append(out, Source{
-			ID:            AsOptionalString(item["id"]),
-			Title:         AsOptionalString(item["title"]),
-			Summary:       firstNonEmpty(AsOptionalString(item["summary"]), AsOptionalString(item["abstract"])),
-			Link:          firstNonEmpty(AsOptionalString(item["link"]), AsOptionalString(item["url"])),
-			DOI:           AsOptionalString(item["doi"]),
-			ArxivID:       firstNonEmpty(AsOptionalString(item["arxivId"]), AsOptionalString(item["arxiv"])),
-			Source:        AsOptionalString(item["source"]),
-			SourceApis:    toStringSlice(item["sourceApis"]),
-			Authors:       toStringSlice(item["authors"]),
-			Year:          toInt(item["year"]),
-			Score:         toFloat(item["score"]),
-			CitationCount: toInt(item["citationCount"]),
-			FullText:      firstNonEmpty(AsOptionalString(item["fullText"]), AsOptionalString(item["full_text"])),
-			StructureMap:  toArtifactAnySlice(firstArtifactValue(item["structureMap"], item["structure_map"])),
+			ID:                       AsOptionalString(firstNonEmptyValue(item["id"], item["paperId"], item["paper_id"])),
+			Title:                    AsOptionalString(item["title"]),
+			Summary:                  firstNonEmpty(AsOptionalString(item["summary"]), AsOptionalString(item["abstract"])),
+			Abstract:                 firstNonEmpty(AsOptionalString(item["abstract"]), AsOptionalString(item["summary"])),
+			Link:                     firstNonEmpty(AsOptionalString(item["link"]), AsOptionalString(item["url"]), AsOptionalString(item["landingUrl"]), AsOptionalString(item["landing_url"])),
+			DOI:                      AsOptionalString(item["doi"]),
+			ArxivID:                  firstNonEmpty(AsOptionalString(item["arxivId"]), AsOptionalString(item["arxiv_id"]), AsOptionalString(item["arxiv"])),
+			Source:                   AsOptionalString(item["source"]),
+			SourceApis:               toStringSlice(item["sourceApis"]),
+			Publication:              firstNonEmpty(AsOptionalString(item["publication"]), AsOptionalString(item["venue"]), AsOptionalString(item["journal"])),
+			Authors:                  authorNamesFromAny(item["authors"]),
+			Keywords:                 toStringSlice(item["keywords"]),
+			Year:                     toInt(item["year"]),
+			Month:                    toInt(item["month"]),
+			Score:                    toFloat(item["score"]),
+			CitationCount:            toInt(firstArtifactValue(item["citationCount"], item["citation_count"])),
+			ReferenceCount:           toInt(firstArtifactValue(item["referenceCount"], item["reference_count"])),
+			InfluentialCitationCount: toInt(firstArtifactValue(item["influentialCitationCount"], item["influential_citation_count"])),
+			OpenAccessUrl:            firstNonEmpty(AsOptionalString(item["openAccessUrl"]), AsOptionalString(item["open_access_url"])),
+			PdfUrl:                   firstNonEmpty(AsOptionalString(item["pdfUrl"]), AsOptionalString(item["pdf_url"])),
+			FullText:                 firstNonEmpty(AsOptionalString(item["fullText"]), AsOptionalString(item["full_text"])),
+			StructureMap:             toArtifactAnySlice(firstArtifactValue(item["structureMap"], item["structure_map"])),
 		})
 	}
 	return out
+}
+
+// authorNamesFromAny extracts author display names from either a list of
+// plain strings or a list of {name|displayName: string} objects. JSON
+// roundtrips and provider payloads use both shapes; fmt.Sprint on the map
+// shape would produce "map[name:...]" garbage, so objects are unwrapped.
+func authorNamesFromAny(value any) []string {
+	switch v := value.(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			switch author := item.(type) {
+			case string:
+				if text := strings.TrimSpace(author); text != "" {
+					out = append(out, text)
+				}
+			case map[string]any:
+				name := firstNonEmpty(AsOptionalString(author["name"]), AsOptionalString(author["displayName"]), AsOptionalString(author["display_name"]))
+				if name != "" {
+					out = append(out, name)
+				}
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func canonicalCitationFromMap(record map[string]any) CanonicalCitation {
@@ -473,8 +534,10 @@ func canonicalCitationFromMap(record map[string]any) CanonicalCitation {
 		DOI:                    AsOptionalString(record["doi"]),
 		ArxivID:                firstNonEmpty(AsOptionalString(record["arxivId"]), AsOptionalString(record["arxiv_id"]), AsOptionalString(record["arxiv"])),
 		CanonicalID:            firstNonEmpty(AsOptionalString(record["canonicalId"]), AsOptionalString(record["canonical_id"])),
-		Authors:                toStringSlice(record["authors"]),
+		Authors:                authorNamesFromAny(record["authors"]),
 		Year:                   toInt(record["year"]),
+		Abstract:               firstNonEmpty(AsOptionalString(record["abstract"]), AsOptionalString(record["summary"])),
+		CitationCount:          toInt(firstArtifactValue(record["citationCount"], record["citation_count"])),
 		Resolved:               toBool(record["resolved"]),
 		Verified:               toBool(record["verified"]),
 		VerificationStatus:     CitationVerificationStatus(firstNonEmpty(AsOptionalString(record["verificationStatus"]), AsOptionalString(record["verification_status"]))),
@@ -511,6 +574,8 @@ func typedCitationsToMaps(records []CanonicalCitation) []map[string]any {
 			"canonicalId":            record.CanonicalID,
 			"authors":                record.Authors,
 			"year":                   record.Year,
+			"abstract":               record.Abstract,
+			"citationCount":          record.CitationCount,
 			"resolved":               record.Resolved,
 			"verified":               record.Verified,
 			"verificationStatus":     record.VerificationStatus,

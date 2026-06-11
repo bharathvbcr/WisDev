@@ -1277,6 +1277,25 @@ func canonicalCitationRecordFromSource(paper Source, index int, record map[strin
 	if arxivID != "" {
 		out["arxivId"] = arxivID
 	}
+	if len(authorNamesFromAny(out["authors"])) == 0 && len(paper.Authors) > 0 {
+		out["authors"] = append([]string(nil), paper.Authors...)
+	}
+	if toInt(out["year"]) == 0 && paper.Year > 0 {
+		out["year"] = paper.Year
+	}
+	if AsOptionalString(out["abstract"]) == "" {
+		if abstract := firstNonEmpty(paper.Abstract, paper.Summary); abstract != "" {
+			out["abstract"] = abstract
+		}
+	}
+	if AsOptionalString(firstNonEmptyValue(out["link"], out["landingUrl"], out["landing_url"])) == "" && strings.TrimSpace(paper.Link) != "" {
+		out["link"] = paper.Link
+		// landingUrl survives the typed CanonicalCitation roundtrip; "link" does not.
+		out["landingUrl"] = paper.Link
+	}
+	if toInt(firstNonEmptyValue(out["citationCount"], out["citation_count"])) == 0 && paper.CitationCount > 0 {
+		out["citationCount"] = paper.CitationCount
+	}
 	if _, ok := out["resolved"]; !ok {
 		out["resolved"] = canonicalID != ""
 	}

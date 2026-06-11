@@ -7,6 +7,17 @@ Export this diagram for Devpost (screenshot or [mermaid.live](https://mermaid.li
 ## System overview
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{
+  'fontFamily':'Inter, ui-sans-serif, system-ui, sans-serif',
+  'background':'#0a0a0f',
+  'primaryColor':'#0f121c',
+  'primaryTextColor':'#e5e7eb',
+  'primaryBorderColor':'#38bdf8',
+  'lineColor':'#38bdf8',
+  'clusterBkg':'rgba(255,255,255,0.02)',
+  'clusterBorder':'rgba(255,255,255,0.12)',
+  'edgeLabelBackground':'#0a0a0f'
+}}}%%
 flowchart TB
     subgraph Clients["Clients"]
         CLI["WisDev CLI<br/>wisdev yolo"]
@@ -33,7 +44,7 @@ flowchart TB
     end
 
     subgraph External["External Data"]
-        APIs["Academic APIs<br/>OpenAlex · arXiv · PubMed · Semantic Scholar · Crossref"]
+        APIs["Academic APIs<br/>OpenAlex · arXiv · PubMed · Semantic Scholar · Crossref · +12 more"]
     end
 
     CLI --> GO
@@ -47,6 +58,22 @@ flowchart TB
     GO --> SM
     GO --> OTEL
     PY --> SM
+
+    classDef client fill:#0f1830,stroke:#60a5fa,color:#dbeafe,stroke-width:1.5px;
+    classDef edge fill:#241307,stroke:#fb923c,color:#fde9d6,stroke-width:1.5px;
+    classDef orch fill:#07242b,stroke:#22d3ee,color:#cffafe,stroke-width:1.5px;
+    classDef py fill:#241f08,stroke:#fbbf24,color:#fef3c7,stroke-width:1.5px;
+    classDef agent fill:#1a1330,stroke:#a78bfa,color:#ede9fe,stroke-width:1.5px;
+    classDef data fill:#231708,stroke:#f59e0b,color:#fef0c7,stroke-width:1.5px;
+    classDef infra fill:#0b1f17,stroke:#34d399,color:#d1fae5,stroke-width:1.5px;
+
+    class CLI,UI,MCPClients client;
+    class GW edge;
+    class GO orch;
+    class PY py;
+    class ADK,LOOP,MCP,TOOLS agent;
+    class APIs data;
+    class SM,OTEL,VTX infra;
 ```
 
 ---

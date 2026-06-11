@@ -91,7 +91,7 @@ func (m *adkOpenAICompatibleModel) generate(ctx context.Context, req *adkmodel.L
 	}
 
 	temperature := float32(0.2)
-	maxTokens := int32(2048)
+	maxTokens := defaultOutputTokens(2048)
 	if req.Config != nil {
 		if req.Config.Temperature != nil {
 			temperature = *req.Config.Temperature

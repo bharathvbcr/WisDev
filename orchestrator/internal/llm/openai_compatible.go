@@ -400,8 +400,9 @@ func (c *OpenAICompatibleClient) generateStructuredWithTokens(
 		}
 	}
 	if maxTokens <= 0 {
-		maxTokens = 2048
+		maxTokens = defaultOutputTokens(2048)
 	}
+	maxTokens = liftStructuredOutputTokens(maxTokens)
 	if temperature <= 0 {
 		temperature = 0.2
 	}

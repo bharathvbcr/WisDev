@@ -445,7 +445,7 @@ func rankVariantsWithBatchVerifier(
 	if papers := verifierSourceMapsFromPayload(basePayload); len(papers) > 0 {
 		verifyPayload["papers"] = mapsToAny(papers)
 	}
-	verifyCtx, cancel := context.WithTimeout(ctx, defaultBatchVerifierTimeout)
+	verifyCtx, cancel := context.WithTimeout(ctx, unleashedTimeout(defaultBatchVerifierTimeout))
 	defer cancel()
 	result, err := exec(verifyCtx, verifyAction, verifyPayload, session)
 	if err != nil {

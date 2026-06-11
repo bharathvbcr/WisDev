@@ -736,6 +736,9 @@ func resolveResearchWorkerSearchBudget(plane ResearchExecutionPlane, searchTermB
 	if plane == ResearchExecutionPlaneDeep || plane == ResearchExecutionPlaneMultiAgent {
 		maxWorkerBudget = 8
 	}
+	if unleashedBudgetMode() {
+		maxWorkerBudget *= 3
+	}
 	return minInt(maxInt(workerBudget, 4), maxWorkerBudget)
 }
 

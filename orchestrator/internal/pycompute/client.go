@@ -71,9 +71,9 @@ func NewClientWithBaseURL(baseURL string) *Client {
 	return &Client{
 		baseURL: strings.TrimSuffix(baseURL, "/"),
 		client: &http.Client{
-			Timeout: 60 * time.Second,
+			Timeout: unleashedSidecarTimeout(60 * time.Second),
 		},
-		breaker:     resilience.NewCircuitBreaker("python-compute"),
+		breaker:     resilience.NewCircuitBreakerWithConfig("python-compute", unleashedSidecarBreakerFailures(3), 0),
 		tokenSource: newTokenSource(),
 	}
 }

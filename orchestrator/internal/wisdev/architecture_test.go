@@ -353,3 +353,90 @@ func TestArchitecture_SuggestExplorationTargets(t *testing.T) {
 			"Targets should be sorted by uncertainty descending")
 	}
 }
+
+func TestArchitecture_BuildReasoningGraphWithSources_EnrichesEvidenceMetadata(t *testing.T) {
+	papers := []search.Paper{{
+		ID:                       "p1",
+		Title:                    "Stacked Tunnel Junction LEDs",
+		Abstract:                 "Improved external quantum efficiency.",
+		Link:                     "https://doi.org/10.1000/led",
+		DOI:                      "10.1000/led",
+		Authors:                  []string{"Ada Lovelace", "Grace Hopper"},
+		Year:                     2026,
+		Venue:                    "Results in Physics",
+		CitationCount:            42,
+		ReferenceCount:           18,
+		InfluentialCitationCount: 3,
+		OpenAccessUrl:            "https://oa.example/led",
+		PdfUrl:                   "https://oa.example/led.pdf",
+		Keywords:                 []string{"LED", "tunnel junction"},
+	}}
+	evidence := []EvidenceFinding{
+		{Claim: "Evidence matched by id", SourceID: "p1", PaperTitle: "Stacked Tunnel Junction LEDs", Confidence: 0.9},
+		{Claim: "Evidence matched by title", SourceID: "unknown-id", PaperTitle: "Stacked Tunnel Junction LEDs", Confidence: 0.8},
+		{Claim: "Evidence without match", SourceID: "p-missing", PaperTitle: "Unrelated", Year: 2020, Confidence: 0.7},
+	}
+
+	graph := BuildReasoningGraphWithSources("led efficiency", nil, evidence, papers)
+
+	evidenceNodes := make([]ReasoningNode, 0, len(graph.Nodes))
+	for _, node := range graph.Nodes {
+		if node.Type == ReasoningNodeEvidence {
+			evidenceNodes = append(evidenceNodes, node)
+		}
+	}
+	assert.Len(t, evidenceNodes, 3)
+
+	matched := evidenceNodes[0].Metadata
+	assert.Equal(t, "p1", matched["paperId"])
+	assert.Equal(t, "10.1000/led", matched["doi"])
+	assert.Equal(t, "https://doi.org/10.1000/led", matched["link"])
+	assert.Equal(t, []string{"Ada Lovelace", "Grace Hopper"}, matched["authors"])
+	assert.Equal(t, 2026, matched["year"])
+	assert.Equal(t, "Results in Physics", matched["publication"])
+	assert.Equal(t, 42, matched["citationCount"])
+	assert.Equal(t, 18, matched["referenceCount"])
+	assert.Equal(t, 3, matched["influentialCitationCount"])
+	assert.Equal(t, "https://oa.example/led", matched["openAccessUrl"])
+	assert.Equal(t, "https://oa.example/led.pdf", matched["pdfUrl"])
+	assert.Equal(t, "Improved external quantum efficiency.", matched["abstract"])
+	assert.Equal(t, []string{"LED", "tunnel junction"}, matched["keywords"])
+
+	byTitle := evidenceNodes[1].Metadata
+	assert.Equal(t, []string{"Ada Lovelace", "Grace Hopper"}, byTitle["authors"])
+	assert.Equal(t, "10.1000/led", byTitle["doi"])
+
+	unmatched := evidenceNodes[2].Metadata
+	assert.Equal(t, "p-missing", unmatched["paperId"])
+	assert.Equal(t, 2020, unmatched["year"])
+	assert.NotContains(t, unmatched, "authors")
+}
+
+func TestArchitecture_UpdateReasoningGraphIncrementally_EnrichesNewEvidence(t *testing.T) {
+	papers := []search.Paper{{
+		ID:      "p9",
+		Title:   "Quantum Dot Molecules",
+		Authors: []string{"Katherine Johnson"},
+		Year:    2025,
+		DOI:     "10.1002/qdm",
+	}}
+	existing := BuildReasoningGraph("quantum dots", nil, []EvidenceFinding{
+		{Claim: "Seed evidence", SourceID: "seed", PaperTitle: "Seed Paper", Confidence: 0.5},
+	})
+	updated := UpdateReasoningGraphIncrementally(existing, "quantum dots", nil, []EvidenceFinding{
+		{Claim: "Fresh evidence", SourceID: "p9", PaperTitle: "Quantum Dot Molecules", Confidence: 0.85},
+	}, nil, papers...)
+
+	var fresh *ReasoningNode
+	for i := range updated.Nodes {
+		if updated.Nodes[i].Type == ReasoningNodeEvidence && updated.Nodes[i].Metadata["paperId"] == "p9" {
+			fresh = &updated.Nodes[i]
+			break
+		}
+	}
+	if assert.NotNil(t, fresh, "expected enriched evidence node for p9") {
+		assert.Equal(t, []string{"Katherine Johnson"}, fresh.Metadata["authors"])
+		assert.Equal(t, 2025, fresh.Metadata["year"])
+		assert.Equal(t, "10.1002/qdm", fresh.Metadata["doi"])
+	}
+}

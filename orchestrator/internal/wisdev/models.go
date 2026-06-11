@@ -390,6 +390,8 @@ type CanonicalCitation struct {
 	CanonicalID            string                     `json:"canonicalId"`
 	Authors                []string                   `json:"authors"`
 	Year                   int                        `json:"year"`
+	Abstract               string                     `json:"abstract,omitempty"`
+	CitationCount          int                        `json:"citationCount,omitempty"`
 	Resolved               bool                       `json:"resolved"`
 	Verified               bool                       `json:"verified"`
 	VerificationStatus     CitationVerificationStatus `json:"verificationStatus,omitempty"`

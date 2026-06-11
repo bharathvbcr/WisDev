@@ -54,6 +54,39 @@ func TestBuildQueryIntroductionMarkdown(t *testing.T) {
 		md := BuildQueryIntroductionMarkdown("Topic", nil, nil)
 		assert.Contains(t, md, "This field brief uses Topic as its organizing frame")
 		assert.Contains(t, md, "Method diversity across studies")
+		assert.NotContains(t, md, "[1]")
+	})
+
+	t.Run("Inline citation markers ground themes on papers", func(t *testing.T) {
+		cited := []queryIntroductionPaper{
+			{Title: "Paper 1", Year: 2023, Abstract: "A survey of LLMs"},
+			{Title: "Paper 2", Year: 2021, Abstract: "Benchmark evaluation"},
+			{Title: "Paper 3", Year: 2022, Abstract: "Another benchmark evaluation study"},
+		}
+		md := BuildQueryIntroductionMarkdown("LLM Research", cited, []string{"arxiv"})
+		// Theme bullets cite the 1-based indices of the papers that triggered them.
+		assert.Contains(t, md, "- Synthesis and review literature [1]")
+		assert.Contains(t, md, "- Benchmark design and evaluation quality [2][3]")
+		// The overview's first mention of each theme is annotated too.
+		assert.Regexp(t, `signals are .*\[1\]`, md)
+		assert.Contains(t, md, "Bracketed numbers such as [1] cite the numbered sources grounding this brief.")
+
+		// Meta stays clean of markers so chips and snippets render plain labels.
+		meta := BuildQueryIntroductionMeta("LLM Research", cited, []string{"arxiv"})
+		assert.NotContains(t, meta.Overview, "[1]")
+		for _, theme := range meta.CoreThemes {
+			assert.NotContains(t, theme, "[")
+		}
+	})
+
+	t.Run("Citation markers cap at three papers per theme", func(t *testing.T) {
+		many := make([]queryIntroductionPaper, 0, 5)
+		for range 5 {
+			many = append(many, queryIntroductionPaper{Title: "P", Abstract: "benchmark evaluation"})
+		}
+		md := BuildQueryIntroductionMarkdown("Benchmarks", many, nil)
+		assert.Contains(t, md, "- Benchmark design and evaluation quality [1][2][3]")
+		assert.NotContains(t, md, "[1][2][3][4]")
 	})
 
 	t.Run("Other methodology signals", func(t *testing.T) {

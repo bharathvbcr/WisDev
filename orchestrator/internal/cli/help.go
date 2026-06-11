@@ -39,7 +39,39 @@ Alias: check`,
 
 Lists built-in search providers. Alias: sources`,
 	"sources": `Alias for wisdev providers.`,
+	"max": `Usage: wisdev max [flags] "question"
+
+Local research with every quality knob dialed up: unleashed budgets
+(WISDEV_UNLEASHED=1 for this run), 12 loop iterations, all built-in search
+providers, 20 search terms, up to 80 unique papers, long-form synthesis,
+live stage log, and a 30 minute timeout. AI query enhancement, hypotheses,
+and planning stay on.
+
+Any yolo flag still works and overrides the preset, e.g.:
+  wisdev max --max-iterations 6 "question"
+  wisdev max -q "question"`,
+	"guide": `Usage: wisdev guide
+
+One-screen guide to every wisdev command, grouped by task.
+Alias: commands`,
+	"commands": `Alias for wisdev guide.`,
 	"version": `Usage: wisdev version`,
+	"update": `Usage: wisdev update [--check] [--version vX.Y.Z] [--force]
+
+Self-update the wisdev binary from the latest GitHub release
+(https://github.com/bharathvbcr/WisDev/releases). Downloads the asset for
+this OS/architecture, verifies it against the release SHA256SUMS, and swaps
+it in place of the running binary.
+
+  --check          Only report whether an update is available
+  --version TAG    Install a specific release tag instead of the latest
+  --force          Replace a dev/source build or downgrade to an older tag
+
+Environment Variables:
+  WISDEV_REPO  GitHub repo to fetch releases from (default: bharathvbcr/WisDev)
+
+Alias: upgrade`,
+	"upgrade": `Alias for wisdev update.`,
 	"demo": `Usage: wisdev demo [--offline] ["question"]
 
 Hackathon demo: check + narrated local research.`,

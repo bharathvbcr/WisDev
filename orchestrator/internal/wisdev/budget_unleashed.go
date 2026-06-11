@@ -41,6 +41,22 @@ func unleashedTimeout(standard time.Duration) time.Duration {
 	return standard
 }
 
+// unleashedMinLoopIterations returns a minimum autonomous-loop iteration floor
+// in unleashed mode so the loop does not converge on the first pass (which left
+// runs reporting "iterations: 0" / effectively single-shot). The floor is capped
+// by maxIterations so it never exceeds the run's own ceiling. Returns 0 when not
+// unleashed, preserving the default early-convergence behavior.
+func unleashedMinLoopIterations(maxIterations int) int {
+	if !unleashedBudgetMode() {
+		return 0
+	}
+	floor := 5
+	if maxIterations > 0 && floor > maxIterations {
+		floor = maxIterations
+	}
+	return floor
+}
+
 // reconcileUnleashedPolicyOverride applies a config-supplied per-session policy
 // override (e.g. from wisdev-adk.yaml). In unleashed mode the override may only
 // RAISE the limit — a lower YAML cap cannot silently undo the unleashed policy

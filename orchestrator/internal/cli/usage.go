@@ -10,6 +10,7 @@ func printUsage(w io.Writer) {
 
 	printSection(w, "Essentials")
 	note(w, "  wisdev \"your research question\"")
+	note(w, "  wisdev max \"your research question\"   Maximum depth (unleashed, long-form, 12 iters)")
 	note(w, "  wisdev check")
 	note(w, "  wisdev tui [--demo]   Interactive UI — make tui-demo for recording")
 	note(w, "  wisdev demo [--offline]")
@@ -20,6 +21,7 @@ func printUsage(w io.Writer) {
 	note(w, "  wisdev setup --write .cursor/mcp.json")
 	note(w, "  wisdev serve")
 	note(w, "  wisdev sources")
+	note(w, "  wisdev update         Self-update to the latest release")
 	fmt.Fprintln(w)
 
 	printSection(w, "Flags (search / yolo)")
@@ -34,6 +36,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w)
 
 	printSection(w, "Tips")
+	note(w, "  wisdev guide          All commands, grouped by task")
 	note(w, "  wisdev help <command>")
 	note(w, "  search = ask = local research (openalex,arxiv)")
 	note(w, "  NO_COLOR / WISDEV_PLAIN=1")

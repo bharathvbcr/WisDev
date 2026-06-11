@@ -119,10 +119,12 @@ func (s *tuiState) terminalStatusSequence(now time.Time) string {
 			setConsoleTitleNative(title)
 		}
 	}
-	state, pct := s.desiredTaskbarProgress()
-	if seq := taskbarProgressSequence(state, pct); seq != s.lastTaskbarSeq {
-		s.lastTaskbarSeq = seq
-		b.WriteString(seq)
+	if !s.disableTaskbarOSC {
+		state, pct := s.desiredTaskbarProgress()
+		if seq := taskbarProgressSequence(state, pct); seq != s.lastTaskbarSeq {
+			s.lastTaskbarSeq = seq
+			b.WriteString(seq)
+		}
 	}
 	return b.String()
 }
@@ -147,4 +149,21 @@ func (s *tuiState) playCompletionChime(success bool) {
 			io.WriteString(w, "\a")
 		})
 	}
+}
+
+// taskbarProgressSupported reports whether the host terminal understands the
+// ConEmu/Windows Terminal OSC 9;4 taskbar-progress sequence. iTerm2 shows a
+// bare OSC 9 payload as a desktop notification — emitting progress there
+// spams the user with popups on every state change — and Apple Terminal does
+// not know the code at all, so allowlist terminals with known support
+// instead of broadcasting it.
+func taskbarProgressSupported() bool {
+	if os.Getenv("WT_SESSION") != "" || os.Getenv("ConEmuANSI") == "ON" {
+		return true
+	}
+	switch strings.ToLower(os.Getenv("TERM_PROGRAM")) {
+	case "ghostty", "wezterm":
+		return true
+	}
+	return false
 }

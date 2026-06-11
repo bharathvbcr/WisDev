@@ -230,12 +230,15 @@ Current extracted CLI:
 
 ```text
 wisdev "question"
+wisdev max "question"
 wisdev check
 wisdev tui
 wisdev demo [--offline]
 wisdev mcp
 wisdev setup --write .cursor/mcp.json
 wisdev serve
+wisdev update [--check]
+wisdev guide
 ```
 
 Full CLI reference: [`docs/CLI.md`](docs/CLI.md).  

@@ -17,6 +17,7 @@ No more `go run ./cmd/wisdev` unless you are hacking the CLI itself.
 | Command | What it does |
 |---------|----------------|
 | `wisdev "question"` | Local research (openalex + arxiv) |
+| `wisdev max "question"` | Maximum-depth research: unleashed budgets, 12 iterations, all providers, long-form report |
 | `wisdev check` | Health check |
 | `wisdev tui` | Interactive terminal UI for local research |
 | `wisdev demo` | Hackathon demo sequence |
@@ -24,6 +25,8 @@ No more `go run ./cmd/wisdev` unless you are hacking the CLI itself.
 | `wisdev setup --write .cursor/mcp.json` | MCP client config |
 | `wisdev serve` | Start HTTP orchestrator |
 | `wisdev sources` | List search providers |
+| `wisdev update` | Self-update to the latest GitHub release (`--check` to only report; alias: `upgrade`) |
+| `wisdev guide` | One-screen guide to every command, grouped by task (alias: `commands`) |
 
 ## Examples
 

@@ -19,19 +19,19 @@ import (
 	"time"
 	"unicode"
 
-	"golang.org/x/term"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 	agent "github.com/bharathvbcr/wisdev-arc/orchestrator/pkg/wisdev"
+	"golang.org/x/term"
 )
 
 const (
-	maxLogEntries       = 100
-	maxHistoryEntries   = 50
-	activeElementCount  = 6
-	settingsPerRow      = 3
-	minTermWidth        = 65
-	minTermHeight       = 15
-	maxFilterMsgLen     = 96
+	maxLogEntries      = 100
+	maxHistoryEntries  = 50
+	activeElementCount = 6
+	settingsPerRow     = 3
+	minTermWidth       = 65
+	minTermHeight      = 15
+	maxFilterMsgLen    = 96
 )
 
 type tuiMode int
@@ -72,12 +72,12 @@ type tuiLogEntry struct {
 }
 
 type tuiState struct {
-	mode              tuiMode
-	query             string
-	activeElement     int // 0 = query input, 1 = providers checklist, 2 = settings row, 3 = output path, 4 = "Start Research" button, 5 = "Exit" button
-	providers         []tuiProvider
-	providerIdx       int // currently highlighted provider in list
-	validationMsg     string
+	mode                tuiMode
+	query               string
+	activeElement       int // 0 = query input, 1 = providers checklist, 2 = settings row, 3 = output path, 4 = "Start Research" button, 5 = "Exit" button
+	providers           []tuiProvider
+	providerIdx         int // currently highlighted provider in list
+	validationMsg       string
 	maxIterations       int
 	requestedIterations int
 	disablePlanning     bool
@@ -93,23 +93,23 @@ type tuiState struct {
 	bypassSearchCache   bool
 	llmBackend          string
 	activeSetting       int // 0=iterations 1=planning 2=offline 3=enhance 4=hypotheses 5=deep 6=longform
-	outputPath        string
-	showHelp          bool
-	completedElapsed  time.Duration
-	output            io.Writer
-	terminalSize      func() (int, int, error)
-	needsRender       bool
+	outputPath          string
+	showHelp            bool
+	completedElapsed    time.Duration
+	output              io.Writer
+	terminalSize        func() (int, int, error)
+	needsRender         bool
 
 	// History state
-	history             []tuiHistoryEntry
-	historyIdx          int
-	showHistoryBrowser  bool
-	historyBrowserIdx   int
+	history            []tuiHistoryEntry
+	historyIdx         int
+	showHistoryBrowser bool
+	historyBrowserIdx  int
 
 	// Recent saved runs browser (input mode, Ctrl+O)
-	showRecentRuns      bool
-	recentRuns          []recentRunEntry
-	recentRunsIdx       int
+	showRecentRuns bool
+	recentRuns     []recentRunEntry
+	recentRunsIdx  int
 
 	// Cursor state
 	cursorPos           int
@@ -118,94 +118,96 @@ type tuiState struct {
 	queryRedoStack      []string
 
 	// Exit confirm state
-	pendingExit         bool
-	pendingExitAt       time.Time
+	pendingExit   bool
+	pendingExitAt time.Time
 
 	// Running state
-	runningTask         string
-	researchStartTime   time.Time
-	elapsedTime         time.Duration
-	iterations          int
-	executedQueries     int
-	papersFound         int
-	degradedSteps       int
+	runningTask             string
+	researchStartTime       time.Time
+	elapsedTime             time.Duration
+	iterations              int
+	executedQueries         int
+	papersFound             int
+	degradedSteps           int
 	autoDomainPresetApplied bool
-	logs                []tuiLogEntry
-	logMutex            sync.Mutex
-	cancelFunc          context.CancelFunc
-	runError            error
-	eventCh             chan tuiEvent
-	executedProviders   []string
-	providerCounts      map[string]int
-	logScrollOffset     int
-	logScrollLocked     bool
-	paused              bool
-	pauseCh             chan struct{}
-	resumeCh            chan struct{}
+	logs                    []tuiLogEntry
+	logMutex                sync.Mutex
+	cancelFunc              context.CancelFunc
+	runError                error
+	eventCh                 chan tuiEvent
+	executedProviders       []string
+	providerCounts          map[string]int
+	logScrollOffset         int
+	logScrollLocked         bool
+	paused                  bool
+	pauseCh                 chan struct{}
+	resumeCh                chan struct{}
 
 	// Results state
-	result              *agent.YOLOResult
-	resultPane          tuiResultPane
-	scrollOffset        int
-	saveMsg             string
-	saveMsgAt           time.Time
-	pendingSave         bool
-	pendingSaveType     string
-	prevResult         *agent.YOLOResult
-	beliefScores       []float64
+	result          *agent.YOLOResult
+	resultPane      tuiResultPane
+	scrollOffset    int
+	saveMsg         string
+	saveMsgAt       time.Time
+	pendingSave     bool
+	pendingSaveType string
+	prevResult      *agent.YOLOResult
+	beliefScores    []float64
 
 	// Results filter state
-	resultFilter        string
-	resultFilterOn      bool
-	resultFilterMatch   []int
-	resultFilterCursor  int
+	resultFilter       string
+	resultFilterOn     bool
+	resultFilterMatch  []int
+	resultFilterCursor int
 
 	// Citation jump state (results mode: [n] -> source paper)
-	citationJumpOn      bool
-	citationJumpInput   string
+	citationJumpOn    bool
+	citationJumpInput string
 
 	// Follow-up chat state (results mode: f -> grounded Q&A over current sources)
-	chatOn              bool
-	chatInput           string
-	chatCursorPos       int
-	chatHistory         []tuiChatMessage // guarded by logMutex
-	chatBusy            bool             // guarded by logMutex
-	chatGen             int              // guarded by logMutex; invalidates stale replies
-	chatScrollOffset    int              // lines scrolled up from the transcript bottom
-	keepPrevResultOnce  bool
+	chatOn             bool
+	chatInput          string
+	chatCursorPos      int
+	chatHistory        []tuiChatMessage // guarded by logMutex
+	chatBusy           bool             // guarded by logMutex
+	chatGen            int              // guarded by logMutex; invalidates stale replies
+	chatScrollOffset   int              // lines scrolled up from the transcript bottom
+	keepPrevResultOnce bool
 
 	// Provider filter state
-	providerFilter      string
-	providerFiltering   bool
+	providerFilter    string
+	providerFiltering bool
 
 	// Paper details popup
-	showPaperDetail     bool
-	paperDetailIdx      int
+	showPaperDetail bool
+	paperDetailIdx  int
 
 	// Session restore state
 	showSessionRestorePrompt bool
 	sessionQueryPreview      string
 
 	// Batch Mode state
-	batchMode           bool
-	batchQueries        []string
-	batchQueryIdx       int
+	batchMode     bool
+	batchQueries  []string
+	batchQueryIdx int
 
 	// Suppression flag
-	noBell              bool
+	noBell bool
 
 	// Terminal integration state (title / taskbar progress / chime)
-	lastTermTitle       string
-	lastTaskbarSeq      string
-	bellWriter          io.Writer
-	nativeTitle         bool
+	lastTermTitle     string
+	lastTaskbarSeq    string
+	bellWriter        io.Writer
+	nativeTitle       bool
+	disableTaskbarOSC bool
 
 	// Cache rendered lines
-	cachedResultLines   []string
-	cachedResultPane    tuiResultPane
-	cachedResultWidth   int
-	cachedResultFilter  string
-	lastTerminalWidth   int
+	cachedResultLines  []string
+	cachedResultPane   tuiResultPane
+	cachedResultWidth  int
+	cachedResultFilter string
+	lastTerminalWidth  int
+	lastTerminalHeight int
 }
 
 type tuiEventType int
@@ -215,11 +217,16 @@ const (
 	eventTick
 	eventLog
 	eventRunUpdate
+	eventResize
+	eventProviderHealth
 )
 
 type tuiEvent struct {
 	eventType tuiEventType
 	keyBytes  []byte
+	// eventProviderHealth payload: result of one provider ping.
+	providerCode   string
+	providerStatus string
 }
 
 func defaultTUIProviders() []tuiProvider {
@@ -342,7 +349,6 @@ func renderSparkline(scores []float64) string {
 	}
 	return sb.String()
 }
-
 
 func (s *tuiState) saveQueryUndoState() {
 	if len(s.queryUndoStack) > 0 && s.queryUndoStack[len(s.queryUndoStack)-1] == s.query {
@@ -502,15 +508,63 @@ func (s *tuiState) runningFooterShortcut() string {
 	return "ESC=abort  P=pause  k/↑=older log  j/↓=newer log  ?=help"
 }
 
+// runningLogViewport returns how many activity-log rows fit on the running
+// screen for the given terminal height, counting every chrome row the frame
+// actually draws (including the optional domain/enhanced/degraded/sparkline
+// rows). Undercounting chrome makes the frame taller than the terminal and
+// the overflow scrolls the alternate screen, clipping the top border — most
+// visible on macOS Terminal.app's default 80x24 window.
+// inputElementIsTextField reports whether the focused element in modeInput is a
+// free-text field — the query (0) or the output path (3) — where printable keys
+// must be inserted as characters rather than consumed as single-letter
+// shortcuts (e.g. 'h'/'?'), so the user can type words like "how" or end a
+// research question with "?".
+func (s *tuiState) inputElementIsTextField() bool {
+	return s.activeElement == 0 || s.activeElement == 3
+}
+
+// focusedTextFieldEmpty reports whether the focused modeInput text field is
+// still empty. It lets '?' open help on a fresh screen while still typing a
+// literal '?' once the user has started writing (so a question can end in '?').
+func (s *tuiState) focusedTextFieldEmpty() bool {
+	switch s.activeElement {
+	case 0:
+		return s.query == ""
+	case 3:
+		return s.outputPath == ""
+	}
+	return false
+}
+
+func (s *tuiState) runningLogViewport(height int) int {
+	// border, query, phase, progress, papers, divider, log header, hint,
+	// footer border, brand bar, status bar
+	chrome := 11
+	if strings.TrimSpace(s.detectedDomain) != "" {
+		chrome++
+	}
+	if s.preparedQuery != "" && s.preparedQuery != s.originalQuery {
+		chrome++
+	}
+	if s.degradedSteps > 0 {
+		chrome++
+	}
+	if len(s.beliefScores) > 0 {
+		chrome++
+	}
+	viewport := height - chrome
+	if viewport < 1 {
+		viewport = 1
+	}
+	return viewport
+}
+
 func (s *tuiState) clampLogScrollOffset() {
 	_, height, err := s.currentTerminalSize()
 	if err != nil || height <= 0 {
 		height = 24
 	}
-	viewport := height - 14
-	if viewport < 1 {
-		viewport = 1
-	}
+	viewport := s.runningLogViewport(height)
 	s.logMutex.Lock()
 	logCount := len(s.logs)
 	s.logMutex.Unlock()
@@ -537,12 +591,12 @@ func (s *tuiState) saveSession() {
 	home, _ := os.UserHomeDir()
 	dir := filepath.Join(home, ".wisdev")
 	_ = os.MkdirAll(dir, 0755)
-	
+
 	var provs []tuiSessionProv
 	for _, p := range s.providers {
 		provs = append(provs, tuiSessionProv{Code: p.code, Enabled: p.enabled})
 	}
-	
+
 	sess := tuiSession{
 		Query:              s.query,
 		Providers:          provs,
@@ -554,7 +608,7 @@ func (s *tuiState) saveSession() {
 		DeepSearch:         s.deepSearch,
 		LongFormReport:     s.longFormReport,
 	}
-	
+
 	data, err := json.Marshal(sess)
 	if err == nil {
 		_ = os.WriteFile(sessionFilePath(), data, 0644)
@@ -593,7 +647,7 @@ func (s *tuiState) restoreSession() {
 		s.enableHypotheses = sess.EnableHypotheses
 		s.deepSearch = sess.DeepSearch
 		s.longFormReport = sess.LongFormReport
-		
+
 		for _, sp := range sess.Providers {
 			for idx, p := range s.providers {
 				if p.code == sp.Code {
@@ -606,15 +660,15 @@ func (s *tuiState) restoreSession() {
 }
 
 type tuiSession struct {
-	Query              string             `json:"query"`
-	Providers          []tuiSessionProv   `json:"providers"`
-	MaxIterations      int                `json:"max_iterations"`
-	DisablePlanning    bool               `json:"disable_planning"`
-	OfflineMode        bool               `json:"offline_mode"`
-	EnableQueryEnhance bool               `json:"enable_query_enhance"`
-	EnableHypotheses   bool               `json:"enable_hypotheses"`
-	DeepSearch         bool               `json:"deep_search"`
-	LongFormReport     bool               `json:"long_form_report"`
+	Query              string           `json:"query"`
+	Providers          []tuiSessionProv `json:"providers"`
+	MaxIterations      int              `json:"max_iterations"`
+	DisablePlanning    bool             `json:"disable_planning"`
+	OfflineMode        bool             `json:"offline_mode"`
+	EnableQueryEnhance bool             `json:"enable_query_enhance"`
+	EnableHypotheses   bool             `json:"enable_hypotheses"`
+	DeepSearch         bool             `json:"deep_search"`
+	LongFormReport     bool             `json:"long_form_report"`
 }
 
 type tuiSessionProv struct {
@@ -643,7 +697,7 @@ func (s *tuiState) checkProvidersHealth() {
 			p.lastStatus = "grey"
 			continue
 		}
-		
+
 		go func(prov *tuiProvider, pingUrl string) {
 			client := &http.Client{
 				Timeout: 1500 * time.Millisecond,
@@ -651,19 +705,21 @@ func (s *tuiState) checkProvidersHealth() {
 			start := time.Now()
 			resp, err := client.Get(pingUrl)
 			duration := time.Since(start)
-			
+
+			status := "green"
 			if err != nil {
-				prov.lastStatus = "red"
+				status = "red"
 			} else {
 				_ = resp.Body.Close()
 				if duration > 800*time.Millisecond {
-					prov.lastStatus = "yellow"
-				} else {
-					prov.lastStatus = "green"
+					status = "yellow"
 				}
 			}
+			// Deliver the result through the event loop instead of writing
+			// prov.lastStatus from this goroutine: render() reads that field
+			// concurrently, so the direct write was a data race.
 			select {
-			case s.eventCh <- tuiEvent{eventType: eventRunUpdate}:
+			case s.eventCh <- tuiEvent{eventType: eventProviderHealth, providerCode: prov.code, providerStatus: status}:
 			default:
 			}
 		}(p, url)
@@ -912,11 +968,51 @@ func (s *tuiState) saveBatchResults() {
 	ext := filepath.Ext(base)
 	prefix := strings.TrimSuffix(base, ext)
 	numberedPath := fmt.Sprintf("%s_%d%s", prefix, s.batchQueryIdx+1, ext)
-	
+
 	oldPath := s.outputPath
 	s.outputPath = numberedPath
 	s.saveResults()
 	s.outputPath = oldPath
+}
+
+// insertIntoActiveTextField inserts text (typically a paste) into whichever
+// free-text field currently has focus, returning true if it was consumed.
+// Numeric-only fields (citation jump) and non-text screens are skipped, so a
+// stray paste there is swallowed rather than mis-typed.
+func (s *tuiState) insertIntoActiveTextField(text string) bool {
+	if text == "" {
+		return false
+	}
+	switch {
+	case s.mode == modeResults && s.chatOn:
+		if s.chatCursorPos < 0 {
+			s.chatCursorPos = 0
+		}
+		if s.chatCursorPos > len(s.chatInput) {
+			s.chatCursorPos = len(s.chatInput)
+		}
+		s.chatInput = s.chatInput[:s.chatCursorPos] + text + s.chatInput[s.chatCursorPos:]
+		s.chatCursorPos += len(text)
+		return true
+	case s.mode == modeResults && s.resultFilterOn:
+		s.resultFilter += text
+		s.updateResultFilterMatches()
+		s.cachedResultLines = nil
+		return true
+	case s.mode == modeInput && s.providerFiltering:
+		s.providerFilter += text
+		s.providerIdx = 0
+		s.clampProviderIdx()
+		return true
+	case s.mode == modeInput && s.activeElement == 0:
+		s.validationMsg = ""
+		s.insertQueryChar(text)
+		return true
+	case s.mode == modeInput && s.activeElement == 3:
+		s.insertOutputPathChar(text)
+		return true
+	}
+	return false
 }
 
 func (s *tuiState) insertQueryChar(str string) {
@@ -934,18 +1030,19 @@ func (s *tuiState) insertQueryChar(str string) {
 func (s *tuiState) deleteQueryChar() {
 	s.saveQueryUndoState()
 	if s.cursorPos >= 0 && s.cursorPos < len(s.query) {
-		s.query = s.query[:s.cursorPos] + s.query[s.cursorPos+1:]
+		next := nextCharBoundary(s.query, s.cursorPos)
+		s.query = s.query[:s.cursorPos] + s.query[next:]
 	}
 }
 
 func (s *tuiState) backspaceQueryChar() {
 	s.saveQueryUndoState()
 	if s.cursorPos > 0 && s.cursorPos <= len(s.query) {
-		s.query = s.query[:s.cursorPos-1] + s.query[s.cursorPos:]
-		s.cursorPos--
+		prev := prevCharBoundary(s.query, s.cursorPos)
+		s.query = s.query[:prev] + s.query[s.cursorPos:]
+		s.cursorPos = prev
 	}
 }
-
 
 func (s *tuiState) insertOutputPathChar(str string) {
 	if s.outputPathCursorPos < 0 {
@@ -960,14 +1057,16 @@ func (s *tuiState) insertOutputPathChar(str string) {
 
 func (s *tuiState) deleteOutputPathChar() {
 	if s.outputPathCursorPos >= 0 && s.outputPathCursorPos < len(s.outputPath) {
-		s.outputPath = s.outputPath[:s.outputPathCursorPos] + s.outputPath[s.outputPathCursorPos+1:]
+		next := nextCharBoundary(s.outputPath, s.outputPathCursorPos)
+		s.outputPath = s.outputPath[:s.outputPathCursorPos] + s.outputPath[next:]
 	}
 }
 
 func (s *tuiState) backspaceOutputPathChar() {
 	if s.outputPathCursorPos > 0 && s.outputPathCursorPos <= len(s.outputPath) {
-		s.outputPath = s.outputPath[:s.outputPathCursorPos-1] + s.outputPath[s.outputPathCursorPos:]
-		s.outputPathCursorPos--
+		prev := prevCharBoundary(s.outputPath, s.outputPathCursorPos)
+		s.outputPath = s.outputPath[:prev] + s.outputPath[s.outputPathCursorPos:]
+		s.outputPathCursorPos = prev
 	}
 }
 
@@ -1281,8 +1380,16 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 	}
 	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
-	fmt.Print("\033[?1049h\033[?25l\033[?1006h\033[2J\033[H")
-	defer fmt.Print("\033[?1006l\033[?25h\033[?1049l")
+	// Enter alt screen, hide cursor, and enable mouse reporting (button tracking
+	// 1000 + SGR encoding 1006) so the scroll wheel is delivered to us instead of
+	// leaking through as stray keystrokes — the cause of "weird" scrolling on
+	// macOS Terminal.app. (Hold Option to select text while reporting is on.)
+	// Also enable bracketed paste (2004) so the terminal wraps pasted text in
+	// \033[200~ … \033[201~; we insert that as literal text instead of letting
+	// each character trigger a shortcut, and it lets Cmd/Ctrl+V work even when
+	// the host binds those to "paste" rather than sending a raw Ctrl+V byte.
+	fmt.Print("\033[?1049h\033[?25l\033[?1000h\033[?1006h\033[?2004h\033[2J\033[H")
+	defer fmt.Print("\033[?2004l\033[?1000l\033[?1006l\033[?25h\033[?1049l")
 
 	// Rename the terminal tab/window while the TUI owns it; clear any taskbar
 	// progress and restore the previous title on exit. The title is set both
@@ -1292,7 +1399,11 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 	fmt.Print(terminalTitleSequence(termTitleBase))
 	setConsoleTitleNative(termTitleBase)
 	defer func() {
-		fmt.Print(taskbarProgressSequence(taskbarStateClear, 0) + restoreTerminalTitleSequence())
+		cleanup := restoreTerminalTitleSequence()
+		if taskbarProgressSupported() {
+			cleanup = taskbarProgressSequence(taskbarStateClear, 0) + cleanup
+		}
+		fmt.Print(cleanup)
 		if originalConsoleTitle != "" {
 			setConsoleTitleNative(originalConsoleTitle)
 		}
@@ -1306,27 +1417,31 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 
 	eventCh := make(chan tuiEvent, 100)
 	state := &tuiState{
-		mode:            modeInput,
-		query:           initialQuery,
-		cursorPos:       len(initialQuery),
-		activeElement:   0,
-		providers:       defaultTUIProviders(),
-		maxIterations:      6,
-		disablePlanning:    false,
-		enableQueryEnhance: true,
-		enableHypotheses:   true,
-		deepSearch:         false,
-		offlineMode:        offlineMode,
-		activeSetting:      0,
-		outputPath:      strings.TrimSpace(*outputFlag),
+		mode:                modeInput,
+		query:               initialQuery,
+		cursorPos:           len(initialQuery),
+		activeElement:       0,
+		providers:           defaultTUIProviders(),
+		maxIterations:       defaultLocalMaxIterations(6),
+		disablePlanning:     false,
+		enableQueryEnhance:  true,
+		enableHypotheses:    true,
+		deepSearch:          false,
+		offlineMode:         offlineMode,
+		activeSetting:       0,
+		outputPath:          strings.TrimSpace(*outputFlag),
 		outputPathCursorPos: len(strings.TrimSpace(*outputFlag)),
-		output:          stdout,
+		output:              stdout,
 		terminalSize: func() (int, int, error) {
 			return term.GetSize(int(os.Stdout.Fd()))
 		},
-		eventCh: eventCh,
+		eventCh:         eventCh,
 		logScrollLocked: true,
 		nativeTitle:     true,
+		// iTerm2 renders OSC 9 payloads as desktop notifications and Apple
+		// Terminal does not understand OSC 9;4 at all — only emit taskbar
+		// progress on terminals known to support it.
+		disableTaskbarOSC: !taskbarProgressSupported(),
 	}
 	researchLLMClient := resolveResearchLLMClient()
 	state.llmBackend = describeLLMBackend(researchLLMClient)
@@ -1383,7 +1498,9 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 	}
 
 	go func() {
-		var buf [16]byte
+		// Large enough that a typical bracketed paste arrives in one read; a key
+		// press is still delivered as its own short chunk.
+		var buf [8192]byte
 		for {
 			n, readErr := os.Stdin.Read(buf[:])
 			if readErr != nil {
@@ -1394,6 +1511,10 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 			eventCh <- tuiEvent{eventType: eventKey, keyBytes: keyBytes}
 		}
 	}()
+
+	// Redraw immediately when the terminal window is resized (SIGWINCH on
+	// unix; no-op on Windows, where the tick loop below catches size changes).
+	watchTerminalResize(eventCh)
 
 	tickerCtx, tickerCancel := context.WithCancel(context.Background())
 	defer tickerCancel()
@@ -1422,6 +1543,10 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 	for ev := range eventCh {
 		var shouldRender bool
 
+		if ev.eventType == eventResize {
+			state.render()
+			continue
+		}
 		if ev.eventType == eventTick {
 			if state.saveMsg != "" && !state.saveMsgAt.IsZero() && time.Since(state.saveMsgAt) > 4*time.Second {
 				state.saveMsg = ""
@@ -1431,9 +1556,27 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 			if state.mode == modeRunning {
 				shouldRender = true
 			}
+			// Cross-platform resize safety net: redraw if the terminal size
+			// changed since the last frame, even when SIGWINCH is unavailable
+			// (Windows) or while idle in input mode.
+			if w, h, err := state.currentTerminalSize(); err == nil && w > 0 && h > 0 {
+				if w != state.lastTerminalWidth || h != state.lastTerminalHeight {
+					shouldRender = true
+				}
+			}
 			if shouldRender {
 				state.render()
 			}
+			continue
+		}
+		if ev.eventType == eventProviderHealth {
+			for idx := range state.providers {
+				if state.providers[idx].code == ev.providerCode {
+					state.providers[idx].lastStatus = ev.providerStatus
+					break
+				}
+			}
+			state.render()
 			continue
 		}
 		if ev.eventType == eventRunUpdate {
@@ -1451,6 +1594,30 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 			b := ev.keyBytes
 			if len(b) == 1 && b[0] == 3 { // Ctrl+C
 				break
+			}
+			// Intercept terminal mouse reports before key parsing. Map the wheel
+			// to the existing Up/Down scroll handling and swallow every other
+			// mouse event, so clicks and drags never reach the key switch as
+			// garbage (the "acting weird on scroll" symptom on Terminal.app).
+			if isMouse, wheelUp, wheelDown := classifyMouseEvent(b); isMouse {
+				if state.mode == modeInput || (!wheelUp && !wheelDown) {
+					continue // nothing to scroll, or a non-wheel button: drop it
+				}
+				if wheelUp {
+					b = []byte{27, '[', 'A'} // synthesize Up arrow
+				} else {
+					b = []byte{27, '[', 'B'} // synthesize Down arrow
+				}
+			}
+			// Paste: a bracketed-paste burst (terminal injected the clipboard) or
+			// a literal Ctrl+V the host did not bind to paste. Sanitize to a single
+			// line and insert into the focused text field; swallow it otherwise so
+			// the bytes never reach the key parser as shortcuts.
+			if pasted, isPaste := pasteFromInput(b); isPaste {
+				if state.insertIntoActiveTextField(pasted) {
+					state.render()
+				}
+				continue
 			}
 			if state.showHelp {
 				state.showHelp = false
@@ -1586,7 +1753,7 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 						state.cachedResultLines = nil
 					} else if key == 127 || key == 8 { // Backspace
 						if len(state.resultFilter) > 0 {
-							state.resultFilter = state.resultFilter[:len(state.resultFilter)-1]
+							state.resultFilter = state.resultFilter[:prevCharBoundary(state.resultFilter, len(state.resultFilter))]
 						}
 						state.updateResultFilterMatches()
 					} else if key >= 32 && key <= 126 {
@@ -1655,8 +1822,9 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 						}
 					} else if key == 127 || key == 8 { // Backspace
 						if state.chatCursorPos > 0 && state.chatCursorPos <= len(state.chatInput) {
-							state.chatInput = state.chatInput[:state.chatCursorPos-1] + state.chatInput[state.chatCursorPos:]
-							state.chatCursorPos--
+							prev := prevCharBoundary(state.chatInput, state.chatCursorPos)
+							state.chatInput = state.chatInput[:prev] + state.chatInput[state.chatCursorPos:]
+							state.chatCursorPos = prev
 						}
 					} else if key == 1 { // Ctrl+A (Home)
 						state.chatCursorPos = 0
@@ -1674,7 +1842,8 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 					switch b[2] {
 					case '3': // Delete key
 						if state.chatCursorPos >= 0 && state.chatCursorPos < len(state.chatInput) {
-							state.chatInput = state.chatInput[:state.chatCursorPos] + state.chatInput[state.chatCursorPos+1:]
+							next := nextCharBoundary(state.chatInput, state.chatCursorPos)
+							state.chatInput = state.chatInput[:state.chatCursorPos] + state.chatInput[next:]
 						}
 					case '5': // PgUp — page toward older messages
 						state.chatScrollOffset += 10
@@ -1694,11 +1863,11 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 						}
 					case 'C': // Right — move input cursor
 						if state.chatCursorPos < len(state.chatInput) {
-							state.chatCursorPos++
+							state.chatCursorPos = nextCharBoundary(state.chatInput, state.chatCursorPos)
 						}
 					case 'D': // Left — move input cursor
 						if state.chatCursorPos > 0 {
-							state.chatCursorPos--
+							state.chatCursorPos = prevCharBoundary(state.chatInput, state.chatCursorPos)
 						}
 					case 'H': // Home
 						state.chatCursorPos = 0
@@ -1723,7 +1892,7 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 						state.clampProviderIdx()
 					} else if key == 127 || key == 8 { // Backspace
 						if len(state.providerFilter) > 0 {
-							state.providerFilter = state.providerFilter[:len(state.providerFilter)-1]
+							state.providerFilter = state.providerFilter[:prevCharBoundary(state.providerFilter, len(state.providerFilter))]
 							state.providerIdx = 0
 							state.clampProviderIdx()
 						}
@@ -1756,9 +1925,9 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 							state.pendingExitAt = time.Now()
 							state.validationMsg = "Exit WisDev? Press ESC again to confirm, any other key to cancel."
 						}
-					} else if key == '?' {
+					} else if key == '?' && (!state.inputElementIsTextField() || state.focusedTextFieldEmpty()) {
 						state.showHelp = true
-					} else if key == 'h' {
+					} else if key == 'h' && !state.inputElementIsTextField() {
 						if len(state.history) > 0 {
 							state.showHistoryBrowser = true
 							state.historyBrowserIdx = len(state.history) - 1
@@ -1995,7 +2164,7 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 						switch state.activeElement {
 						case 0:
 							if state.cursorPos < len(state.query) {
-								state.cursorPos++
+								state.cursorPos = nextCharBoundary(state.query, state.cursorPos)
 							}
 						case 1:
 							matching := state.matchingProviders()
@@ -2006,7 +2175,7 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 							state.activeSetting = moveSettingRight(state.activeSetting)
 						case 3:
 							if state.outputPathCursorPos < len(state.outputPath) {
-								state.outputPathCursorPos++
+								state.outputPathCursorPos = nextCharBoundary(state.outputPath, state.outputPathCursorPos)
 							}
 						case 4:
 							state.activeElement = 5
@@ -2015,7 +2184,7 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 						switch state.activeElement {
 						case 0:
 							if state.cursorPos > 0 {
-								state.cursorPos--
+								state.cursorPos = prevCharBoundary(state.query, state.cursorPos)
 							}
 						case 1:
 							if state.providerIdx > 0 {
@@ -2025,7 +2194,7 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 							state.activeSetting = moveSettingLeft(state.activeSetting)
 						case 3:
 							if state.outputPathCursorPos > 0 {
-								state.outputPathCursorPos--
+								state.outputPathCursorPos = prevCharBoundary(state.outputPath, state.outputPathCursorPos)
 							}
 						case 5:
 							state.activeElement = 4
@@ -2465,24 +2634,24 @@ func (s *tuiState) startResearchWithOptions(parentCtx context.Context, forceExha
 			runErr = withGlobalResearchLLMClient(llmClient, func() error {
 				var innerErr error
 				result, innerErr = agent.NewAgent(agentOpts...).RunYOLO(runCtx, agent.YOLORequest{
-				Task:                task,
-				OriginalQuery:       s.originalQuery,
-				PreparedQuery:       s.preparedQuery,
-				SeedQueries:         append([]string(nil), s.seedQueries...),
-				Domain:              s.detectedDomain,
-				MaxIterations:       s.maxIterations,
-				MinIterations:       minIterations,
-				MaxSearchTerms:      s.maxIterations,
-				HitsPerSearch:       hitsPerSearch,
-				MaxUniquePapers:     maxUniquePapers,
-				DisablePlanning:     s.disablePlanning,
-				DisableHypotheses:   !s.enableHypotheses,
-				DisableQueryEnhance: !s.enableQueryEnhance,
-				BypassSearchCache:   s.bypassSearchCache,
-				LongFormReport:      s.longFormReport,
-				OnProgress: func(event agent.ProgressEvent) {
-					s.handleProgressEvent(event)
-				},
+					Task:                task,
+					OriginalQuery:       s.originalQuery,
+					PreparedQuery:       s.preparedQuery,
+					SeedQueries:         append([]string(nil), s.seedQueries...),
+					Domain:              s.detectedDomain,
+					MaxIterations:       s.maxIterations,
+					MinIterations:       minIterations,
+					MaxSearchTerms:      s.maxIterations,
+					HitsPerSearch:       hitsPerSearch,
+					MaxUniquePapers:     maxUniquePapers,
+					DisablePlanning:     s.disablePlanning,
+					DisableHypotheses:   !s.enableHypotheses,
+					DisableQueryEnhance: !s.enableQueryEnhance,
+					BypassSearchCache:   s.bypassSearchCache,
+					LongFormReport:      s.longFormReport,
+					OnProgress: func(event agent.ProgressEvent) {
+						s.handleProgressEvent(event)
+					},
 				})
 				return innerErr
 			})
@@ -2673,7 +2842,6 @@ func (s *tuiState) scrollSelectedPaperIntoView() {
 	s.clampResultsScrollOffset()
 }
 
-
 func (s *tuiState) saveResults() {
 	savedPath, err := saveTUIResult(s.outputPath, s.runningTask, s.result, s.completedElapsed, s.runError, s.logs)
 	if err != nil {
@@ -2718,21 +2886,37 @@ func (s *tuiState) currentTerminalSize() (int, int, error) {
 }
 
 type tuiRenderer struct {
-	buf              *bytes.Buffer
-	row              int
-	width            int
-	height           int
-	theme            tuiTheme
-	hasScrollbar     bool
-	scrollbarTrack   bool
-	scrollOffset     int
-	totalLines       int
-	viewportHeight   int
-	drawnLinesCount  int
+	buf             *bytes.Buffer
+	row             int
+	width           int
+	height          int
+	theme           tuiTheme
+	hasScrollbar    bool
+	scrollbarTrack  bool
+	scrollOffset    int
+	totalLines      int
+	viewportHeight  int
+	drawnLinesCount int
+	maxRow          int
+}
+
+// beginLine reserves the next screen row for a draw helper. It reports false
+// once the frame has filled the terminal so an over-tall layout truncates at
+// the bottom instead of scrolling the alternate screen — every scrolled row
+// pushes the frame's top border off-screen, the classic clipped-TUI symptom
+// on small terminal windows.
+func (r *tuiRenderer) beginLine() bool {
+	if r.maxRow > 0 && r.row >= r.maxRow {
+		return false
+	}
+	r.row++
+	return true
 }
 
 func (r *tuiRenderer) drawBorder(label string) {
-	r.row++
+	if !r.beginLine() {
+		return
+	}
 	leftPadding := 2
 	labelWidth := visibleWidth(label)
 	rightPadding := r.width - labelWidth - leftPadding - 2
@@ -2748,7 +2932,9 @@ func (r *tuiRenderer) drawBorder(label string) {
 }
 
 func (r *tuiRenderer) drawFooterBorder() {
-	r.row++
+	if !r.beginLine() {
+		return
+	}
 	r.buf.WriteString(r.theme.Border + "└")
 	r.buf.WriteString(strings.Repeat("─", r.width-2))
 	r.buf.WriteString("┘\033[0m\n")
@@ -2758,12 +2944,16 @@ func (r *tuiRenderer) drawScholarLMBar(theme tuiTheme) {
 	if r.width < 20 {
 		return
 	}
-	r.row++
+	if !r.beginLine() {
+		return
+	}
 	r.buf.WriteString(scholarLMBrandingBarContent(r.width, theme) + "\n")
 }
 
 func (r *tuiRenderer) drawDivider() {
-	r.row++
+	if !r.beginLine() {
+		return
+	}
 	r.buf.WriteString(r.theme.Border + "├")
 	r.buf.WriteString(strings.Repeat("─", r.width-2))
 	r.buf.WriteString("┤\033[0m\n")
@@ -2793,7 +2983,9 @@ func (r *tuiRenderer) scrollbarGutter() string {
 }
 
 func (r *tuiRenderer) drawLine(content string, colorCode string) {
-	r.row++
+	if !r.beginLine() {
+		return
+	}
 	gutter := r.scrollbarGutter()
 	gutterWidth := visibleWidth(gutter)
 	// │ + space + content + gutter + │ == width
@@ -2883,6 +3075,41 @@ func (s *tuiState) focusLabel() string {
 	}
 }
 
+// flushFrame writes a fully-composed frame to the terminal without a
+// full-screen clear. It erases each line's tail in place (\033[K) so a shorter
+// new line cleanly overwrites a longer previous one — avoiding the flicker that
+// a per-frame \033[2J causes on terminals lacking synchronized output, such as
+// macOS Terminal.app — and drops the newline after the final row so the bottom
+// line never lands on the bottom margin and scrolls the top of the frame
+// off-screen. Callers must already terminate the frame with \033[J so any rows
+// left over below a now-shorter frame are cleared.
+func (s *tuiState) flushFrame(buf *bytes.Buffer) {
+	// Lines end in \r\n, not bare \n: term.MakeRaw clears OPOST on unix, so
+	// the tty stops translating LF into CRLF and a bare \n moves down a row
+	// without returning the carriage — on macOS/Linux every line would start
+	// where the previous one ended, staircasing the whole frame. Windows
+	// ConPTY keeps output processing, which is why this only shows on mac.
+	out := bytes.ReplaceAll(buf.Bytes(), []byte("\n"), []byte("\033[K\r\n"))
+	if i := bytes.LastIndex(out, []byte("\033[K\r\n")); i >= 0 {
+		// Replace the final "\033[K\r\n" with "\033[K": erase the last row's
+		// tail but emit no newline, keeping the cursor off the bottom margin.
+		tail := append([]byte("\033[K"), out[i+5:]...)
+		out = append(out[:i:i], tail...)
+	}
+	// Bracket the frame in BSU/ESU so terminals with synchronized output
+	// (iTerm2, Ghostty, WezTerm, kitty) repaint it atomically; terminals that
+	// do not know the private mode ignore it.
+	framed := make([]byte, 0, len(out)+16)
+	framed = append(framed, "\033[?2026h"...)
+	framed = append(framed, out...)
+	framed = append(framed, "\033[?2026l"...)
+	if s.output != nil {
+		s.output.Write(framed)
+	} else {
+		os.Stdout.Write(framed)
+	}
+}
+
 func (s *tuiState) render() {
 	var width, height int
 	if s.terminalSize != nil {
@@ -2898,6 +3125,7 @@ func (s *tuiState) render() {
 		s.cachedResultLines = nil
 	}
 	s.lastTerminalWidth = width
+	s.lastTerminalHeight = height
 
 	if seq := s.terminalStatusSequence(time.Now()); seq != "" {
 		if s.output != nil {
@@ -2913,22 +3141,13 @@ func (s *tuiState) render() {
 	if width < minTermWidth || height < minTermHeight {
 		if s.mode == modeRunning {
 			var compactBuf bytes.Buffer
-			compactBuf.WriteString("\033[H\033[K")
+			compactBuf.WriteString("\033[H")
 			frame := tuiSpinnerFrame(time.Now())
 			compactBuf.WriteString(fmt.Sprintf("%s Running... [Ctrl+C to cancel] %d papers found", frame, s.papersFound))
-			if s.output != nil {
-				s.output.Write(compactBuf.Bytes())
-			} else {
-				os.Stdout.Write(compactBuf.Bytes())
-			}
+			compactBuf.WriteString("\033[J")
+			s.flushFrame(&compactBuf)
 			return
 		}
-
-		var boxBuf bytes.Buffer
-		boxBuf.WriteString("\033[H\033[2J")
-		boxBuf.WriteString("┌─────────────────────────────────────────────────────────────┐\n")
-		boxBuf.WriteString("│              Terminal window is too small!                  │\n")
-		boxBuf.WriteString("├─────────────────────────────────────────────────────────────┤\n")
 
 		wStatus := "✗"
 		if width >= minTermWidth {
@@ -2939,17 +3158,35 @@ func (s *tuiState) render() {
 			hStatus = "✓"
 		}
 
-		boxBuf.WriteString(fmt.Sprintf("│  Width:  %3d / 65   %s                                       │\n", width, wStatus))
-		boxBuf.WriteString(fmt.Sprintf("│  Height: %3d / 15   %s                                       │\n", height, hStatus))
-		boxBuf.WriteString("│                                                             │\n")
-		boxBuf.WriteString("│  Please enlarge your terminal window to resume.             │\n")
-		boxBuf.WriteString("└─────────────────────────────────────────────────────────────┘\n")
-
-		if s.output != nil {
-			s.output.Write(boxBuf.Bytes())
+		var boxBuf bytes.Buffer
+		boxBuf.WriteString("\033[H")
+		if width >= minTermWidth {
+			// The 65-column box fits (we are here because the height is too
+			// small), so render it as before.
+			boxBuf.WriteString("┌─────────────────────────────────────────────────────────────┐\n")
+			boxBuf.WriteString("│              Terminal window is too small!                  │\n")
+			boxBuf.WriteString("├─────────────────────────────────────────────────────────────┤\n")
+			boxBuf.WriteString(fmt.Sprintf("│  Width:  %3d / 65   %s                                       │\n", width, wStatus))
+			boxBuf.WriteString(fmt.Sprintf("│  Height: %3d / 15   %s                                       │\n", height, hStatus))
+			boxBuf.WriteString("│                                                             │\n")
+			boxBuf.WriteString("│  Please enlarge your terminal window to resume.             │\n")
+			boxBuf.WriteString("└─────────────────────────────────────────────────────────────┘\n")
 		} else {
-			os.Stdout.Write(boxBuf.Bytes())
+			// Too narrow for the fixed box; emit plain lines truncated to the
+			// terminal width so nothing wraps and garbles the screen.
+			for _, ln := range []string{
+				"Terminal too small",
+				fmt.Sprintf("Width  %d/%d %s", width, minTermWidth, wStatus),
+				fmt.Sprintf("Height %d/%d %s", height, minTermHeight, hStatus),
+				"Please enlarge the window.",
+			} {
+				boxBuf.WriteString(truncateVisible(ln, width))
+				boxBuf.WriteString("\n")
+			}
 		}
+
+		boxBuf.WriteString("\033[J")
+		s.flushFrame(&boxBuf)
 		return
 	}
 
@@ -2960,6 +3197,10 @@ func (s *tuiState) render() {
 		width:  width,
 		height: height,
 		theme:  theme,
+		// Reserve the bottom two rows for the brand and status bars so a
+		// saturated layout cannot push them past the last row and scroll
+		// the alternate screen (clipping the top border).
+		maxRow: height - 2,
 	}
 
 	drawBorder := r.drawBorder
@@ -2967,7 +3208,9 @@ func (s *tuiState) render() {
 	drawDivider := r.drawDivider
 	drawLine := r.drawLine
 
-	buf.WriteString("\033[2J\033[H")
+	// Home the cursor only; per-line erase happens in flushFrame so we avoid the
+	// full-screen \033[2J that flickers on terminals without synchronized output.
+	buf.WriteString("\033[H")
 
 	if s.showHelp {
 		drawBorder("WisDev TUI — Keyboard Help")
@@ -3039,11 +3282,7 @@ func (s *tuiState) render() {
 		r.drawHintLine("Press any key to close help")
 		drawFooterBorder()
 		buf.WriteString("\033[J")
-		if s.output != nil {
-			s.output.Write(buf.Bytes())
-		} else {
-			os.Stdout.Write(buf.Bytes())
-		}
+		s.flushFrame(&buf)
 		return
 	}
 
@@ -3092,11 +3331,7 @@ func (s *tuiState) render() {
 		r.drawHintLine("Up/Down navigate  Enter select  ESC/h close")
 		drawFooterBorder()
 		buf.WriteString("\033[J")
-		if s.output != nil {
-			s.output.Write(buf.Bytes())
-		} else {
-			os.Stdout.Write(buf.Bytes())
-		}
+		s.flushFrame(&buf)
 		return
 	}
 
@@ -3123,11 +3358,7 @@ func (s *tuiState) render() {
 		r.drawHintLine("Up/Down navigate  Enter open in results view  ESC close")
 		drawFooterBorder()
 		buf.WriteString("\033[J")
-		if s.output != nil {
-			s.output.Write(buf.Bytes())
-		} else {
-			os.Stdout.Write(buf.Bytes())
-		}
+		s.flushFrame(&buf)
 		return
 	}
 
@@ -3180,11 +3411,7 @@ func (s *tuiState) render() {
 		r.drawHintLine("c=copy BibTeX  |  any key=close")
 		drawFooterBorder()
 		buf.WriteString("\033[J")
-		if s.output != nil {
-			s.output.Write(buf.Bytes())
-		} else {
-			os.Stdout.Write(buf.Bytes())
-		}
+		s.flushFrame(&buf)
 		return
 	}
 
@@ -3192,25 +3419,22 @@ func (s *tuiState) render() {
 		if s.showSessionRestorePrompt {
 			drawBorder("Session Restore Prompt")
 			drawLine(" Previous session found:", theme.StatusInfo)
-			qPreview := s.sessionQueryPreview
-			if len(qPreview) > width-10 {
-				qPreview = qPreview[:width-13] + "..."
-			}
+			qPreview := truncateVisible(s.sessionQueryPreview, width-10)
 			drawLine(fmt.Sprintf("   Query: %q", qPreview), theme.InputActive)
 			drawLine("", "")
 			drawLine(" Restore this session? [y = Yes, n = No/Discard]", theme.StatusWarn)
 			r.drawHintLine("y=restore  n=discard")
 			drawFooterBorder()
 			buf.WriteString("\033[J")
-			if s.output != nil {
-				s.output.Write(buf.Bytes())
-			} else {
-				os.Stdout.Write(buf.Bytes())
-			}
+			s.flushFrame(&buf)
 			return
 		}
 
 		drawBorder(fmt.Sprintf("WisDev Research  v%s  ·  try ScholarLM", Version))
+		// The full input layout needs ~25 rows and macOS Terminal.app defaults
+		// to 80x24; below this height drop the decorative rows so the frame
+		// fits the screen instead of truncating the controls at the bottom.
+		compactInput := height < 30
 		// Trident banner on the first screen only when there is vertical room;
 		// it embeds the tagline, so the compact line is the short-terminal fallback.
 		if height >= 32 {
@@ -3220,8 +3444,10 @@ func (s *tuiState) render() {
 		} else {
 			drawLine(" Plan · Search · Synthesize", theme.DimText)
 		}
-		for _, line := range scholarLMBrandingTUICallout(theme) {
-			drawLine(" "+line, "")
+		if !compactInput {
+			for _, line := range scholarLMBrandingTUICallout(theme) {
+				drawLine(" "+line, "")
+			}
 		}
 		drawDivider()
 
@@ -3259,7 +3485,7 @@ func (s *tuiState) render() {
 		} else {
 			headerText := fmt.Sprintf("Search Providers: %d selected%s (Space toggle, a all, b/c/p/g/x presets)", enabledCount, presetHint)
 			drawLine(sectionFocusPrefix(s.activeElement == 1)+headerText, providerHeaderStyle)
-			if s.activeElement == 1 {
+			if s.activeElement == 1 && !compactInput {
 				drawLine("   Presets: b=biomedical  c=cs  p=physics  g=general  x=preprints", theme.HintText)
 			}
 		}
@@ -3378,7 +3604,9 @@ func (s *tuiState) render() {
 		} else {
 			settingHint = "Exhaustive runs all max iterations before early stop."
 		}
-		drawLine("   "+settingHint, theme.DimText)
+		if !compactInput {
+			drawLine("   "+settingHint, theme.DimText)
+		}
 		drawDivider()
 
 		pathPrompt := sectionFocusPrefix(s.activeElement == 3) + "Save Path: "
@@ -3459,13 +3687,7 @@ func (s *tuiState) render() {
 		drawLine(" Live activity log:", theme.StatusInfo)
 		s.logMutex.Lock()
 		logCount := len(s.logs)
-		maxLogsToDisplay := height - 14
-		if s.degradedSteps > 0 {
-			maxLogsToDisplay--
-		}
-		if maxLogsToDisplay < 1 {
-			maxLogsToDisplay = 1
-		}
+		maxLogsToDisplay := s.runningLogViewport(height)
 
 		startIndex := logCount - maxLogsToDisplay - s.logScrollOffset
 		if startIndex < 0 {
@@ -3639,6 +3861,9 @@ func (s *tuiState) render() {
 	}
 
 	drawStatusBar := func() {
+		if !r.beginLine() {
+			return
+		}
 		historyCount := len(s.history)
 		timeStr := time.Now().Format("2006-01-02 15:04:05")
 
@@ -3656,26 +3881,28 @@ func (s *tuiState) render() {
 		}
 
 		available := width
-		if len(statusText) > available {
-			statusText = statusText[:available]
+		// Measure by display width, not bytes: a byte-length slice can cut a
+		// multibyte rune in half and mis-pads the reverse-video bar so it does
+		// not span the full row.
+		if visibleWidth(statusText) > available {
+			statusText = truncateVisible(statusText, available)
 		}
-		padding := available - len(statusText)
+		padding := available - visibleWidth(statusText)
 		if padding < 0 {
 			padding = 0
 		}
 		buf.WriteString("\033[7m" + statusText + strings.Repeat(" ", padding) + "\033[0m\n")
 	}
+	// The two rows reserved by the content clamp belong to these bars;
+	// raise the cap so they can draw, still guarded against overflow.
+	r.maxRow = r.height
 	r.drawScholarLMBar(theme)
 	drawStatusBar()
 
 	// Text fields render an inline caret; keep the hardware cursor hidden.
 	buf.WriteString("\033[?25l\033[J")
 
-	if s.output != nil {
-		s.output.Write(buf.Bytes())
-	} else {
-		os.Stdout.Write(buf.Bytes())
-	}
+	s.flushFrame(&buf)
 }
 
 func wrapText(text string, width int) []string {
@@ -3751,6 +3978,16 @@ func runeDisplayWidth(r rune) int {
 	if r < 0x20 || r == 0x7f {
 		return 0
 	}
+	// Zero-width: combining marks, variation selectors (FE0F picks the
+	// emoji glyph), ZWSP/ZWNJ/ZWJ, word joiner. Counting these as 1
+	// pads lines short and misaligns the right border on accented
+	// titles and emoji.
+	if r == 0x200B || r == 0x200C || r == 0x200D || r == 0x2060 || (r >= 0xFE00 && r <= 0xFE0F) {
+		return 0
+	}
+	if unicode.In(r, unicode.Mn, unicode.Me) {
+		return 0
+	}
 	switch {
 	case r >= 0x1100 && r <= 0x115F,
 		r >= 0x2E80 && r <= 0xA4CF,
@@ -3768,6 +4005,43 @@ func runeDisplayWidth(r rune) int {
 			return 2
 		}
 		return 1
+	}
+}
+
+// classifyMouseEvent reports whether a raw input chunk is a terminal mouse
+// report and, if so, whether it encodes a wheel-up or wheel-down. It understands
+// both the SGR encoding (ESC [ < Cb ; Cx ; Cy M|m) and the legacy X10 encoding
+// (ESC [ M Cb Cx Cy). Non-wheel mouse events (clicks, drags, motion) return
+// isMouse=true with both wheel flags false so the caller can swallow them rather
+// than letting their bytes reach the key parser. Modifier bits (shift/meta/ctrl)
+// are masked off before classifying the button.
+func classifyMouseEvent(b []byte) (isMouse, wheelUp, wheelDown bool) {
+	var code int
+	switch {
+	case len(b) >= 4 && b[0] == 27 && b[1] == '[' && b[2] == '<': // SGR
+		i := 3
+		for i < len(b) && b[i] >= '0' && b[i] <= '9' {
+			code = code*10 + int(b[i]-'0')
+			i++
+		}
+		if i >= len(b) || b[i] != ';' { // not a well-formed SGR mouse report
+			return false, false, false
+		}
+	case len(b) >= 6 && b[0] == 27 && b[1] == '[' && b[2] == 'M': // legacy X10
+		code = int(b[3]) - 32
+	default:
+		return false, false, false
+	}
+	if code&0x40 == 0 { // bit 6 marks a wheel event; otherwise it's a button/move
+		return true, false, false
+	}
+	switch code & 0x03 {
+	case 0:
+		return true, true, false // wheel up
+	case 1:
+		return true, false, true // wheel down
+	default:
+		return true, false, false // horizontal wheel: swallow
 	}
 }
 
@@ -3842,7 +4116,7 @@ func truncateVisible(str string, limit int) string {
 			i++
 			continue
 		}
-		
+
 		r := runes[i]
 		w := runeDisplayWidth(r)
 		if visibleCount+w <= limit-1 {
@@ -3891,6 +4165,12 @@ func truncateVisible(str string, limit int) string {
 			if hasMore {
 				result = append(result, '…')
 				result = append(result, []rune("\033[0m")...)
+				// Close any OSC 8 hyperlink whose terminator was truncated
+				// away, or everything drawn afterwards stays clickable. A
+				// spare terminator on a balanced string is a no-op.
+				if strings.Contains(str, "\033]8;") {
+					result = append(result, []rune("\033]8;;\007")...)
+				}
 				break
 			} else {
 				result = append(result, r)

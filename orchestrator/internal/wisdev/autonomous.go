@@ -1449,6 +1449,11 @@ func remainingLoopSearchLimit(currentUniqueCount int, hitsPerSearch int, maxUniq
 
 func loopMinimumIterationsMet(req LoopRequest, completedIterations int) bool {
 	min := req.MinIterations
+	// In unleashed mode, enforce a floor so the loop does not converge on the
+	// first pass and actually exercises its iteration budget for elaborate runs.
+	if floor := unleashedMinLoopIterations(req.MaxIterations); floor > min {
+		min = floor
+	}
 	if min <= 0 {
 		return true
 	}

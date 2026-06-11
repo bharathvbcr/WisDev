@@ -50,6 +50,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return runShortcut(args[1:], stdout, stderr)
 	case "yolo":
 		return runYOLO(args[1:], stdout, stderr)
+	case "max":
+		return runMax(args[1:], stdout, stderr)
 	case "serve":
 		return runServe(stdout, stderr)
 	case "mcp":
@@ -64,6 +66,10 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return runDemo(args[1:], stdout, stderr)
 	case "tui":
 		return runTUI(args[1:], stdout, stderr)
+	case "update":
+		return runUpdate(args[1:], stdout, stderr)
+	case "guide":
+		return runGuide(stdout)
 	default:
 		printUsage(stderr)
 		if suggestion := suggestCommand(args[0]); suggestion != "" {
@@ -77,6 +83,31 @@ func runShortcut(args []string, stdout, stderr io.Writer) error {
 	normalized := normalizeRunArgs(args)
 	yoloArgs := append([]string{"--local", "--provider", defaultRunProviders}, normalized...)
 	return runYOLO(yoloArgs, stdout, stderr)
+}
+
+// runMax runs a local research query with every quality knob maxed out:
+// it forces unleashed budgets/iterations for this process and cranks the loop
+// depth, search breadth, paper retention, long-form synthesis, and timeout.
+// Enhancements (query rewrite, hypotheses, planning) are on by default and left
+// enabled. Any flags the user supplies are appended last and therefore override
+// these presets. Usage: wisdev max "research question".
+func runMax(args []string, stdout, stderr io.Writer) error {
+	// Guarantee maximum elaboration even if WISDEV_UNLEASHED is not set in the
+	// environment: this raises the autonomous-loop iteration floor and lifts the
+	// budget/token/timeout caps for this run.
+	_ = os.Setenv("WISDEV_UNLEASHED", "1")
+	normalized := normalizeRunArgs(args)
+	maxArgs := append([]string{
+		"--local",
+		"--long-form",
+		"--stages",
+		"--max-iterations", "12",
+		"--max-search-terms", "20",
+		"--hits-per-search", "12",
+		"--max-unique-papers", "80",
+		"--timeout", "30m",
+	}, normalized...)
+	return runYOLO(maxArgs, stdout, stderr)
 }
 
 func normalizeRunArgs(args []string) []string {
@@ -101,6 +132,21 @@ func normalizeRunArgs(args []string) []string {
 	return normalized
 }
 
+// defaultLocalMaxIterations picks the default local YOLO iteration ceiling.
+// In unleashed mode (WISDEV_UNLEASHED) it defaults high so a research run is
+// elaborate and multi-pass; otherwise it returns the caller's standard default.
+func defaultLocalMaxIterations(base int) int {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WISDEV_UNLEASHED"))) {
+	case "1", "true", "yes", "on":
+		if base > 12 {
+			return base
+		}
+		return 12
+	default:
+		return base
+	}
+}
+
 func runYOLO(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("yolo", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -118,7 +164,7 @@ func runYOLO(args []string, stdout, stderr io.Writer) error {
 	providers := fs.String("provider", "", "comma-separated built-in provider names for local mode")
 	domain := fs.String("domain", "", "research domain hint for local mode")
 	projectID := fs.String("project-id", "", "project or session id for local mode")
-	maxIterations := fs.Int("max-iterations", 3, "maximum local YOLO loop iterations")
+	maxIterations := fs.Int("max-iterations", defaultLocalMaxIterations(3), "maximum local YOLO loop iterations")
 	maxSearchTerms := fs.Int("max-search-terms", 6, "maximum local search terms")
 	hitsPerSearch := fs.Int("hits-per-search", 5, "local hits per search")
 	maxUniquePapers := fs.Int("max-unique-papers", 20, "maximum unique papers retained locally")

@@ -207,8 +207,11 @@ func TestClampLogScrollOffset(t *testing.T) {
 	}
 	s.logScrollOffset = 999
 	s.clampLogScrollOffset()
-	if s.logScrollOffset != 34 {
-		t.Fatalf("expected capped offset 34, got %d", s.logScrollOffset)
+	// 50 logs minus the running-screen viewport: height 30 - 11 chrome rows
+	// (no optional domain/enhanced/degraded/sparkline rows on this state).
+	want := 50 - s.runningLogViewport(30)
+	if s.logScrollOffset != want {
+		t.Fatalf("expected capped offset %d, got %d", want, s.logScrollOffset)
 	}
 }
 

@@ -3,8 +3,9 @@ package cli
 import "strings"
 
 var suggestCommands = []string{
-	"search", "ask", "run", "yolo", "demo", "mcp", "mcp-config", "setup",
+	"search", "ask", "run", "yolo", "max", "demo", "mcp", "mcp-config", "setup",
 	"doctor", "check", "providers", "sources", "version", "serve", "help", "tui", "ui",
+	"update", "upgrade", "guide", "commands",
 }
 
 func suggestCommand(input string) string {

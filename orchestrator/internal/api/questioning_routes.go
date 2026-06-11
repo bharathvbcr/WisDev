@@ -540,7 +540,7 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 			session["status"] = status
 		}
 		session["currentQuestionIndex"] = nextIndex
-		session["updatedAt"] = time.Now().UnixMilli()
+		bumpUpdatedAt(session)
 		traceID := wisdev.NewTraceID()
 		if err := agentGateway.StateStore.PersistAgentSessionMutation(req.SessionID, wisdev.AsOptionalString(session["userId"]), session, wisdev.RuntimeJournalEntry{
 			EventID:   wisdev.NewTraceID(),

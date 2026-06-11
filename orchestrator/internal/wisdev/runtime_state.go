@@ -666,13 +666,26 @@ FROM wisdev_policy_history
 	return events, nil
 }
 
+// monotonicUpdatedAt returns a strictly increasing optimistic-concurrency
+// token: the current UnixMilli, advanced past the payload's previous token
+// when two mutations land inside the same millisecond. Without this, a
+// same-millisecond save reuses the token and stale expectedUpdatedAt writes
+// pass the conflict check undetected.
+func monotonicUpdatedAt(payload map[string]any) int64 {
+	next := time.Now().UnixMilli()
+	if prev := IntValue64(payload["updatedAt"]); next <= prev {
+		next = prev + 1
+	}
+	return next
+}
+
 func (s *RuntimeStateStore) SaveFullPaperJob(jobID string, payload map[string]any) error {
 	normalizedJobID, err := normalizePersistenceKey("jobId", jobID)
 	if err != nil {
 		return err
 	}
 	payload = cloneAnyMap(payload)
-	updatedAt := time.Now().UnixMilli()
+	updatedAt := monotonicUpdatedAt(payload)
 	payload["updatedAt"] = updatedAt
 	if err := s.ensureStorage(); err != nil && s.db == nil {
 		return err
@@ -706,7 +719,7 @@ func (s *RuntimeStateStore) SaveResearchJob(jobID string, payload map[string]any
 	if err != nil {
 		return err
 	}
-	updatedAt := time.Now().UnixMilli()
+	updatedAt := monotonicUpdatedAt(payload)
 	payload = cloneAnyMap(payload)
 	payload["jobId"] = normalizedJobID
 	payload["updatedAt"] = updatedAt
@@ -798,7 +811,7 @@ func (s *RuntimeStateStore) PersistFullPaperMutation(jobID string, payload map[s
 	}
 	jobID = normalizedJobID
 	payload = cloneAnyMap(payload)
-	updatedAt := time.Now().UnixMilli()
+	updatedAt := monotonicUpdatedAt(payload)
 	payload["updatedAt"] = updatedAt
 	userID := strings.TrimSpace(AsOptionalString(payload["userId"]))
 	sessionID := strings.TrimSpace(AsOptionalString(payload["sessionId"]))
@@ -895,7 +908,7 @@ func (s *RuntimeStateStore) SaveEvidenceDossier(dossierID string, payload map[st
 	if err != nil {
 		return err
 	}
-	updatedAt := time.Now().UnixMilli()
+	updatedAt := monotonicUpdatedAt(payload)
 	payload = cloneAnyMap(payload)
 	payload["dossierId"] = normalizedDossierID
 	payload["updatedAt"] = updatedAt
@@ -982,7 +995,7 @@ func (s *RuntimeStateStore) SaveQuestState(questID string, payload map[string]an
 	if err != nil {
 		return err
 	}
-	updatedAt := time.Now().UnixMilli()
+	updatedAt := monotonicUpdatedAt(payload)
 	payload = cloneAnyMap(payload)
 	payload["questId"] = normalizedQuestID
 	payload["updatedAt"] = updatedAt
@@ -1066,7 +1079,7 @@ func (s *RuntimeStateStore) SaveModeManifest(sessionID string, payload map[strin
 	if err != nil {
 		return err
 	}
-	updatedAt := time.Now().UnixMilli()
+	updatedAt := monotonicUpdatedAt(payload)
 	payload = cloneAnyMap(payload)
 	payload["sessionId"] = normalizedSessionID
 	payload["updatedAt"] = updatedAt

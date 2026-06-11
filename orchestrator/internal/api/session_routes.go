@@ -827,7 +827,7 @@ func (s *wisdevServer) registerSessionRoutes(mux *http.ServeMux, agentGateway *w
 			session["orchestrationPlan"] = buildAgentOrchestrationPlan(session)
 		}
 		session["status"] = "completed"
-		session["updatedAt"] = time.Now().UnixMilli()
+		bumpUpdatedAt(session)
 		if strings.TrimSpace(wisdev.AsOptionalString(session["questionStopReason"])) == "" {
 			session["questionStopReason"] = "evidence_sufficient"
 		}
@@ -1100,7 +1100,7 @@ func (s *wisdevServer) registerSessionRoutes(mux *http.ServeMux, agentGateway *w
 			coverageMap[strings.TrimSpace(key)] = normalizedValues
 		}
 		session["orchestrationPlan"] = buildAgentOrchestrationPlanWithQueries(session, normalizedQueries, coverageMap, req.GeneratedFromTree)
-		session["updatedAt"] = time.Now().UnixMilli()
+		bumpUpdatedAt(session)
 		session = ensureSessionQuestState(session)
 		session = ensureSessionArchitectureState(session)
 		traceID := wisdev.NewTraceID()

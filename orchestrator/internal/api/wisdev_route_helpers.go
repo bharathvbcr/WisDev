@@ -1731,6 +1731,18 @@ func requireOwnerAccess(w http.ResponseWriter, r *http.Request, ownerID string) 
 	return true
 }
 
+// bumpUpdatedAt advances the optimistic-concurrency token. The token is a
+// UnixMilli timestamp, so two mutations inside the same millisecond would
+// otherwise produce identical tokens and stale-version writes would pass
+// assertExpectedUpdatedAt undetected.
+func bumpUpdatedAt(state map[string]any) {
+	next := time.Now().UnixMilli()
+	if prev := wisdev.IntValue64(state["updatedAt"]); next <= prev {
+		next = prev + 1
+	}
+	state["updatedAt"] = next
+}
+
 func assertExpectedUpdatedAt(w http.ResponseWriter, expected int64, state map[string]any) bool {
 	if expected <= 0 {
 		return true
@@ -1803,7 +1815,7 @@ func upsertDraftingState(agentGateway *wisdev.AgentGateway, documentID string, o
 
 	workspace["drafting"] = drafting
 	job["workspace"] = workspace
-	job["updatedAt"] = time.Now().UnixMilli()
+	bumpUpdatedAt(job)
 
 	return agentGateway.StateStore.SaveFullPaperJob(documentID, job)
 }

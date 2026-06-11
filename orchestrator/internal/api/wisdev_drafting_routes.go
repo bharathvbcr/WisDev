@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
 )
@@ -87,7 +86,7 @@ func (s *wisdevServer) registerDraftingRoutes(mux *http.ServeMux, agentGateway *
 		if job, err := loadFullPaperJobState(agentGateway, req.DocumentID); err == nil {
 			job["currentStageId"] = "drafting"
 			job["currentStage"] = "drafting"
-			job["updatedAt"] = time.Now().UnixMilli()
+			bumpUpdatedAt(job)
 			stages := sliceAnyMap(job["stages"])
 			for index, stage := range stages {
 				switch wisdev.AsOptionalString(stage["id"]) {
@@ -202,7 +201,7 @@ func (s *wisdevServer) registerDraftingRoutes(mux *http.ServeMux, agentGateway *
 		if job, err := loadFullPaperJobState(agentGateway, req.DocumentID); err == nil {
 			job["currentStageId"] = "drafting"
 			job["currentStage"] = "drafting"
-			job["updatedAt"] = time.Now().UnixMilli()
+			bumpUpdatedAt(job)
 			workspace := mapAny(job["workspace"])
 			drafting := mapAny(workspace["drafting"])
 			sectionOrder := sliceStrings(drafting["sectionOrder"])

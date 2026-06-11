@@ -252,7 +252,12 @@ func TestWisDev_FullPaperHandlers(t *testing.T) {
 		sectionDrafts := sliceAnyMap(workspace["sectionDraftArtifacts"])
 		require.NotEmpty(t, sectionDrafts)
 		sectionID := wisdev.AsOptionalString(sectionDrafts[0]["sectionId"])
-		actualUpdatedAt := int64(IntValue(job["updatedAt"]))
+		// Use the persisted job's token: the start response snapshot can be
+		// older than the stored token now that saves bump it monotonically.
+		jobID := wisdev.AsOptionalString(job["jobId"])
+		persistedJob, err := stateStore.LoadFullPaperJob(jobID)
+		require.NoError(t, err)
+		actualUpdatedAt := wisdev.IntValue64(persistedJob["updatedAt"])
 
 		body := map[string]any{
 			"jobId":             job["jobId"],
@@ -295,7 +300,12 @@ func TestWisDev_FullPaperHandlers(t *testing.T) {
 		workspace := mapAny(job["workspace"])
 		visualArtifacts := sliceAnyMap(workspace["visualArtifacts"])
 		require.NotEmpty(t, visualArtifacts)
-		actualUpdatedAt := int64(IntValue(job["updatedAt"]))
+		// Use the persisted job's token: the start response snapshot can be
+		// older than the stored token now that saves bump it monotonically.
+		visualJobID := wisdev.AsOptionalString(job["jobId"])
+		persistedVisualJob, err := stateStore.LoadFullPaperJob(visualJobID)
+		require.NoError(t, err)
+		actualUpdatedAt := wisdev.IntValue64(persistedVisualJob["updatedAt"])
 
 		body := map[string]any{
 			"jobId":             job["jobId"],

@@ -4,7 +4,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from routers.azure_compute_router import router, raptor_service, tree_cache
+from routers.compute_router import router, raptor_service, tree_cache
 from services.bm25_service import get_bm25_index
 
 
@@ -28,7 +28,7 @@ def client():
 
 def test_extract_pdf_returns_compatibility_fields(client):
     with patch(
-        "routers.azure_compute_router.extract_pdf_content",
+        "routers.compute_router.extract_pdf_content",
         return_value={"full_text": "Recovered text", "pageCount": 2, "paper": {"title": "Paper"}},
     ):
         response = client.post(
@@ -46,7 +46,7 @@ def test_extract_pdf_returns_compatibility_fields(client):
 
 def test_chunk_and_embed_returns_snake_and_camel_fields(client):
     with patch(
-        "routers.azure_compute_router.chunk_with_offsets",
+        "routers.compute_router.chunk_with_offsets",
         return_value=[
             {
                 "content": "Alpha chunk",
@@ -58,7 +58,7 @@ def test_chunk_and_embed_returns_snake_and_camel_fields(client):
         ],
     ):
         with patch(
-            "routers.azure_compute_router.embedding_service.embed_batch_async",
+            "routers.compute_router.embedding_service.embed_batch_async",
             new=AsyncMock(return_value=[[0.1, 0.2, 0.3]]),
         ):
             response = client.post(

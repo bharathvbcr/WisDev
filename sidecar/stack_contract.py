@@ -107,6 +107,8 @@ ENDPOINTS_MANIFEST = {
             "/ml/bm25/index",
             "/ml/bm25/search",
             "/skills/register",
+            "/wisdev/manuscript/section/generate",
+            "/wisdev/manuscript/section/refine",
         ],
     },
     "grpcTargets": {

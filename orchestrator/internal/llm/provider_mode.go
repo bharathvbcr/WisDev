@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"context"
 	"strings"
 
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/stackconfig"
@@ -64,13 +65,35 @@ func shouldWireCloudProvider(mode LLMProviderMode) bool {
 
 // DescribeProviderChain returns a human-readable backend label for status surfaces.
 func DescribeProviderChain(c *Client) string {
+	return describeProviderChain(c, "")
+}
+
+// DescribeProviderChainLive is DescribeProviderChain with the local model
+// resolved against the running inference server (e.g. the model actually
+// loaded in Ollama) instead of the configured default. Falls back to the
+// static label when no server is reachable.
+func DescribeProviderChainLive(ctx context.Context, c *Client) string {
+	override := ""
+	if c != nil && c.OpenAICompatible != nil {
+		if live, ok := c.OpenAICompatible.LiveModel(ctx); ok {
+			override = live + " (live)"
+		}
+	}
+	return describeProviderChain(c, override)
+}
+
+func describeProviderChain(c *Client, localModelOverride string) string {
 	if c == nil {
 		return "sidecar"
 	}
 	mode := ResolveLLMProviderMode()
 	local := ""
 	if c.OpenAICompatible != nil {
-		local = c.OpenAICompatible.BackendName() + "/" + c.OpenAICompatible.DefaultModel()
+		model := c.OpenAICompatible.DefaultModel()
+		if localModelOverride != "" {
+			model = localModelOverride
+		}
+		local = c.OpenAICompatible.BackendName() + "/" + model
 	}
 	cloud := ""
 	if c.VertexDirect != nil {

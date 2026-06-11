@@ -16,7 +16,10 @@ const wisdevStructuredOutputSchemaInstruction = "Use the supplied structured out
 
 const wisdevResearchComplexitySchema = `{"type":"object","required":["complexity"],"properties":{"complexity":{"type":"string","enum":["low","medium","high"]}}}`
 
-const wisdevRecoverableStructuredTimeout = 12 * time.Second
+// 20s leaves headroom for one full-length structured attempt plus a retry at
+// the sidecar; 12s frequently cancelled requests Go-side mid-generation and
+// forced deterministic fallbacks.
+const wisdevRecoverableStructuredTimeout = 20 * time.Second
 
 func appendWisdevStructuredOutputInstruction(prompt string) string {
 	trimmed := strings.TrimSpace(prompt)

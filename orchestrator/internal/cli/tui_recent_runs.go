@@ -128,5 +128,6 @@ func (s *tuiState) openRecentRun(entry recentRunEntry) {
 	s.resultFilter = ""
 	s.resultFilterOn = false
 	s.resultFilterMatch = nil
+	s.resetFollowUpChat()
 	s.setSaveMsg("Loaded saved run " + filepath.Base(entry.Path))
 }

@@ -7,7 +7,7 @@
   "embeddings": {
     "primary": "gemini-embedding-2",
     "standard": "gemini-embedding-2",
-    "fallback": "gemini-embedding-2"
+    "fallback": "gemini-embedding-001"
   },
   "locations": {
     "generative": "global",

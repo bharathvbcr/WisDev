@@ -59,7 +59,8 @@ from proto import (
 from routers.llm_router import router as llm_router
 from routers.ml_router import router as ml_router
 from routers.agent_router import router as agent_router
-from routers.azure_compute_router import router as azure_compute_router
+from routers.compute_router import router as compute_router
+from routers.manuscript_router import router as manuscript_router
 from routers.wisdev_action_router import router as wisdev_action_router
 from services.dynamic_skill_registry import router as skill_registry_router
 from services.gemini_service import GeminiService, get_gemini_runtime_diagnostics
@@ -648,7 +649,8 @@ def create_app() -> FastAPI:
     app.include_router(llm_router)
     app.include_router(ml_router)
     app.include_router(agent_router)
-    app.include_router(azure_compute_router)
+    app.include_router(manuscript_router)
+    app.include_router(compute_router)
     app.include_router(skill_registry_router)
     app.include_router(wisdev_action_router, prefix="/wisdev")
     # Compatibility shim for older Go-side fallback clients that called the

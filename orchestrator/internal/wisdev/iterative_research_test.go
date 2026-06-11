@@ -12,7 +12,21 @@ import (
 
 // --- IterativeResearch ---
 
+// forceHeuristicPRM pins callPRM to its deterministic heuristic fallback by
+// removing the LLM client for the test's duration. Without this, ambient
+// Vertex credentials let the live LLM judge score the reward — and it
+// correctly scores these synthetic placeholder papers low, which is both
+// nondeterministic and breaks early-exit assertions (and burns ~3 minutes of
+// real model calls per run).
+func forceHeuristicPRM(t *testing.T) {
+	t.Helper()
+	orig := GlobalLLMClient
+	GlobalLLMClient = nil
+	t.Cleanup(func() { GlobalLLMClient = orig })
+}
+
 func TestIterativeResearch_EmptyQueries_NoPanic(t *testing.T) {
+	forceHeuristicPRM(t)
 	orig := ParallelSearch
 	defer func() { ParallelSearch = orig }()
 	ParallelSearch = func(ctx context.Context, _ redis.UniversalClient, query string, opts SearchOptions) (*MultiSourceResult, error) {
@@ -30,6 +44,7 @@ func TestIterativeResearch_EmptyQueries_NoPanic(t *testing.T) {
 }
 
 func TestIterativeResearch_SingleIteration_ReturnsPapers(t *testing.T) {
+	forceHeuristicPRM(t)
 	orig := ParallelSearch
 	defer func() { ParallelSearch = orig }()
 	ParallelSearch = func(ctx context.Context, _ redis.UniversalClient, query string, opts SearchOptions) (*MultiSourceResult, error) {
@@ -51,6 +66,7 @@ func TestIterativeResearch_SingleIteration_ReturnsPapers(t *testing.T) {
 }
 
 func TestIterativeResearch_EarlyExitOnHighReward(t *testing.T) {
+	forceHeuristicPRM(t)
 	orig := ParallelSearch
 	defer func() { ParallelSearch = orig }()
 	// Return many papers with DOIs so the PRM reward is high (>= threshold).
@@ -69,6 +85,7 @@ func TestIterativeResearch_EarlyExitOnHighReward(t *testing.T) {
 }
 
 func TestIterativeResearch_DefaultsApplied(t *testing.T) {
+	forceHeuristicPRM(t)
 	orig := ParallelSearch
 	defer func() { ParallelSearch = orig }()
 	ParallelSearch = func(ctx context.Context, _ redis.UniversalClient, query string, opts SearchOptions) (*MultiSourceResult, error) {
@@ -83,6 +100,7 @@ func TestIterativeResearch_DefaultsApplied(t *testing.T) {
 }
 
 func TestIterativeResearch_IterationLogFields(t *testing.T) {
+	forceHeuristicPRM(t)
 	orig := ParallelSearch
 	defer func() { ParallelSearch = orig }()
 	call := 0

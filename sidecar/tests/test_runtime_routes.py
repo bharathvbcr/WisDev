@@ -1,17 +1,16 @@
-import json
-from pathlib import Path
-
 from fastapi.testclient import TestClient
 
 import main
 from main import app
 from artifacts.schema import ARTIFACT_SCHEMA_VERSION
+from stack_contract import ENDPOINTS_MANIFEST
 
 
 def _manifest_python_paths() -> set[str]:
-    manifest_path = Path(__file__).resolve().parents[3] / 'config' / 'endpoints.manifest.json'
-    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-    return set(manifest['httpRoutes']['python_sidecar'])
+    # Validate against this repo's own stack contract rather than the parent
+    # app's config/endpoints.manifest.json, which does not exist in a
+    # standalone OSS checkout.
+    return set(ENDPOINTS_MANIFEST['httpRoutes']['python_sidecar'])
 
 
 def test_manifest_python_routes_are_mounted() -> None:
@@ -21,7 +20,16 @@ def test_manifest_python_routes_are_mounted() -> None:
         for path in [getattr(route, 'path', None)]
         if isinstance(path, str)
     }
-    assert _manifest_python_paths().issubset(mounted_paths)
+    missing = set()
+    for manifest_path in _manifest_python_paths():
+        if manifest_path.endswith('/*'):
+            prefix = manifest_path[:-1]
+            if any(path.startswith(prefix) for path in mounted_paths):
+                continue
+        elif manifest_path in mounted_paths:
+            continue
+        missing.add(manifest_path)
+    assert not missing
 
 def test_deepagents_capabilities_contract_smoke() -> None:
     client = TestClient(app)

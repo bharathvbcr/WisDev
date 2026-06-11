@@ -9,7 +9,7 @@ import (
 )
 
 func TestClient_Uninitialized(t *testing.T) {
-	c := &Client{grpcAddr: "localhost:1"} // Invalid addr
+	c := &Client{grpcAddr: closedLoopbackAddr(t)} // freshly-closed port: dial is refused
 	ctx := context.Background()
 
 	t.Run("Generate", func(t *testing.T) {

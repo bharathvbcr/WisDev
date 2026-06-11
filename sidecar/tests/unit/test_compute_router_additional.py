@@ -1,4 +1,4 @@
-"""Additional tests for routers/azure_compute_router.py branch coverage."""
+"""Additional tests for routers/compute_router.py branch coverage."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from routers.azure_compute_router import (
+from routers.compute_router import (
     _build_tree_response,
     _int_value,
     _list_value,
@@ -110,7 +110,7 @@ def test_extract_pdf_rejects_empty_request(client):
 
 def test_extract_pdf_extractor_http_exception_is_forwarded(client):
     with patch(
-        "routers.azure_compute_router.extract_pdf_content",
+        "routers.compute_router.extract_pdf_content",
         side_effect=HTTPException(status_code=500, detail="extractor failure"),
     ):
         response = client.post(
@@ -124,7 +124,7 @@ def test_extract_pdf_extractor_http_exception_is_forwarded(client):
 
 def test_extract_pdf_extractor_generic_exception_returns_500(client):
     with patch(
-        "routers.azure_compute_router.extract_pdf_content",
+        "routers.compute_router.extract_pdf_content",
         side_effect=RuntimeError("extractor crashed"),
     ):
         response = client.post(
@@ -138,7 +138,7 @@ def test_extract_pdf_extractor_generic_exception_returns_500(client):
 
 @pytest.mark.asyncio
 async def test_extract_pdf_from_url_uses_httpx():
-    with patch("routers.azure_compute_router.httpx.AsyncClient") as mock_client_cls:
+    with patch("routers.compute_router.httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()
         mock_response = MagicMock()
         mock_response.content = b"bytes"
@@ -149,7 +149,7 @@ async def test_extract_pdf_from_url_uses_httpx():
         mock_client_cls.return_value = mock_client
 
         with patch(
-            "routers.azure_compute_router.extract_pdf_content",
+            "routers.compute_router.extract_pdf_content",
             return_value={"full_text": "doc", "pageCount": 1, "paper": {"title": "ok"}},
         ):
             response = await extract_pdf(
@@ -162,7 +162,7 @@ async def test_extract_pdf_from_url_uses_httpx():
 
 @pytest.mark.asyncio
 async def test_extract_pdf_from_url_with_http_error_returns_502():
-    with patch("routers.azure_compute_router.httpx.AsyncClient") as mock_client_cls:
+    with patch("routers.compute_router.httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(side_effect=httpx.HTTPError("download failed"))
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -181,11 +181,11 @@ def test_chunk_and_embed_requires_text_and_paper_id(client):
 
 def test_chunk_and_embed_surface_embedding_failure(client):
     with patch(
-        "routers.azure_compute_router.chunk_with_offsets",
+        "routers.compute_router.chunk_with_offsets",
         return_value=[{"content": "bad", "char_start": 0, "char_end": 3}],
     ):
         with patch(
-            "routers.azure_compute_router.embedding_service.embed_batch_async",
+            "routers.compute_router.embedding_service.embed_batch_async",
             AsyncMock(side_effect=RuntimeError("embedding unavailable")),
         ):
             response = client.post("/chunk-and-embed", json={"paper_id": "p", "text": "bad"})
@@ -235,15 +235,15 @@ def test_build_tree_uses_cached_tree_when_available(client):
 
 def test_raptor_query_generates_embedding_when_missing_embedding(client):
     with patch(
-        "routers.azure_compute_router.embedding_service.embed_single_async",
+        "routers.compute_router.embedding_service.embed_single_async",
         AsyncMock(return_value=[0.25, 0.75]),
     ) as mock_embed:
         with patch(
-            "routers.azure_compute_router.run_in_threadpool",
+            "routers.compute_router.run_in_threadpool",
             new=AsyncMock(side_effect=lambda fn, *args, **kwargs: fn(*args, **kwargs)),
         ):
             with patch(
-                "routers.azure_compute_router.raptor_service.query_tree",
+                "routers.compute_router.raptor_service.query_tree",
                 return_value=[
                     {
                         "chunk_id": "chunk-1",
@@ -279,7 +279,7 @@ def test_build_tree_with_only_invalid_papers_is_rejected(client):
 
 
 def test_raptor_query_fails_when_query_embedding_generation_fails(client):
-    with patch("routers.azure_compute_router.embedding_service.embed_single_async", AsyncMock(side_effect=RuntimeError("bad"))):
+    with patch("routers.compute_router.embedding_service.embed_single_async", AsyncMock(side_effect=RuntimeError("bad"))):
         response = client.post(
             "/raptor/query",
             json={"tree_id": "missing", "query": "anything"},
@@ -297,11 +297,11 @@ def test_update_tree_requires_tree_id_and_new_papers(client):
 
 def test_update_tree_skips_invalid_entries_and_missing_paper_ids(client):
     with patch(
-        "routers.azure_compute_router.raptor_service.incremental_update",
+        "routers.compute_router.raptor_service.incremental_update",
         return_value={"tree_id": "tree-updated", "levels": 1, "total_nodes": 1},
     ) as update_mock:
         with patch(
-            "routers.azure_compute_router.run_in_threadpool",
+            "routers.compute_router.run_in_threadpool",
             new=AsyncMock(side_effect=lambda fn, *args, **kwargs: fn(*args, **kwargs)),
         ):
             response = client.post(
@@ -323,11 +323,11 @@ def test_update_tree_skips_invalid_entries_and_missing_paper_ids(client):
 
 def test_update_tree_builds_payload_with_incremental_update(client):
     with patch(
-        "routers.azure_compute_router.raptor_service.incremental_update",
+        "routers.compute_router.raptor_service.incremental_update",
         return_value={"tree_id": "tree-updated", "levels": 2, "total_nodes": 7},
     ):
         with patch(
-            "routers.azure_compute_router.run_in_threadpool",
+            "routers.compute_router.run_in_threadpool",
             new=AsyncMock(side_effect=lambda fn, *args, **kwargs: fn(*args, **kwargs)),
         ):
             response = client.post(

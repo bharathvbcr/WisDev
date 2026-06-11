@@ -147,6 +147,10 @@ def test_resolve_google_api_key_uses_secret_manager_and_env_fallback(monkeypatch
 
 
 def test_google_api_key_resolution_reports_skipped_and_missing(monkeypatch):
+    # Hermetic: a developer machine may have real keys exported, which would
+    # resolve via env and report "ok" before the skipped/missing paths.
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.setattr(secret_manager, "_skip_secret_manager", lambda: True)
     monkeypatch.setattr(secret_manager, "_project_id", lambda: "")
     monkeypatch.setattr(secret_manager, "_project_id_source", lambda: "none")

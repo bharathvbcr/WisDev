@@ -29,7 +29,10 @@ type AutonomousLoop struct {
 	longFormReport     bool
 }
 
-const optionalCritiqueRefinementLatencyBudget = 15 * time.Second
+// 30s gives the sidecar room for a realistic first attempt (~18s) plus one
+// retry; the prior 15s budget produced 9s+4s attempts that routinely timed
+// out and silently degraded every refinement to the heuristic path.
+const optionalCritiqueRefinementLatencyBudget = 30 * time.Second
 
 // assembleDossierMaxConcurrentExtractions bounds the per-paper LLM evidence
 // extraction fan-out in assembleDossier.
@@ -3332,6 +3335,11 @@ func (l *AutonomousLoop) synthesizePlainTextFallback(ctx context.Context, query 
 	for _, item := range evidence {
 		evidenceText.WriteString(fmt.Sprintf("- [%s] %s: %s\n", item.PaperID, item.Claim, item.Snippet))
 	}
+	styleRequirements := ""
+	if l.longFormReport {
+		styleRequirements = `
+- Open with an extended "Introduction" heading (multiple paragraphs framing the question, why it matters, and the report's scope), followed by a substantial "Background" heading explaining foundational concepts, terminology, and prior work a newcomer needs — both noticeably longer than the remaining sections and still grounded in the Sources and Verified Evidence lists.`
+	}
 	prompt := fmt.Sprintf(`Synthesize a comprehensive research report for the query: "%s"
 Based on %d sources found. Write for working researchers: explanatory, insight-driven, and critical rather than encyclopedic.
 
@@ -3342,13 +3350,13 @@ Requirements:
 - If evidence is insufficient for a claim, say so explicitly instead of guessing.
 - Do not end sentences or bullets with ellipsis ("..."); write complete thoughts.
 - Structure with headings: Research landscape, Synthesis, Key literature, Grounded evidence, Implications for researchers, Questions worth investigating.
-- End with a short methodological note on evidence limits.
+- End with a short methodological note on evidence limits.%s
 
 Sources:
 %s
 
 Verified Evidence:
-%s`, query, len(papers), sourceText.String(), evidenceText.String())
+%s`, query, len(papers), styleRequirements, sourceText.String(), evidenceText.String())
 	resp, err := l.llmClient.Generate(ctx, &llmv1.GenerateRequest{
 		Prompt: prompt,
 		Model:  llm.ResolveHeavyModel(),

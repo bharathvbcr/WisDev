@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -140,9 +141,17 @@ func TestRun_TemporalEnabledButClientUnavailable(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")
 	t.Setenv("UPSTASH_REDIS_URL", "")
 	t.Setenv("TEMPORAL_ENABLED", "1")
-	t.Setenv("TEMPORAL_ADDRESS", "127.0.0.1:12345")
+	// A just-released loopback port is refused deterministically; a fixed
+	// port like 12345 can be occupied by an unrelated dev service.
+	ln, lnErr := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, lnErr)
+	closedAddr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+	t.Setenv("TEMPORAL_ADDRESS", closedAddr)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	// Generous ceiling: startup probes can take >1s under full-suite load;
+	// the temporal dial failure itself returns promptly.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	err := Run(ctx, "temporal-client-unavailable")
@@ -222,7 +231,10 @@ func TestRun_AgentGatewayEnabledAndGRPCListenFailure(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")
 	t.Setenv("UPSTASH_REDIS_URL", "")
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	// Run's startup probes (sidecar warm-up, redis dials) can take >1s when
+	// the whole suite runs in parallel; the listener failure itself returns
+	// promptly, so this ceiling only matters if the expected error never comes.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	err := Run(ctx, "gateway-grpc-listen-fail")

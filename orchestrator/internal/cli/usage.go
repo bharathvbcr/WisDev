@@ -29,6 +29,7 @@ func printUsage(w io.Writer) {
 	note(w, "  -j, --json      JSON output")
 	note(w, "  --offline       Smoke test without network")
 	note(w, "  --no-enhance    Disable AI structured query preparation (on by default)")
+	note(w, "  --long-form     Extended Introduction and Background sections (yolo local)")
 	note(w, "  --remote        Use HTTP orchestrator (yolo only)")
 	fmt.Fprintln(w)
 

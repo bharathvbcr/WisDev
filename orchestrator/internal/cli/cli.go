@@ -125,6 +125,7 @@ func runYOLO(args []string, stdout, stderr io.Writer) error {
 	disablePlanning := fs.Bool("disable-planning", false, "disable programmatic planning in local mode")
 	disableHypotheses := fs.Bool("disable-hypotheses", false, "disable hypothesis generation in local mode")
 	noEnhance := fs.Bool("no-enhance", false, "disable query grammar, typo, and acronym enhancement")
+	longForm := fs.Bool("long-form", false, "synthesize extended Introduction and Background sections")
 	stages := fs.Bool("stages", false, "stream research loop stage events to stderr during local runs")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -157,6 +158,7 @@ func runYOLO(args []string, stdout, stderr io.Writer) error {
 			disablePlanning:     *disablePlanning,
 			disableHypotheses:   *disableHypotheses,
 			disableQueryEnhance: *noEnhance,
+			longFormReport:      *longForm,
 		})
 	}
 
@@ -224,6 +226,7 @@ type localYOLOOptions struct {
 	disablePlanning     bool
 	disableHypotheses   bool
 	disableQueryEnhance bool
+	longFormReport      bool
 }
 
 func runLocalYOLO(stdout, stderr io.Writer, opts localYOLOOptions) error {
@@ -277,6 +280,7 @@ func runLocalYOLO(stdout, stderr io.Writer, opts localYOLOOptions) error {
 				DisablePlanning:     opts.disablePlanning,
 				DisableHypotheses:   opts.disableHypotheses,
 				DisableQueryEnhance: opts.disableQueryEnhance,
+				LongFormReport:      opts.longFormReport,
 				}
 				if opts.showStages {
 					yoloReq.OnProgress = func(event agent.ProgressEvent) {

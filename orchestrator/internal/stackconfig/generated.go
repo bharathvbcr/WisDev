@@ -40,7 +40,7 @@ const generatedManifestJSON = `{
   ],
   "httpRoutes": {
     "go_orchestrator": ["/health", "/healthz", "/readiness", "/runtime/health", "/metrics", "/search/*", "/wisdev/*", "/rag/*", "/paper/*", "/papers/*", "/topic-tree/*"],
-    "python_sidecar": ["/health", "/readiness", "/metrics", "/llm/generate", "/llm/generate/stream", "/llm/structured-output", "/llm/embed", "/llm/embed/batch", "/llm/health", "/ml/pdf", "/ml/embed", "/ml/bm25/index", "/ml/bm25/search", "/skills/register"]
+    "python_sidecar": ["/health", "/readiness", "/metrics", "/llm/generate", "/llm/generate/stream", "/llm/structured-output", "/llm/embed", "/llm/embed/batch", "/llm/health", "/ml/pdf", "/ml/embed", "/ml/bm25/index", "/ml/bm25/search", "/skills/register", "/wisdev/manuscript/section/generate", "/wisdev/manuscript/section/refine"]
   },
   "grpcTargets": {
     "python_sidecar": {"envVar": "PYTHON_SIDECAR_GRPC_ADDR", "transport": "grpc-protobuf", "source": "go_orchestrator", "target": "python_sidecar", "defaultAddress": "127.0.0.1:50052"},

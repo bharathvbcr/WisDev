@@ -100,10 +100,24 @@ func (c *OpenAICompatibleClient) BackendName() string {
 	if c == nil {
 		return ""
 	}
-	if c.apiStyle == ollamaNativeAPIStyle {
+	if c.looksLikeOllama() {
 		return "ollama"
 	}
 	return "openai_compatible"
+}
+
+// looksLikeOllama reports whether the configured endpoint is an Ollama
+// server, regardless of whether requests go through the OpenAI-compatible
+// /v1 surface or the native API.
+func (c *OpenAICompatibleClient) looksLikeOllama() bool {
+	if c == nil {
+		return false
+	}
+	if c.apiStyle == ollamaNativeAPIStyle {
+		return true
+	}
+	root := strings.ToLower(c.ollamaRootURL)
+	return strings.Contains(root, ":11434") || strings.Contains(root, "ollama")
 }
 
 func (c *OpenAICompatibleClient) CredentialSource() string {
@@ -217,6 +231,59 @@ func (c *OpenAICompatibleClient) resolveModel(requested string) string {
 		return model
 	}
 	return c.defaultModel
+}
+
+// LiveModel resolves the model actually serving requests on a running
+// inference server: the model currently loaded into Ollama memory when one
+// is, otherwise the server catalog entry matching the configured model
+// (e.g. configured "llama3.1" resolves to the live tag "llama3.1:8b").
+func (c *OpenAICompatibleClient) LiveModel(ctx context.Context) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	if c.looksLikeOllama() {
+		if name, ok := c.ollamaLoadedModel(ctx); ok {
+			return name, true
+		}
+	}
+	if ok, name := c.ModelAvailable(ctx); ok && strings.TrimSpace(name) != "" {
+		return name, true
+	}
+	return "", false
+}
+
+// ollamaLoadedModel returns the first model currently loaded into memory on
+// a running Ollama server (GET /api/ps), if any.
+func (c *OpenAICompatibleClient) ollamaLoadedModel(ctx context.Context) (string, bool) {
+	if c.ollamaRootURL == "" {
+		return "", false
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.ollamaRootURL+"/api/ps", nil)
+	if err != nil {
+		return "", false
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", false
+	}
+	var parsed struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return "", false
+	}
+	for _, model := range parsed.Models {
+		if name := strings.TrimSpace(model.Name); name != "" {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // ModelAvailable reports whether the configured default model is present on the server.

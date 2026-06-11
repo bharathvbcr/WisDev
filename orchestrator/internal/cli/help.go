@@ -14,10 +14,11 @@ Runs local research with default providers openalex,arxiv.
 Aliases: ask`,
 	"ask": `Alias for wisdev search.`,
 	"run": `Legacy alias for wisdev search (optional search: prefix).`,
-	"yolo": `Usage: wisdev yolo [-q] [-v] [-j] [--offline] [--no-enhance] "question"
+	"yolo": `Usage: wisdev yolo [-q] [-v] [-j] [--offline] [--no-enhance] [--long-form] "question"
        wisdev yolo --remote "question"
 
 Local by default. AI structured query preparation (grammar, domain, seeds) is on unless --no-enhance.
+--long-form synthesizes extended Introduction and Background sections.
 Use --remote for the HTTP orchestrator.`,
 	"mcp": `Usage: wisdev mcp [--provider openalex,arxiv]
 

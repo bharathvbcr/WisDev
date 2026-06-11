@@ -2,10 +2,25 @@ package wisdev
 
 import (
 	"context"
+	"net"
 	"strings"
 	"testing"
 	"time"
 )
+
+// closedLoopbackAddr reserves a loopback port and closes it so dials are
+// refused deterministically — fixed low ports (e.g. :1) can be bound,
+// firewalled, or sit in a Windows excluded range and answer differently.
+func closedLoopbackAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve closed port: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	return addr
+}
 
 type stubSearchProvider struct {
 	queries []string
@@ -128,7 +143,7 @@ func TestRunYOLOAdmitsMeniciusTypoResults(t *testing.T) {
 
 func TestRunYOLOUsesPublicSearchProvider(t *testing.T) {
 	// Hermetic: never reach a real sidecar that may be running locally.
-	t.Setenv("PYTHON_SIDECAR_GRPC_ADDR", "127.0.0.1:1")
+	t.Setenv("PYTHON_SIDECAR_GRPC_ADDR", closedLoopbackAddr(t))
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -162,7 +177,7 @@ func TestRunYOLOUsesPublicSearchProvider(t *testing.T) {
 
 func TestRunYOLOExposesResearchAgentAgenda(t *testing.T) {
 	// Hermetic: never reach a real sidecar that may be running locally.
-	t.Setenv("PYTHON_SIDECAR_GRPC_ADDR", "127.0.0.1:1")
+	t.Setenv("PYTHON_SIDECAR_GRPC_ADDR", closedLoopbackAddr(t))
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -228,7 +243,7 @@ func containsFragment(values []string, fragment string) bool {
 
 func TestRunYOLOOnProgressEmitsStages(t *testing.T) {
 	// Hermetic: never reach a real sidecar that may be running locally.
-	t.Setenv("PYTHON_SIDECAR_GRPC_ADDR", "127.0.0.1:1")
+	t.Setenv("PYTHON_SIDECAR_GRPC_ADDR", closedLoopbackAddr(t))
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 

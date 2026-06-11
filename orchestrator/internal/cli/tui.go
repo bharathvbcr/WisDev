@@ -164,9 +164,14 @@ type tuiState struct {
 	citationJumpOn      bool
 	citationJumpInput   string
 
-	// Follow-up question state (results mode: f -> new run seeded with prior context)
-	followUpOn          bool
-	followUpInput       string
+	// Follow-up chat state (results mode: f -> grounded Q&A over current sources)
+	chatOn              bool
+	chatInput           string
+	chatCursorPos       int
+	chatHistory         []tuiChatMessage // guarded by logMutex
+	chatBusy            bool             // guarded by logMutex
+	chatGen             int              // guarded by logMutex; invalidates stale replies
+	chatScrollOffset    int              // lines scrolled up from the transcript bottom
 	keepPrevResultOnce  bool
 
 	// Provider filter state
@@ -188,6 +193,12 @@ type tuiState struct {
 
 	// Suppression flag
 	noBell              bool
+
+	// Terminal integration state (title / taskbar progress / chime)
+	lastTermTitle       string
+	lastTaskbarSeq      string
+	bellWriter          io.Writer
+	nativeTitle         bool
 
 	// Cache rendered lines
 	cachedResultLines   []string
@@ -426,7 +437,7 @@ func (s *tuiState) startFollowUpResearch(ctx context.Context, followUp string) {
 	s.savePreviousResult()
 	s.keepPrevResultOnce = true
 	s.saveQueryUndoState()
-	s.query = composeFollowUpQuery(s.originalQuery, followUp)
+	s.query = composeFollowUpQuery(s.currentResultQuery(), followUp)
 	s.cursorPos = len(s.query)
 	s.setSaveMsg("")
 	s.startResearch(ctx)
@@ -1273,6 +1284,20 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 	fmt.Print("\033[?1049h\033[?25l\033[?1006h\033[2J\033[H")
 	defer fmt.Print("\033[?1006l\033[?25h\033[?1049l")
 
+	// Rename the terminal tab/window while the TUI owns it; clear any taskbar
+	// progress and restore the previous title on exit. The title is set both
+	// via OSC and Win32 (ConPTY forwards either) so it works across hosts.
+	originalConsoleTitle := getConsoleTitleNative()
+	fmt.Print(saveTerminalTitleSequence())
+	fmt.Print(terminalTitleSequence(termTitleBase))
+	setConsoleTitleNative(termTitleBase)
+	defer func() {
+		fmt.Print(taskbarProgressSequence(taskbarStateClear, 0) + restoreTerminalTitleSequence())
+		if originalConsoleTitle != "" {
+			setConsoleTitleNative(originalConsoleTitle)
+		}
+	}()
+
 	initialQuery := strings.TrimSpace(*queryFlag)
 	offlineMode := *offline || *demo
 	if *demo && initialQuery == "" {
@@ -1301,12 +1326,17 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 		},
 		eventCh: eventCh,
 		logScrollLocked: true,
+		nativeTitle:     true,
 	}
-	state.llmBackend = describeLLMBackend(resolveResearchLLMClient())
+	researchLLMClient := resolveResearchLLMClient()
+	state.llmBackend = describeLLMBackend(researchLLMClient)
 	state.loadHistory()
 	state.checkSessionRestore()
 	if !offlineMode {
 		state.checkProvidersHealth()
+		// Resolve the live local model (e.g. what Ollama actually has loaded)
+		// in the background and refresh the backend label when it differs.
+		state.refreshLLMBackendLive(researchLLMClient)
 	}
 
 	if *noEnhanceFlag {
@@ -1592,24 +1622,88 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 				continue
 			}
 
-			// Overlay 3c: Follow-up question input (f -> new run with prior context)
-			if state.mode == modeResults && state.followUpOn {
+			// Overlay 3c: Follow-up chat (f -> grounded Q&A over current sources)
+			if state.mode == modeResults && state.chatOn {
+				if scrollDelta := parseMouseScrollDelta(b); scrollDelta != 0 {
+					state.chatScrollOffset -= scrollDelta
+					if state.chatScrollOffset < 0 {
+						state.chatScrollOffset = 0
+					}
+					state.render()
+					continue
+				}
 				if len(b) == 1 {
 					key := b[0]
 					if key == 27 { // ESC
-						state.followUpOn = false
-						state.followUpInput = ""
+						state.chatOn = false
+						state.chatInput = ""
+						state.chatCursorPos = 0
 					} else if key == 13 || key == 10 { // Enter
-						followUp := state.followUpInput
-						state.followUpOn = false
-						state.followUpInput = ""
-						state.startFollowUpResearch(ctx, followUp)
-					} else if key == 127 || key == 8 { // Backspace
-						if len(state.followUpInput) > 0 {
-							state.followUpInput = state.followUpInput[:len(state.followUpInput)-1]
+						question := strings.TrimSpace(state.chatInput)
+						if question != "" && !state.chatIsBusy() {
+							state.chatInput = ""
+							state.chatCursorPos = 0
+							state.askFollowUpChat(ctx, question)
 						}
+					} else if key == 18 { // Ctrl+R — escalate question to a full research run
+						question := strings.TrimSpace(state.chatInput)
+						if question != "" {
+							state.chatOn = false
+							state.chatInput = ""
+							state.chatCursorPos = 0
+							state.startFollowUpResearch(ctx, question)
+						}
+					} else if key == 127 || key == 8 { // Backspace
+						if state.chatCursorPos > 0 && state.chatCursorPos <= len(state.chatInput) {
+							state.chatInput = state.chatInput[:state.chatCursorPos-1] + state.chatInput[state.chatCursorPos:]
+							state.chatCursorPos--
+						}
+					} else if key == 1 { // Ctrl+A (Home)
+						state.chatCursorPos = 0
+					} else if key == 5 { // Ctrl+E (End)
+						state.chatCursorPos = len(state.chatInput)
+					} else if key == 11 { // Ctrl+K (Clear to end)
+						state.chatInput = state.chatInput[:state.chatCursorPos]
+					} else if key == 23 { // Ctrl+W (Delete word left)
+						state.chatInput, state.chatCursorPos = deleteWordLeft(state.chatInput, state.chatCursorPos)
 					} else if key >= 32 && key <= 126 {
-						state.followUpInput += string(key)
+						state.chatInput = state.chatInput[:state.chatCursorPos] + string(key) + state.chatInput[state.chatCursorPos:]
+						state.chatCursorPos++
+					}
+				} else if len(b) == 4 && b[0] == 27 && b[1] == '[' && b[3] == '~' {
+					switch b[2] {
+					case '3': // Delete key
+						if state.chatCursorPos >= 0 && state.chatCursorPos < len(state.chatInput) {
+							state.chatInput = state.chatInput[:state.chatCursorPos] + state.chatInput[state.chatCursorPos+1:]
+						}
+					case '5': // PgUp — page toward older messages
+						state.chatScrollOffset += 10
+					case '6': // PgDn — page toward the latest reply
+						state.chatScrollOffset -= 10
+						if state.chatScrollOffset < 0 {
+							state.chatScrollOffset = 0
+						}
+					}
+				} else if len(b) > 2 && b[0] == 27 && b[1] == '[' {
+					switch b[2] {
+					case 'A': // Up — scroll transcript toward older messages
+						state.chatScrollOffset++
+					case 'B': // Down — back toward the latest reply
+						if state.chatScrollOffset > 0 {
+							state.chatScrollOffset--
+						}
+					case 'C': // Right — move input cursor
+						if state.chatCursorPos < len(state.chatInput) {
+							state.chatCursorPos++
+						}
+					case 'D': // Left — move input cursor
+						if state.chatCursorPos > 0 {
+							state.chatCursorPos--
+						}
+					case 'H': // Home
+						state.chatCursorPos = 0
+					case 'F': // End
+						state.chatCursorPos = len(state.chatInput)
 					}
 				}
 				state.render()
@@ -2103,9 +2197,11 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 						} else {
 							state.setSaveMsg("No sources available for citation jump.")
 						}
-					} else if key == 'f' { // Follow-up question: new run with prior context
-						state.followUpOn = true
-						state.followUpInput = ""
+					} else if key == 'f' { // Follow-up chat: grounded Q&A over current sources
+						state.chatOn = true
+						state.chatInput = ""
+						state.chatCursorPos = 0
+						state.chatScrollOffset = 0
 					} else if key == 'n' && len(state.resultFilterMatch) > 0 {
 						state.resultFilterCursor = (state.resultFilterCursor + 1) % len(state.resultFilterMatch)
 						state.scrollOffset = state.resultFilterMatch[state.resultFilterCursor]
@@ -2254,6 +2350,7 @@ func (s *tuiState) startResearchWithOptions(parentCtx context.Context, forceExha
 	}
 	s.keepPrevResultOnce = false
 	s.cachedResultLines = nil
+	s.resetFollowUpChat()
 	s.saveSession()
 
 	s.validationMsg = ""
@@ -2270,6 +2367,7 @@ func (s *tuiState) startResearchWithOptions(parentCtx context.Context, forceExha
 	s.seedQueries = nil
 	if task != "" {
 		llmClient := resolveResearchLLMClient()
+		s.refreshLLMBackendLive(llmClient)
 		prepCtx, prepCancel := context.WithTimeout(parentCtx, 20*time.Second)
 		prepared := prepareResearchQueryWithLLM(prepCtx, task, llmClient, !s.enableQueryEnhance)
 		prepCancel()
@@ -2448,8 +2546,9 @@ func (s *tuiState) startResearchWithOptions(parentCtx context.Context, forceExha
 				s.cachedResultLines = nil
 				s.clearSession()
 
-				if !s.noBell {
-					fmt.Print("\007")
+				s.playCompletionChime(runErr == nil)
+				if runErr == nil && !s.batchMode {
+					s.setSaveMsg(fmt.Sprintf("✓ Research complete in %.1fs", s.completedElapsed.Seconds()))
 				}
 
 				if !s.batchMode && strings.TrimSpace(s.outputPath) != "" {
@@ -2494,7 +2593,7 @@ func (s *tuiState) scrollResultsBy(lineDelta int, pageDelta int) {
 		if err != nil {
 			height = 24
 		}
-		pageSize := resultsViewportHeight(height, s.saveMsg != "" || s.resultFilterOn || s.citationJumpOn || s.followUpOn)
+		pageSize := resultsViewportHeight(height, s.saveMsg != "" || s.resultFilterOn || s.citationJumpOn)
 		lineDelta = pageDelta * pageSize
 	}
 	s.scrollOffset += lineDelta
@@ -2509,7 +2608,7 @@ func (s *tuiState) clampResultsScrollOffset() {
 	if height <= 0 {
 		height = 24
 	}
-	viewport := resultsViewportHeight(height, s.saveMsg != "" || s.resultFilterOn || s.citationJumpOn || s.followUpOn)
+	viewport := resultsViewportHeight(height, s.saveMsg != "" || s.resultFilterOn || s.citationJumpOn)
 	lines := s.getResultLines(width)
 	maxOffset := len(lines) - viewport
 	if maxOffset < 0 {
@@ -2534,7 +2633,7 @@ func (s *tuiState) scrollSelectedPaperIntoView() {
 	if height <= 0 {
 		height = 24
 	}
-	viewport := resultsViewportHeight(height, s.saveMsg != "" || s.resultFilterOn || s.citationJumpOn || s.followUpOn)
+	viewport := resultsViewportHeight(height, s.saveMsg != "" || s.resultFilterOn || s.citationJumpOn)
 	lines := s.getResultLines(width)
 
 	targetPrefix := fmt.Sprintf("  [%d] ", s.paperDetailIdx+1)
@@ -2800,6 +2899,14 @@ func (s *tuiState) render() {
 	}
 	s.lastTerminalWidth = width
 
+	if seq := s.terminalStatusSequence(time.Now()); seq != "" {
+		if s.output != nil {
+			io.WriteString(s.output, seq)
+		} else {
+			os.Stdout.WriteString(seq)
+		}
+	}
+
 	var buf bytes.Buffer
 	buf.WriteString("\033[H")
 
@@ -2807,8 +2914,7 @@ func (s *tuiState) render() {
 		if s.mode == modeRunning {
 			var compactBuf bytes.Buffer
 			compactBuf.WriteString("\033[H\033[K")
-			spinnerFrames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-			frame := spinnerFrames[int(time.Now().UnixNano()/250000000)%len(spinnerFrames)]
+			frame := tuiSpinnerFrame(time.Now())
 			compactBuf.WriteString(fmt.Sprintf("%s Running... [Ctrl+C to cancel] %d papers found", frame, s.papersFound))
 			if s.output != nil {
 				s.output.Write(compactBuf.Bytes())
@@ -2916,7 +3022,8 @@ func (s *tuiState) render() {
 			lines = append(lines, "    h                   Results Home: Go to All pane & reset scroll")
 			lines = append(lines, "    s / e / b / t / w   Save markdown / JSON / BibTeX / CSV / HTML export")
 			lines = append(lines, "    c                   Copy all results (markdown format) to clipboard")
-			lines = append(lines, "    f                   Ask a follow-up question (new run with prior context)")
+			lines = append(lines, "    f                   Follow-up chat: ask about results, grounded in sources")
+			lines = append(lines, "                        (in chat: Enter=ask, Ctrl+R=full research run, ESC=back)")
 			lines = append(lines, "    r                   Re-run same query with current settings")
 			lines = append(lines, "    R                   Go back to Input Mode to edit query/settings")
 			lines = append(lines, "    E                   Re-run with Exhaustive (deep search) mode enabled")
@@ -3315,8 +3422,7 @@ func (s *tuiState) render() {
 		}
 
 		elapsedStr := fmt.Sprintf("%.1fs", s.elapsedTime.Seconds())
-		spinnerFrames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-		frame := spinnerFrames[int(time.Now().UnixNano()/250000000)%len(spinnerFrames)]
+		frame := tuiSpinnerFrame(time.Now())
 
 		s.logMutex.Lock()
 		phase := inferRunPhaseFromLogs(s.logs, s.iterations)
@@ -3395,13 +3501,53 @@ func (s *tuiState) render() {
 		r.drawHintLine(s.runningFooterShortcut())
 		drawFooterBorder()
 
+	} else if s.mode == modeResults && s.chatOn {
+		drawBorder("WisDev — Follow-up Chat  ·  grounded in retrieved sources")
+		sourceCount := 0
+		if s.result != nil {
+			sourceCount = len(s.result.Papers)
+		}
+		drawLine(fmt.Sprintf(" Answers cite the %d retrieved sources by [n]; outside knowledge is off.", sourceCount), theme.DimText)
+		drawDivider()
+
+		chatLines := buildChatLines(s, width-8)
+		viewport := resultsViewportHeight(height, true) - 1
+		if viewport < 3 {
+			viewport = 3
+		}
+		maxOffset := len(chatLines) - viewport
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		if s.chatScrollOffset > maxOffset {
+			s.chatScrollOffset = maxOffset
+		}
+		start := len(chatLines) - viewport - s.chatScrollOffset
+		if start < 0 {
+			start = 0
+		}
+		end := start + viewport
+		if end > len(chatLines) {
+			end = len(chatLines)
+		}
+		for _, line := range chatLines[start:end] {
+			drawLine(line, "")
+		}
+		for i := end - start; i < viewport; i++ {
+			drawLine("", "")
+		}
+
+		drawDivider()
+		drawLine(renderTextInput(" Ask: ", s.chatInput, s.chatCursorPos, true, theme), "")
+		r.drawHintLine("Enter=ask  Ctrl+R=new research run from question  ↑/↓ PgUp/PgDn=scroll  ESC=back to results")
+		drawFooterBorder()
 	} else if s.mode == modeResults {
 		drawBorder("WisDev — Results  ·  ScholarLM for cloud sync & review")
 		drawLine(" "+renderResultPaneTabs(s, s.resultPane), "")
 		drawDivider()
 		lines := s.getResultLines(width)
 
-		displayHeight := resultsViewportHeight(height, s.saveMsg != "" || s.resultFilterOn || s.citationJumpOn || s.followUpOn)
+		displayHeight := resultsViewportHeight(height, s.saveMsg != "" || s.resultFilterOn || s.citationJumpOn)
 
 		r.hasScrollbar = len(lines) > displayHeight
 		r.totalLines = len(lines)
@@ -3461,10 +3607,7 @@ func (s *tuiState) render() {
 		}
 		r.scrollbarTrack = false
 
-		if s.followUpOn {
-			drawDivider()
-			drawLine(renderTextInput(" Follow-up question: ", s.followUpInput, len(s.followUpInput), true, theme), "")
-		} else if s.citationJumpOn {
+		if s.citationJumpOn {
 			drawDivider()
 			drawLine(renderTextInput(" Open citation [n]: ", s.citationJumpInput, len(s.citationJumpInput), true, theme), "")
 		} else if s.resultFilterOn {

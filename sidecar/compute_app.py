@@ -4,8 +4,8 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers.azure_compute_router import router as azure_compute_router
-from routers.azure_compute_router import raptor_service, tree_cache
+from routers.compute_router import router as compute_router
+from routers.compute_router import raptor_service, tree_cache
 from services.bm25_service import get_bm25_index
 from services.embedding_service import embedding_service
 
@@ -29,7 +29,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.include_router(azure_compute_router)
+    app.include_router(compute_router)
 
     @app.get("/")
     async def root():

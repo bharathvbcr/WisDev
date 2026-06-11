@@ -206,25 +206,29 @@ func TestParallelSearchHelpers(t *testing.T) {
 			expandQueryAnalysis = originalExpand
 		})
 
+		// Use a query no other test searches so cache entries or leaked
+		// goroutines from earlier tests can never satisfy this lookup.
+		const degradeQuery = "degrade-path base query"
+
 		expandQueryAnalysis = func(_ context.Context, query string) (EnhancedQuery, error) {
 			return EnhancedQuery{}, errors.New("expansion unavailable")
 		}
 		runUnifiedParallelSearch = func(ctx context.Context, r *internalsearch.ProviderRegistry, query string, opts internalsearch.SearchOpts) internalsearch.SearchResult {
-			assert.Equal(t, "base query", query)
+			assert.Equal(t, degradeQuery, query)
 			return internalsearch.SearchResult{
 				Papers:    []internalsearch.Paper{{ID: "1", Title: "Paper One", Source: "Semantic_Scholar"}},
 				LatencyMs: 19,
 			}
 		}
 
-		result, err := ParallelSearch(context.Background(), nil, "base query", SearchOptions{
+		result, err := ParallelSearch(context.Background(), nil, degradeQuery, SearchOptions{
 			Limit:       5,
 			ExpandQuery: true,
 			QualitySort: true,
 		})
 		require.NoError(t, err)
 		require.NotNil(t, result)
-		assert.Equal(t, "base query", result.QueryUsed)
+		assert.Equal(t, degradeQuery, result.QueryUsed)
 		require.Len(t, result.RetrievalTrace, 2)
 		assert.Equal(t, "degraded_to_original_query", result.RetrievalTrace[1]["status"])
 	})

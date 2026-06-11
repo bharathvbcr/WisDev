@@ -65,6 +65,7 @@ Run settings:
 | Enhance | on | Grammar/typo cleanup + domain detection |
 | Hypotheses | on | Swarm hypothesis generation |
 | Exhaustive | off | Run all max iterations before early stop |
+| Long-form | off | Synthesize extended Introduction and Background sections in the report |
 
 With **Enhance** on, the input screen previews the corrected query and detected domain (e.g. `medicine` for meniscus/ACL questions). Status shows `iterations=3/9` when the loop stops early unless **Exhaustive** is on. Setting max iterations to **8+** auto-enables Exhaustive so the loop runs the full budget. When many providers are enabled, detected domains auto-apply provider presets (`medicine`/`biology` → biomedical, `cs`/`ai` → computer science, `physics`/`math` → physics).
 
@@ -79,8 +80,12 @@ TUI flags:
 | `--no-enhance` | Disable query enhancement (on by default for `yolo`, `search`, and TUI) |
 | `--fresh` | Bypass search cache for a new retrieval pass |
 | `--batch FILE` | Run newline-delimited queries sequentially |
-| `--no-bell` | Disable terminal bell when research completes |
+| `--no-bell` | Disable the completion chime (double bell on success, single on failure) |
 | `--autostart` | Begin research immediately when `--query` is set |
+
+While the TUI is open it renames the terminal tab/window to `WisDev` (restored on exit), animates a spinner in the title while research runs (`⠹ WisDev — researching`), and shows `✓ WisDev — done` / `✗ WisDev — failed` when it finishes. On Windows Terminal and ConEmu the taskbar icon also shows live research progress via OSC 9;4. On Windows the title is set both via escape sequence and Win32 so it works across terminal hosts.
+
+> VS Code's integrated terminal shows the process name as the tab title by default. To see the WisDev title there, set `"terminal.integrated.tabs.title": "${sequence}"` in VS Code settings.
 
 ```powershell
 .\wisdev.cmd tui --demo
@@ -113,6 +118,7 @@ Keyboard controls:
 | `Tab` / `[` / `]` | Cycle results panes (All, Answer, Hypotheses, Queries, Sources) |
 | `e` | Save JSON export |
 | `E` | Re-run with Exhaustive mode (results view) |
+| `f` | Follow-up chat: ask about the results, answered only from the retrieved sources with `[n]` citations (results view). In chat, `Enter` asks, `Ctrl+R` turns the typed question into a full new research run, `Esc` returns |
 | `?` | Keyboard help overlay |
 | Mouse wheel | Scroll results (Windows Terminal, iTerm, etc.) |
 
@@ -191,6 +197,7 @@ node scripts/ops/hackathon-ollama-smoke.mjs
 | `-j` / `--json` | JSON output |
 | `--offline` | Smoke test without network |
 | `--remote` | HTTP orchestrator (`yolo` only) |
+| `--long-form` | Extended Introduction and Background sections (`yolo` local mode; same as the TUI Long-form setting) |
 
 ## Build binary
 

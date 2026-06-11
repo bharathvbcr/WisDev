@@ -1,10 +1,25 @@
 package wisdev
 
 import (
+	"net"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
+
+// closedBridgeURL reserves a loopback port and closes it so the bridge dial
+// is refused deterministically — fixed low ports (e.g. :1) can be bound,
+// firewalled, or sit in a Windows excluded range and answer differently.
+func closedBridgeURL(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve closed port: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	return "http://" + addr
+}
 
 func TestVerifyCitationRecordsSecurelyReturnsTrustAwareRecords(t *testing.T) {
 	server := startMockCitationResolveServer(t)
@@ -40,7 +55,7 @@ func TestVerifyCitationRecordsSecurelyReturnsTrustAwareRecords(t *testing.T) {
 }
 
 func TestVerifyCitationRecordsSecurelyRejectsImplicitGoFallback(t *testing.T) {
-	t.Setenv("RUST_GATEWAY_INTERNAL_URL", "http://127.0.0.1:1")
+	t.Setenv("RUST_GATEWAY_INTERNAL_URL", closedBridgeURL(t))
 	t.Setenv(allowGoCitationFallbackEnv, "false")
 
 	_, err := VerifyCitationRecordsSecurely([]Source{{ID: "p1", Title: "Paper 1", DOI: "10.1000/test-1"}})
@@ -49,7 +64,7 @@ func TestVerifyCitationRecordsSecurelyRejectsImplicitGoFallback(t *testing.T) {
 }
 
 func TestVerifyCitationRecordsSecurelyAllowsExplicitGoFallback(t *testing.T) {
-	t.Setenv("RUST_GATEWAY_INTERNAL_URL", "http://127.0.0.1:1")
+	t.Setenv("RUST_GATEWAY_INTERNAL_URL", closedBridgeURL(t))
 	t.Setenv(allowGoCitationFallbackEnv, "true")
 
 	result, err := VerifyCitationRecordsSecurely([]Source{{ID: "p1", Title: "Paper 1", DOI: "10.1000/test-1"}})

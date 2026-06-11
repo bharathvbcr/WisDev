@@ -1098,7 +1098,9 @@ async def test_embed_omits_unsupported_task_type_when_sdk_rejects_it(monkeypatch
 
     assert await svc.embed("hello") == [0.9, 1.0]
     assert captured["model"] == GEMINI_EMBED_STANDARD_MODEL
-    assert captured["contents"] == "task:search query | text: hello"
+    # embed() now delegates to embed_batch(), so contents arrive as a
+    # one-element batch.
+    assert captured["contents"] == ["task:search query | text: hello"]
     assert getattr(captured["config"], "kwargs", {}) == {"output_dimensionality": 768}
 
 

@@ -166,14 +166,15 @@ func TestHTTPTransport_ErrorHelpers(t *testing.T) {
 	})
 
 	t.Run("request helpers surface transport dial errors", func(t *testing.T) {
-		client := &Client{httpBaseURL: "http://127.0.0.1:1", timeout: time.Second}
+		deadBase := "http://" + closedLoopbackAddr(t)
+		client := &Client{httpBaseURL: deadBase, timeout: time.Second}
 		_, err := client.generateStreamHTTP(context.Background(), &llmpb.GenerateRequest{Prompt: "x"})
 		require.Error(t, err)
 
 		_, err = client.RuntimeHealth(context.Background())
 		require.Error(t, err)
 
-		client = &Client{httpBaseURL: "http://127.0.0.1:1", transport: transportHTTPJSON, timeout: time.Second}
+		client = &Client{httpBaseURL: deadBase, transport: transportHTTPJSON, timeout: time.Second}
 		_, err = client.StructuredOutput(context.Background(), &llmpb.StructuredRequest{Prompt: "x", JsonSchema: "{}"})
 		require.Error(t, err)
 	})

@@ -69,6 +69,9 @@ _MAX_LATENCY_BUDGET_MS = 90_000
 _STRUCTURED_THINKING_DISABLE_MAX_OUTPUT_TOKENS = 256
 _STANDARD_RETRY_WEIGHTS = (0.6, 0.25, 0.15)
 _COLD_START_RETRY_WEIGHTS = (0.75, 0.17, 0.08)
+# Below this much remaining budget a retry cannot plausibly finish; stop
+# retrying and surface the last error instead of burning provider quota.
+_MIN_RETRY_REMAINING_S = 2.5
 _DEFAULT_EMBEDDING_OUTPUT_DIMENSION = 768
 _MODEL_LOCATION_DEFAULTS = {
     "generative": "global",
@@ -245,6 +248,40 @@ def _retry_timeout_s(latency_budget_ms: int, attempt: int) -> float:
     weight = weights[min(attempt, len(weights) - 1)]
     timeout_s = max(4.0, (latency_budget_ms * weight) / 1000.0)
     return round(timeout_s, 3)
+
+
+def _budget_deadline(latency_budget_ms: int) -> float:
+    """Monotonic deadline for an entire retry sequence under a latency budget."""
+    return time.monotonic() + latency_budget_ms / 1000.0
+
+
+def _attempt_timeout_within_budget(
+    latency_budget_ms: int, attempt: int, deadline: float
+) -> float | None:
+    """Per-attempt timeout clamped to the remaining overall budget.
+
+    Returns ``None`` when too little budget remains for a retry to plausibly
+    succeed. The caller (Go orchestrator) enforces the same budget as a context
+    deadline, so retrying past it only burns provider quota on responses
+    nobody will read.
+    """
+    remaining_s = deadline - time.monotonic()
+    if attempt > 0 and remaining_s < _MIN_RETRY_REMAINING_S:
+        return None
+    timeout_s = _retry_timeout_s(latency_budget_ms, attempt)
+    if remaining_s > 0:
+        timeout_s = min(timeout_s, remaining_s)
+    return round(max(timeout_s, _MIN_RETRY_REMAINING_S), 3)
+
+
+async def _sleep_backoff_within_budget(attempt: int, deadline: float) -> bool:
+    """Backoff before the next retry; False when the budget cannot absorb it."""
+    backoff_s = _jitter(_BASE_BACKOFF_S * (2**attempt))
+    remaining_s = deadline - time.monotonic()
+    if remaining_s - backoff_s < _MIN_RETRY_REMAINING_S:
+        return False
+    await asyncio.sleep(backoff_s)
+    return True
 
 
 def _resolve_thinking_budget(
@@ -1451,8 +1488,21 @@ class GeminiService:
         config = _build_native_generate_config(
             config_kwargs, operation="generate_native_structured"
         )
+        budget_deadline = _budget_deadline(normalized_latency_budget_ms)
+        last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES):
-            attempt_timeout_s = _retry_timeout_s(normalized_latency_budget_ms, attempt)
+            attempt_timeout_s = _attempt_timeout_within_budget(
+                normalized_latency_budget_ms, attempt, budget_deadline
+            )
+            if attempt_timeout_s is None:
+                _log_budget_event(
+                    "gemini_structured_budget_exhausted",
+                    **log_context,
+                    attempt=attempt + 1,
+                )
+                raise last_exc if last_exc is not None else asyncio.TimeoutError(
+                    "latency budget exhausted"
+                )
             try:
                 resp = await _run_sync_with_timeout(
                     attempt_timeout_s,
@@ -1500,6 +1550,7 @@ class GeminiService:
                 )
                 if attempt == _MAX_RETRIES - 1:
                     raise
+                last_exc = exc
             except Exception as exc:
                 if _is_google_auth_transport_error(exc):
                     logger.warning(
@@ -1532,7 +1583,9 @@ class GeminiService:
                 )
                 if attempt == _MAX_RETRIES - 1:
                     raise
-                await asyncio.sleep(_jitter(_BASE_BACKOFF_S * (2**attempt)))
+                last_exc = exc
+                if not await _sleep_backoff_within_budget(attempt, budget_deadline):
+                    raise
         return ""
 
     # ------------------------------------------------------------------
@@ -1612,8 +1665,21 @@ class GeminiService:
         config = _build_native_generate_config(
             config_kwargs, operation="generate_text_native"
         )
+        budget_deadline = _budget_deadline(normalized_latency_budget_ms)
+        last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES):
-            attempt_timeout_s = _retry_timeout_s(normalized_latency_budget_ms, attempt)
+            attempt_timeout_s = _attempt_timeout_within_budget(
+                normalized_latency_budget_ms, attempt, budget_deadline
+            )
+            if attempt_timeout_s is None:
+                _log_budget_event(
+                    "gemini_native_structured_budget_exhausted",
+                    **log_context,
+                    attempt=attempt + 1,
+                )
+                raise last_exc if last_exc is not None else asyncio.TimeoutError(
+                    "latency budget exhausted"
+                )
             attempt_log = {
                 **log_context,
                 "attempt": attempt + 1,
@@ -1643,10 +1709,11 @@ class GeminiService:
                     result_bytes=len(normalized_text),
                 )
                 return parsed
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as exc:
                 _log_budget_event("gemini_native_structured_timeout", **attempt_log)
                 if attempt == _MAX_RETRIES - 1:
                     raise
+                last_exc = exc
             except Exception as exc:
                 if _is_google_auth_transport_error(exc):
                     _log_budget_event(
@@ -1663,7 +1730,11 @@ class GeminiService:
                 )
                 if attempt == _MAX_RETRIES - 1:
                     raise
-            await asyncio.sleep(_jitter(_BASE_BACKOFF_S * (2**attempt)))
+                last_exc = exc
+            if not await _sleep_backoff_within_budget(attempt, budget_deadline):
+                raise last_exc if last_exc is not None else asyncio.TimeoutError(
+                    "latency budget exhausted"
+                )
 
         raise RuntimeError(
             "generate_json exhausted all retries"
@@ -1730,8 +1801,28 @@ class GeminiService:
         config = _build_native_generate_config(
             config_kwargs, operation="generate_stream"
         )
+        budget_deadline = _budget_deadline(normalized_latency_budget_ms)
+        last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES):
-            attempt_timeout_s = _retry_timeout_s(normalized_latency_budget_ms, attempt)
+            attempt_timeout_s = _attempt_timeout_within_budget(
+                normalized_latency_budget_ms, attempt, budget_deadline
+            )
+            if attempt_timeout_s is None:
+                logger.warning(
+                    "gemini_text_budget_exhausted | %s",
+                    json.dumps(
+                        {
+                            "attempt": attempt + 1,
+                            "budget_ms": normalized_latency_budget_ms,
+                            "trace_id": str(trace_id or "").strip(),
+                        },
+                        sort_keys=True,
+                        default=str,
+                    ),
+                )
+                raise last_exc if last_exc is not None else asyncio.TimeoutError(
+                    "latency budget exhausted"
+                )
             try:
                 resp = await _run_sync_with_timeout(
                     attempt_timeout_s,
@@ -1795,7 +1886,9 @@ class GeminiService:
                         default=str,
                     ),
                 )
-                await asyncio.sleep(_jitter(_BASE_BACKOFF_S * (2**attempt)))
+                last_exc = exc
+                if not await _sleep_backoff_within_budget(attempt, budget_deadline):
+                    raise
         return ""
 
     async def _generate_via_vertex_proxy(
@@ -1854,8 +1947,21 @@ class GeminiService:
             "cold_start_suspected": _is_cold_start_window(),
         }
         _log_budget_event("gemini_proxy_structured_start", **log_context)
+        budget_deadline = _budget_deadline(normalized_latency_budget_ms)
+        last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES):
-            attempt_timeout_s = _retry_timeout_s(normalized_latency_budget_ms, attempt)
+            attempt_timeout_s = _attempt_timeout_within_budget(
+                normalized_latency_budget_ms, attempt, budget_deadline
+            )
+            if attempt_timeout_s is None:
+                _log_budget_event(
+                    "gemini_proxy_structured_budget_exhausted",
+                    **log_context,
+                    attempt=attempt + 1,
+                )
+                raise last_exc if last_exc is not None else asyncio.TimeoutError(
+                    "latency budget exhausted"
+                )
             attempt_log = {
                 **log_context,
                 "attempt": attempt + 1,
@@ -1882,7 +1988,9 @@ class GeminiService:
                 )
                 if is_last:
                     raise
-                await asyncio.sleep(_jitter(_BASE_BACKOFF_S * (2**attempt)))
+                last_exc = exc
+                if not await _sleep_backoff_within_budget(attempt, budget_deadline):
+                    raise
         raise RuntimeError("Vertex proxy exhausted all retries")
 
     async def _generate_text_proxy(
@@ -1925,8 +2033,28 @@ class GeminiService:
         normalized_latency_budget_ms = _normalize_latency_budget_ms(
             latency_budget_ms, structured=False
         )
+        budget_deadline = _budget_deadline(normalized_latency_budget_ms)
+        last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES):
-            attempt_timeout_s = _retry_timeout_s(normalized_latency_budget_ms, attempt)
+            attempt_timeout_s = _attempt_timeout_within_budget(
+                normalized_latency_budget_ms, attempt, budget_deadline
+            )
+            if attempt_timeout_s is None:
+                logger.warning(
+                    "vertex_text_proxy_budget_exhausted | %s",
+                    json.dumps(
+                        {
+                            "attempt": attempt + 1,
+                            "budget_ms": normalized_latency_budget_ms,
+                            "trace_id": str(trace_id or "").strip(),
+                        },
+                        sort_keys=True,
+                        default=str,
+                    ),
+                )
+                raise last_exc if last_exc is not None else asyncio.TimeoutError(
+                    "latency budget exhausted"
+                )
             try:
                 timeout = httpx.Timeout(
                     timeout=attempt_timeout_s,
@@ -1960,7 +2088,9 @@ class GeminiService:
                         default=str,
                     ),
                 )
-                await asyncio.sleep(_jitter(_BASE_BACKOFF_S * (2**attempt)))
+                last_exc = exc
+                if not await _sleep_backoff_within_budget(attempt, budget_deadline):
+                    raise
         raise RuntimeError("Vertex text proxy exhausted all retries")
 
     async def _embed_proxy(
@@ -2042,38 +2172,17 @@ class GeminiService:
 
         Uses the native SDK when available (preferred — schema-enforced, Vertex AI
         billing). Falls back to the Cloud Function proxy when ``_client`` is None
-        (e.g. when ``GEMINI_RUNTIME_MODE=vertex_proxy``).
+        (e.g. when ``GEMINI_RUNTIME_MODE=vertex_proxy``). When the resolved model
+        fails (e.g. the project lacks access to it), retries once on the
+        configured fallback embedding model.
         """
-        resolved_model = _resolve_embedding_model(model)
-        embed_client = self._native_embedding_client(resolved_model)
-        if embed_client is None:
-            results = await self._embed_proxy(
-                [text], resolved_model, task_type, latency_budget_ms=latency_budget_ms
-            )
-            return results[0] if results else []
-
-        config = _build_native_embed_config(
-            _embedding_config_kwargs(resolved_model, task_type),
-            operation="embed",
+        results = await self.embed_batch(
+            [text],
+            model=model,
+            task_type=task_type,
+            latency_budget_ms=latency_budget_ms,
         )
-        contents = _embedding_content_for_model(
-            text, task_type=task_type, resolved_model=resolved_model
-        )
-        normalized_latency_budget_ms = _normalize_latency_budget_ms(
-            latency_budget_ms, structured=False
-        )
-        timeout_s = _retry_timeout_s(normalized_latency_budget_ms, 0)
-
-        resp = await _run_sync_with_timeout(
-            timeout_s,
-            embed_client.models.embed_content,
-            model=resolved_model,
-            contents=contents,
-            config=config,
-        )
-        if not resp.embeddings:
-            return []
-        return resp.embeddings[0].values
+        return results[0] if results else []
 
     async def embed_batch(
         self,
@@ -2085,11 +2194,49 @@ class GeminiService:
         """Generate multiple embedding vectors in one call.
 
         Uses the native SDK when available. Falls back to the Cloud Function
-        proxy when ``_client`` is None.
+        proxy when ``_client`` is None. When the resolved model fails (model not
+        found, quota exhausted, timeout), retries once on the configured
+        fallback embedding model so a misconfigured or inaccessible primary
+        model degrades the embedding tier instead of failing it outright.
         """
         if not texts:
             return []
         resolved_model = _resolve_embedding_model(model)
+        try:
+            return await self._embed_batch_with_model(
+                texts, resolved_model, task_type, latency_budget_ms
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            fallback_model = _resolve_embedding_model("fallback")
+            if not fallback_model or fallback_model == resolved_model:
+                raise
+            logger.warning(
+                "gemini_embed_fallback_model | %s",
+                json.dumps(
+                    {
+                        "model": resolved_model,
+                        "fallback_model": fallback_model,
+                        "batch_size": len(texts),
+                        "error": _exception_log_message(exc),
+                        "error_type": exc.__class__.__name__,
+                    },
+                    sort_keys=True,
+                    default=str,
+                ),
+            )
+            return await self._embed_batch_with_model(
+                texts, fallback_model, task_type, latency_budget_ms
+            )
+
+    async def _embed_batch_with_model(
+        self,
+        texts: list[str],
+        resolved_model: str,
+        task_type: str,
+        latency_budget_ms: int | None,
+    ) -> list[list[float]]:
         embed_client = self._native_embedding_client(resolved_model)
         if embed_client is None:
             return await self._embed_proxy(

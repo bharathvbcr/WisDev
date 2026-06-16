@@ -250,6 +250,11 @@ def _normalize_latency_budget_ms(latency_budget_ms: int | None) -> int:
 
 
 def _classify_runtime_error(exc: Exception) -> tuple[grpc.StatusCode, int, str]:
+    # A Gemini policy/safety block is a content problem, not a server fault or a
+    # timeout: surface it as a non-retryable 422 so callers can show "the model
+    # declined this query" instead of a misleading 504 Gateway Timeout.
+    if getattr(exc, "safety_blocked", False):
+        return grpc.StatusCode.FAILED_PRECONDITION, 422, "CONTENT_BLOCKED"
     if isinstance(exc, StructuredOutputRequiresNativeRuntimeError):
         return (
             grpc.StatusCode.FAILED_PRECONDITION,
@@ -423,6 +428,8 @@ class LLMRuntime:
                 http_status=http_status,
                 code="INVALID_PROMPT"
                 if code == "INVALID_PROMPT"
+                else "CONTENT_BLOCKED"
+                if code == "CONTENT_BLOCKED"
                 else "GENERATE_TIMEOUT"
                 if code == "TIMEOUT"
                 else "GENERATE_FAILED",
@@ -436,6 +443,17 @@ class LLMRuntime:
                     "retryProfile": retry_profile,
                     "requestClass": request_class,
                     "code": code,
+                    **(
+                        {
+                            "finishReason": getattr(exc, "finish_reason", "") or "",
+                            "blockReason": getattr(exc, "block_reason", "") or "",
+                            "safetyCategories": list(
+                                getattr(exc, "safety_categories", ()) or ()
+                            ),
+                        }
+                        if getattr(exc, "safety_blocked", False)
+                        else {}
+                    ),
                 },
             ) from exc
 
@@ -518,6 +536,25 @@ class LLMRuntime:
                 thinking_budget=locals().get("thinking_budget"),
                 error=str(exc),
             )
+            if bool(getattr(exc, "safety_blocked", False)):
+                # A stream that yielded no text because the model declined the
+                # content: surface a non-retryable 422 so the chatbot shows
+                # "the model declined this query" rather than a blank reply.
+                raise LLMRuntimeError(
+                    grpc_status=grpc.StatusCode.FAILED_PRECONDITION,
+                    http_status=422,
+                    code="CONTENT_BLOCKED",
+                    message=str(exc),
+                    trace_id=trace_id,
+                    details={
+                        "model": model,
+                        "finishReason": getattr(exc, "finish_reason", "") or "",
+                        "blockReason": getattr(exc, "block_reason", "") or "",
+                        "safetyCategories": list(
+                            getattr(exc, "safety_categories", ()) or ()
+                        ),
+                    },
+                ) from exc
             raise LLMRuntimeError(
                 grpc_status=grpc.StatusCode.INVALID_ARGUMENT
                 if isinstance(exc, ValueError)
@@ -686,6 +723,8 @@ class LLMRuntime:
             response_code = (
                 "INVALID_PROMPT"
                 if code == "INVALID_PROMPT"
+                else "CONTENT_BLOCKED"
+                if code == "CONTENT_BLOCKED"
                 else "STRUCTURED_TIMEOUT"
                 if code == "TIMEOUT"
                 else "STRUCTURED_OUTPUT_REQUIRES_NATIVE_RUNTIME"
@@ -706,6 +745,17 @@ class LLMRuntime:
                     "retryProfile": retry_profile,
                     "requestClass": request_class,
                     "code": code,
+                    **(
+                        {
+                            "finishReason": getattr(exc, "finish_reason", "") or "",
+                            "blockReason": getattr(exc, "block_reason", "") or "",
+                            "safetyCategories": list(
+                                getattr(exc, "safety_categories", ()) or ()
+                            ),
+                        }
+                        if getattr(exc, "safety_blocked", False)
+                        else {}
+                    ),
                 },
             ) from exc
 

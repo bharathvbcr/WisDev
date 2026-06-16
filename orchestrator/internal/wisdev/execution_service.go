@@ -758,4 +758,16 @@ func appendExecutionEvent(gateway *AgentGateway, session *AgentSession, event Pl
 		Summary:   event.Message,
 		Payload:   payload,
 	})
+
+	// Mirror the lifecycle event to external downstream consumers (webhooks).
+	// Non-blocking and best-effort: a slow or unreachable consumer never stalls
+	// the research loop. No-op when the sink is unconfigured.
+	if gateway.EventSink != nil {
+		normalized := event
+		normalized.EventID = eventID
+		normalized.TraceID = traceID
+		normalized.SessionID = session.SessionID
+		normalized.Payload = payload
+		gateway.EventSink.Dispatch(normalized)
+	}
 }

@@ -55,6 +55,7 @@ type AgentGateway struct {
 	QuestRuntime     *ResearchQuestRuntime
 	Execution        ExecutionService
 	ResourceGovernor *resilience.ResourceGovernor
+	EventSink        *DownstreamEventSink
 
 	// New modular WisDev components
 	WisdevSessions *SessionManager
@@ -639,6 +640,9 @@ func NewAgentGateway(db DBProvider, rdb redis.UniversalClient, journal *RuntimeJ
 	gw.Runtime = NewUnifiedResearchRuntime(gw.Loop, resolvedSearchRegistry, llmClient, gw.ProgrammaticLoopExecutor()).
 		WithDurableResearchState(gw.StateStore, journal)
 	gw.Execution = NewDurableExecutionService(gw)
+	// Optional egress: fan research lifecycle events out to operator-configured
+	// webhooks for async/downstream ops. nil (disabled) unless a URL is set.
+	gw.EventSink = NewDownstreamEventSink()
 	return gw
 }
 
@@ -651,6 +655,9 @@ func (gw *AgentGateway) RuntimeMetadata() map[string]any {
 	}
 	meta := gw.ADKRuntime.Metadata()
 	meta["artifactSchema"] = ArtifactSchemaMetadata()
+	if sinkMeta := gw.EventSink.MetadataMap(); sinkMeta != nil {
+		meta["eventSink"] = sinkMeta
+	}
 	if card := gw.ADKRuntime.BuildA2ACard(); card != nil {
 		meta["a2aCard"] = card
 	} else if gw.ADKRuntime.Config.A2A.Enabled {

@@ -55,6 +55,44 @@ GEMINI_EMBED_FALLBACK_MODEL = get_embedding_model("fallback")
 
 _MAX_RETRIES = 3
 _BASE_BACKOFF_S = 1.0
+
+
+def _is_empty_text_error(exc: BaseException) -> bool:
+    """Matches the RuntimeError raised when Gemini returns no text."""
+    return isinstance(exc, RuntimeError) and "returned empty text" in str(exc)
+
+
+def _structured_empty_text_fallback_model(model: str) -> str:
+    """Pick a strictly heavier fallback for structured calls that returned empty text.
+
+    Two failure modes produce empty text on identical retries: flash-lite models
+    with aggressive thinking that burn the entire output budget reasoning, and
+    standard models that intermittently return an empty candidate. In both cases
+    the only productive final retry is a heavier model. Escalates lite ->
+    standard -> heavy and any other (non-lite, non-heavy) model -> heavy. Returns
+    "" when the model is already the heavy tier or no distinct heavier model is
+    configured.
+    """
+    normalized = (model or "").strip().lower()
+    if not normalized:
+        return ""
+    heavy = (GEMINI_HEAVY_MODEL or "").strip()
+    if heavy and normalized == heavy.lower():
+        # Already at the heavy tier: nothing heavier to escalate to.
+        return ""
+    # Lite climbs the full ladder; everything else jumps straight to heavy.
+    ladder = (
+        (GEMINI_STANDARD_MODEL, GEMINI_HEAVY_MODEL)
+        if "lite" in normalized
+        else (GEMINI_HEAVY_MODEL,)
+    )
+    for candidate in ladder:
+        cleaned = (candidate or "").strip()
+        if cleaned and cleaned.lower() != normalized:
+            return cleaned
+    return ""
+
+
 _RUNTIME_SERVICE_LOCK = threading.Lock()
 _RUNTIME_DIAGNOSTICS_LOCK = threading.Lock()
 _runtime_service_cache_key: tuple[str, str, str, str] | None = None
@@ -823,6 +861,143 @@ def _json_text_from_structured_value(value: Any, source: str) -> tuple[str, bool
     return None
 
 
+# Gemini finish reasons / block reasons that mean the model declined to answer
+# for policy reasons. These never succeed on retry, so callers must fail fast
+# instead of burning the latency budget down to a misleading 504.
+_SAFETY_FINISH_REASONS = frozenset(
+    {"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "IMAGE_SAFETY", "RECITATION"}
+)
+_UNSPECIFIED_BLOCK_REASONS = frozenset(
+    {"", "BLOCK_REASON_UNSPECIFIED", "BLOCKED_REASON_UNSPECIFIED"}
+)
+
+
+class EmptyStructuredTextError(RuntimeError):
+    """Raised when Gemini returns a structured response with no usable text.
+
+    Carries the response ``finish_reason`` / ``block_reason`` so callers can
+    distinguish a policy/safety block (terminal — do not retry) from a transient
+    empty generation. The message deliberately contains "returned empty text" so
+    existing empty-text matchers keep recognizing it.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        finish_reason: str = "",
+        block_reason: str = "",
+        safety_blocked: bool = False,
+        safety_categories: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.finish_reason = finish_reason
+        self.block_reason = block_reason
+        self.safety_blocked = safety_blocked
+        self.safety_categories = safety_categories
+
+
+def _normalize_reason_token(value: Any) -> str:
+    """Normalize a finish_reason / block_reason (enum or str) to an UPPER token."""
+    if value is None:
+        return ""
+    name = getattr(value, "name", None)
+    token = str(name if name else value).strip()
+    if not token:
+        return ""
+    if "." in token:
+        token = token.rsplit(".", 1)[-1]
+    return token.upper()
+
+
+def _extract_safety_categories(response: Any) -> tuple[str, ...]:
+    """Collect the categories of any safety ratings flagged as blocked."""
+    categories: list[str] = []
+    for candidate in _iter_response_sequence(_safe_response_attr(response, "candidates")):
+        ratings = _safe_response_attr(candidate, "safety_ratings") or _safe_response_attr(
+            candidate, "safetyRatings"
+        )
+        for rating in _iter_response_sequence(ratings):
+            if _safe_response_attr(rating, "blocked"):
+                category = _normalize_reason_token(
+                    _safe_response_attr(rating, "category")
+                )
+                if category and category not in categories:
+                    categories.append(category)
+    return tuple(categories)
+
+
+_EMPTY_RESPONSE_DIAGNOSTICS: dict[str, Any] = {
+    "finish_reason": "",
+    "block_reason": "",
+    "safety_blocked": False,
+    "safety_categories": (),
+}
+
+
+def _extract_response_diagnostics(response: Any) -> dict[str, Any]:
+    """Pull finish_reason / block_reason / safety signal out of a raw response.
+
+    Never raises: this runs inside error-handling paths, so any malformed or
+    unexpected response shape degrades to a no-signal result rather than masking
+    the underlying failure with a secondary exception.
+    """
+    try:
+        finish_reason = ""
+        for candidate in _iter_response_sequence(
+            _safe_response_attr(response, "candidates")
+        ):
+            finish_reason = _normalize_reason_token(
+                _safe_response_attr(candidate, "finish_reason")
+                or _safe_response_attr(candidate, "finishReason")
+            )
+            if finish_reason:
+                break
+        feedback = _safe_response_attr(response, "prompt_feedback") or _safe_response_attr(
+            response, "promptFeedback"
+        )
+        block_reason = _normalize_reason_token(
+            _safe_response_attr(feedback, "block_reason")
+            or _safe_response_attr(feedback, "blockReason")
+        )
+        safety_categories = _extract_safety_categories(response)
+        safety_blocked = bool(
+            finish_reason in _SAFETY_FINISH_REASONS
+            or block_reason not in _UNSPECIFIED_BLOCK_REASONS
+            or safety_categories
+        )
+        return {
+            "finish_reason": finish_reason,
+            "block_reason": block_reason,
+            "safety_blocked": safety_blocked,
+            "safety_categories": safety_categories,
+        }
+    except Exception:  # pragma: no cover - defensive: diagnostics must not crash
+        logger.debug("response diagnostics extraction failed", exc_info=True)
+        return dict(_EMPTY_RESPONSE_DIAGNOSTICS)
+
+
+def _require_non_empty_text_with_diagnostics(response: Any, source: str) -> str:
+    """Return ``response.text`` or raise the safety-aware EmptyStructuredTextError.
+
+    Unlike :func:`_require_non_empty_text` (which only sees the text), this is used
+    where the raw provider response is in scope, so a plain-text generation that
+    the model declined for policy reasons surfaces its finish_reason/safety signal
+    instead of an opaque empty-text RuntimeError.
+    """
+    normalized = str(_safe_response_attr(response, "text") or "").strip()
+    if normalized:
+        return normalized
+    diagnostics = _extract_response_diagnostics(response)
+    raise EmptyStructuredTextError(
+        f"{source} returned empty text",
+        finish_reason=diagnostics["finish_reason"],
+        block_reason=diagnostics["block_reason"],
+        safety_blocked=diagnostics["safety_blocked"],
+        safety_categories=diagnostics["safety_categories"],
+    )
+
+
 def _normalize_structured_json_response(response: Any, source: str) -> tuple[str, bool]:
     saw_non_empty = False
     for value in _iter_structured_response_values(response):
@@ -840,7 +1015,14 @@ def _normalize_structured_json_response(response: Any, source: str) -> tuple[str
 
     if saw_non_empty:
         raise RuntimeError(f"{source} returned invalid JSON for structured output")
-    raise RuntimeError(f"{source} returned empty text")
+    diagnostics = _extract_response_diagnostics(response)
+    raise EmptyStructuredTextError(
+        f"{source} returned empty text",
+        finish_reason=diagnostics["finish_reason"],
+        block_reason=diagnostics["block_reason"],
+        safety_blocked=diagnostics["safety_blocked"],
+        safety_categories=diagnostics["safety_categories"],
+    )
 
 
 def _prepare_schema_for_provider(schema: dict[str, Any]) -> dict[str, Any]:
@@ -1350,6 +1532,7 @@ class GeminiService:
         # worker doesn't hold the event loop indefinitely.
         stream_timeout_s = _retry_timeout_s(normalized_latency_budget_ms, 0)
         chunk_count = 0
+        last_chunk = None
         try:
             stream_coro = self._client.aio.models.generate_content_stream(
                 model=self.model,
@@ -1359,9 +1542,31 @@ class GeminiService:
             async for chunk in await asyncio.wait_for(
                 stream_coro, timeout=stream_timeout_s
             ):
+                last_chunk = chunk
                 if chunk.text:
                     chunk_count += 1
                     yield chunk.text
+            if chunk_count == 0:
+                # A no-text stream is most often a policy/safety block (a blocked
+                # candidate yields no text). Surface ONLY that as a clear error;
+                # a non-safety empty stream is left to complete exactly as before
+                # so this introduces no new failure mode for benign-empty cases.
+                diagnostics = _extract_response_diagnostics(last_chunk)
+                _log_budget_event(
+                    "gemini_stream_empty",
+                    **log_context,
+                    finish_reason=diagnostics["finish_reason"],
+                    block_reason=diagnostics["block_reason"],
+                    safety_blocked=diagnostics["safety_blocked"],
+                )
+                if diagnostics["safety_blocked"]:
+                    raise EmptyStructuredTextError(
+                        "Gemini returned empty text",
+                        finish_reason=diagnostics["finish_reason"],
+                        block_reason=diagnostics["block_reason"],
+                        safety_blocked=True,
+                        safety_categories=diagnostics["safety_categories"],
+                    )
             _log_budget_event(
                 "gemini_stream_success", **log_context, chunks=chunk_count
             )
@@ -1488,6 +1693,14 @@ class GeminiService:
         config = _build_native_generate_config(
             config_kwargs, operation="generate_native_structured"
         )
+        # Empty-text degradation ladder: flash-lite with aggressive thinking can
+        # spend the entire output budget reasoning and return empty text on
+        # every identical retry. First empty-text failure drops the thinking
+        # config; the next one falls back to a heavier model.
+        active_config = config
+        attempt_model = self.model
+        thinking_dropped = "thinking_config" not in config_kwargs
+        model_fell_back = False
         budget_deadline = _budget_deadline(normalized_latency_budget_ms)
         last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES):
@@ -1507,9 +1720,9 @@ class GeminiService:
                 resp = await _run_sync_with_timeout(
                     attempt_timeout_s,
                     self._client.models.generate_content,
-                    model=self.model,
+                    model=attempt_model,
                     contents=prompt,
-                    config=config,
+                    config=active_config,
                 )
                 text, native_payload = _normalize_structured_json_response(resp, "Gemini")
                 if native_payload:
@@ -1568,6 +1781,7 @@ class GeminiService:
                         ),
                     )
                     raise
+                safety_blocked = bool(getattr(exc, "safety_blocked", False))
                 logger.warning(
                     "gemini_structured_failed | %s",
                     json.dumps(
@@ -1575,15 +1789,63 @@ class GeminiService:
                             **log_context,
                             "attempt": attempt + 1,
                             "attempt_timeout_s": attempt_timeout_s,
+                            "attempt_model": attempt_model,
                             "error": str(exc),
+                            "finish_reason": getattr(exc, "finish_reason", "") or None,
+                            "block_reason": getattr(exc, "block_reason", "") or None,
+                            "safety_blocked": safety_blocked,
                         },
                         sort_keys=True,
                         default=str,
                     ),
                 )
+                # A policy/safety block is terminal: neither a retry nor a heavier
+                # model will produce output, so fail fast and surface a clear
+                # CONTENT_BLOCKED instead of burning the budget down to a 504.
+                if safety_blocked:
+                    _log_budget_event(
+                        "gemini_structured_safety_blocked",
+                        **log_context,
+                        attempt=attempt + 1,
+                        attempt_model=attempt_model,
+                        finish_reason=getattr(exc, "finish_reason", ""),
+                        block_reason=getattr(exc, "block_reason", ""),
+                        safety_categories=list(
+                            getattr(exc, "safety_categories", ()) or ()
+                        ),
+                    )
+                    raise
                 if attempt == _MAX_RETRIES - 1:
                     raise
                 last_exc = exc
+                # Empty-text degradation ladder: first empty-text failure drops the
+                # thinking config; the next one escalates to a heavier model.
+                if _is_empty_text_error(exc):
+                    if not thinking_dropped:
+                        thinking_dropped = True
+                        config_kwargs.pop("thinking_config", None)
+                        active_config = _build_native_generate_config(
+                            config_kwargs,
+                            operation="generate_native_structured_retry",
+                        )
+                        _log_budget_event(
+                            "gemini_structured_empty_text_thinking_dropped",
+                            **log_context,
+                            attempt=attempt + 1,
+                        )
+                    elif not model_fell_back:
+                        fallback_model = _structured_empty_text_fallback_model(
+                            attempt_model
+                        )
+                        if fallback_model:
+                            model_fell_back = True
+                            attempt_model = fallback_model
+                            _log_budget_event(
+                                "gemini_structured_empty_text_model_fallback",
+                                **log_context,
+                                attempt=attempt + 1,
+                                fallback_model=fallback_model,
+                            )
                 if not await _sleep_backoff_within_budget(attempt, budget_deadline):
                     raise
         return ""
@@ -1831,7 +2093,7 @@ class GeminiService:
                     contents=prompt,
                     config=config,
                 )
-                return _require_non_empty_text(resp.text, "Gemini")
+                return _require_non_empty_text_with_diagnostics(resp, "Gemini")
             except Exception as exc:
                 if _is_google_auth_transport_error(exc):
                     logger.warning(
@@ -1860,8 +2122,7 @@ class GeminiService:
                         ),
                     )
                     raise
-                if attempt == _MAX_RETRIES - 1:
-                    raise
+                safety_blocked = bool(getattr(exc, "safety_blocked", False))
                 logger.warning(
                     "gemini_text_failed | %s",
                     json.dumps(
@@ -1881,11 +2142,20 @@ class GeminiService:
                             "trace_id": str(trace_id or "").strip(),
                             "error": _exception_log_message(exc),
                             "error_type": exc.__class__.__name__,
+                            "finish_reason": getattr(exc, "finish_reason", "") or None,
+                            "block_reason": getattr(exc, "block_reason", "") or None,
+                            "safety_blocked": safety_blocked,
                         },
                         sort_keys=True,
                         default=str,
                     ),
                 )
+                # A policy/safety block is terminal: fail fast (no retry) so it
+                # surfaces as CONTENT_BLOCKED rather than burning the budget.
+                if safety_blocked:
+                    raise
+                if attempt == _MAX_RETRIES - 1:
+                    raise
                 last_exc = exc
                 if not await _sleep_backoff_within_budget(attempt, budget_deadline):
                     raise

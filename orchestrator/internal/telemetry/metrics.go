@@ -30,6 +30,7 @@ type instruments struct {
 	searchErrorTotal        metric.Int64Counter
 	circuitBreakerTripTotal metric.Int64Counter
 	resourceRejectionTotal  metric.Int64Counter
+	eventWebhookTotal       metric.Int64Counter
 }
 
 var (
@@ -72,6 +73,9 @@ func getInstruments() instruments {
 		resourceRejectionTotal, _ := m.Int64Counter("resource_rejections_total",
 			metric.WithDescription("Total number of resource governor graceful rejections"),
 		)
+		eventWebhookTotal, _ := m.Int64Counter("wisdev.event_webhook.deliveries",
+			metric.WithDescription("Total downstream event webhook delivery outcomes by result"),
+		)
 
 		inst = instruments{
 			httpReqTotal:            httpTotal,
@@ -83,6 +87,7 @@ func getInstruments() instruments {
 			searchErrorTotal:        searchErrorTotal,
 			circuitBreakerTripTotal: circuitBreakerTripTotal,
 			resourceRejectionTotal:  resourceRejectionTotal,
+			eventWebhookTotal:       eventWebhookTotal,
 		}
 	})
 	return inst
@@ -209,6 +214,18 @@ func RecordResourceRejection(taskType, status string) {
 		),
 	)
 	captureFailureMetric("resource_rejections_total", map[string]string{"task_type": taskType, "status": status, "kind": "system_overload"}, nil)
+}
+
+// RecordDownstreamWebhookDelivery records the outcome of a downstream event
+// webhook delivery. result is one of delivered|failed|rejected|skipped|dropped.
+func RecordDownstreamWebhookDelivery(result, eventType string) {
+	i := getInstruments()
+	i.eventWebhookTotal.Add(context.Background(), 1,
+		metric.WithAttributes(
+			attribute.String("result", result),
+			attribute.String("event_type", eventType),
+		),
+	)
 }
 
 // ── HTTP metrics middleware ───────────────────────────────────────────────────

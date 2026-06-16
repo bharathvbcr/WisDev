@@ -510,6 +510,35 @@ async def test_generate_stream_and_structured_output_cover_error_paths(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_generate_stream_safety_block_maps_to_content_blocked():
+    from services.gemini_service import EmptyStructuredTextError
+
+    blocked_runtime = LLMRuntime(
+        gemini_factory=lambda model=None: _FakeGemini(
+            chunks=["unused"],
+            raise_on_stream=EmptyStructuredTextError(
+                "Gemini returned empty text",
+                finish_reason="SAFETY",
+                safety_blocked=True,
+                safety_categories=("HARM_CATEGORY_DANGEROUS",),
+            ),
+        )
+    )
+    request = SimpleNamespace(
+        prompt="hello", model="", temperature=0.5, max_tokens=16, metadata={}
+    )
+    chunks = []
+    with patch("services.llm_runtime.validate_invocation_metadata", AsyncMock(return_value=None)):
+        with pytest.raises(LLMRuntimeError) as blocked_exc:
+            async for chunk in blocked_runtime.generate_stream(request, validate_credentials=True):
+                chunks.append(chunk)
+    assert chunks == []
+    assert blocked_exc.value.http_status == 422
+    assert blocked_exc.value.code == "CONTENT_BLOCKED"
+    assert blocked_exc.value.details["finishReason"] == "SAFETY"
+
+
+@pytest.mark.asyncio
 async def test_generate_stream_threads_runtime_controls(monkeypatch):
     limited = _LimitedGemini(chunks=["alpha", "beta"])
     runtime = LLMRuntime(gemini_factory=lambda model=None: limited)

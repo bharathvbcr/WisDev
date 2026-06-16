@@ -167,6 +167,10 @@ func Run(ctx context.Context, version string) error {
 	var temporalWorkerStop func()
 	if os.Getenv("DISABLE_AGENT_GATEWAY") != "1" {
 		agentGateway = newAgentGatewayFn(dbProvider, redisClient, journal, searchRegistry)
+		// Drain outbound research-event webhooks on shutdown so a deploy does not
+		// silently drop events already queued for delivery. Nil-safe when the
+		// event sink is unconfigured.
+		defer agentGateway.EventSink.Close()
 		if temporalCfg := resolveTemporalConfigFn(); temporalCfg.Enabled {
 			temporalClient, temporalErr := newTemporalClientFn(temporalCfg)
 			if temporalErr != nil {

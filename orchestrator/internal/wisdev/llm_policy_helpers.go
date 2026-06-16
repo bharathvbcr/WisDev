@@ -81,9 +81,28 @@ func wisdevRecoverableStructuredContext(ctx context.Context) (context.Context, c
 	return context.WithTimeout(ctx, unleashedTimeout(wisdevRecoverableStructuredTimeout))
 }
 
+// wisdevStructuredOutputContentBlocked reports whether the sidecar declined the
+// request on policy/safety grounds (CONTENT_BLOCKED / 422). Such a block will
+// never produce valid structured output on retry or on a heavier model, so the
+// caller must degrade to a deterministic path rather than retry. Matched on the
+// forwarded error code so it stays correct even when the block carries no
+// "returned empty text" prose (e.g. a prompt-level block_reason).
+func wisdevStructuredOutputContentBlocked(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "content_blocked") ||
+		strings.Contains(message, "content blocked")
+}
+
 func wisdevStructuredOutputCanUseDeterministicFallback(err error) bool {
 	if err == nil {
 		return false
+	}
+	// A content block is terminal but recoverable via the deterministic path.
+	if wisdevStructuredOutputContentBlocked(err) {
+		return true
 	}
 	message := strings.ToLower(strings.TrimSpace(err.Error()))
 	if !strings.Contains(message, "structured output") {
@@ -97,6 +116,11 @@ func wisdevStructuredOutputCanUseDeterministicFallback(err error) bool {
 
 func wisdevStructuredOutputCanUseTimeoutFallback(err error) bool {
 	if err == nil {
+		return false
+	}
+	// A content block is not a timeout: never extend deadlines or treat it as
+	// transient, even though both historically surfaced as empty structured text.
+	if wisdevStructuredOutputContentBlocked(err) {
 		return false
 	}
 	if errors.Is(err, context.DeadlineExceeded) {

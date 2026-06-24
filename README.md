@@ -9,9 +9,16 @@
 [![MCP](https://img.shields.io/badge/MCP-Tool%20Server-purple)](https://modelcontextprotocol.io/)
 
 **Open-source autonomous research agent** — Google ADK + MCP + Gemini on GCP.  
-Built for the [Google for Startups AI Agents Challenge](https://googleforstartupsaiagents.devpost.com/) · Live product: [ScholarLM](https://scholarlm-vbcr.web.app)
+Live product: [ScholarLM](https://scholarlm-vbcr.web.app)
 
 WisDev ARC (Agent Research Core) is the open-source WisDev YOLO research agent runtime and the public project identity for this extracted runtime. It is a terminal-first agent stack for planning, executing, and synthesizing evidence-grounded research tasks across academic sources.
+
+### YouTube demos
+
+| Demo | Video |
+| --- | --- |
+| **WisDev CLI, TUI & MCP** — command-line interface, interactive Terminal UI dashboard, and exposing WisDev's academic search to Cursor, Claude Code, or Claude Desktop via the Model Context Protocol (MCP). | [Watch on YouTube](https://youtu.be/pPHDiyLTTI4?si=1h_6QwMeUprQAq8g) |
+| **ScholarLM V5 YOLO Mode (powered by WisDev)** — unlike traditional search engines or basic LLM wrappers, YOLO Mode runs an autonomous, bounded research loop: it plans search branches, queries multiple academic databases in parallel, filters and ranks papers, performs contradiction and gap analysis, and converges on a fully cited, evidence-grounded synthesis report. | [Watch on YouTube](https://youtu.be/_q8THxGZ9Io?si=pOGnSRgVs57DRozA) |
 
 ### Judge / hackathon quickstart (60 seconds)
 
@@ -22,7 +29,7 @@ cd wisdev-arc
 .\wisdev.cmd "What evidence supports RAG for scientific literature?"
 ```
 
-Full submission package: [`docs/hackathon/SUBMISSION.md`](docs/hackathon/SUBMISSION.md) · [Demo script](docs/hackathon/DEMO_SCRIPT.md) · [Architecture](docs/hackathon/ARCHITECTURE.md) · [Judge access](docs/hackathon/JUDGE_ACCESS.md)
+Full submission package: [`docs/hackathon/SUBMISSION.md`](docs/hackathon/SUBMISSION.md) · [Architecture](docs/hackathon/ARCHITECTURE.md) · [Judge access](docs/hackathon/JUDGE_ACCESS.md)
 
 ```text
 Query -> Plan -> Search -> Analyze -> Synthesize -> Report
@@ -38,6 +45,7 @@ The runtime target is Go plus optional Python only:
 
 ## Contents
 
+- [YouTube demos](#youtube-demos)
 - [Architecture](#architecture)
 - [Repository Layout](#repository-layout)
 - [Install](#install)

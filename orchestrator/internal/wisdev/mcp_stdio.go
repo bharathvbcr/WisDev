@@ -89,7 +89,7 @@ func (s *MCPServer) HandleStdioLine(ctx context.Context, line []byte) ([]byte, b
 	if handleCtx == nil {
 		handleCtx = context.Background()
 	}
-	handleCtx, cancel := context.WithTimeout(handleCtx, s.timeout)
+	handleCtx, cancel := context.WithTimeout(handleCtx, s.effectiveTimeout())
 	defer cancel()
 
 	result, mcpErr := s.dispatch(handleCtx, req)

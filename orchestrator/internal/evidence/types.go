@@ -41,10 +41,20 @@ type EvidencePacket struct {
 	SourceClusterID        string         `json:"sourceClusterId,omitempty"`
 	VisualEvidenceIDs      []string       `json:"visualEvidenceIds,omitempty"`
 	MaterialKinds          []string       `json:"materialKinds,omitempty"`
-	VerifierStatus         string         `json:"verifierStatus"`
-	VerifierNotes          []string       `json:"verifierNotes,omitempty"`
-	Confidence             float64        `json:"confidence"`
-	CreatedAt              int64          `json:"createdAt"`
+	VerifierStatus           string       `json:"verifierStatus"`
+	VerifierNotes            []string     `json:"verifierNotes,omitempty"`
+	Confidence               float64            `json:"confidence"`
+	CorroboratingSourceCount int                `json:"corroboratingSourceCount,omitempty"`
+	QuantitativeClaims       []QuantitativeClaim `json:"quantitativeClaims,omitempty"`
+	CreatedAt                int64              `json:"createdAt"`
+}
+
+// QuantitativeClaim is a (value, unit, context) tuple extracted from a claim so the
+// writer can only cite numbers that were actually present in the source.
+type QuantitativeClaim struct {
+	Value   string `json:"value"`
+	Unit    string `json:"unit,omitempty"`
+	Context string `json:"context,omitempty"`
 }
 
 type VisualEvidence struct {

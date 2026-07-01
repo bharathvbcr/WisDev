@@ -45,7 +45,9 @@ func AcquireFullTextForPapers(ctx context.Context, papers []search.Paper, maxFet
 		maxFetch = maxFullTextFetchPerCall
 	}
 
-	compiler := &Paper2SkillCompiler{HTTPClient: &http.Client{Timeout: fullTextFetchTimeout}}
+	// SECURITY (SSRF): paper PdfUrl/OpenAccessUrl come from upstream providers and
+	// model output; block redirects that land on private/loopback hosts.
+	compiler := &Paper2SkillCompiler{HTTPClient: &http.Client{Timeout: fullTextFetchTimeout, CheckRedirect: secureRedirectPolicy}}
 	fetched := 0
 	for i := range papers {
 		if fetched >= maxFetch {

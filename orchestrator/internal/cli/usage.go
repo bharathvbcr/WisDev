@@ -11,6 +11,7 @@ func printUsage(w io.Writer) {
 	printSection(w, "Essentials")
 	note(w, "  wisdev \"your research question\"")
 	note(w, "  wisdev max \"your research question\"   Maximum depth (unleashed, long-form, 12 iters)")
+	note(w, "  wisdev docgen [-o paper.md] \"topic\"   Search + DocuGen: a grounded manuscript draft")
 	note(w, "  wisdev check")
 	note(w, "  wisdev tui [--demo]   Interactive UI — make tui-demo for recording")
 	note(w, "  wisdev demo [--offline]")
@@ -32,6 +33,7 @@ func printUsage(w io.Writer) {
 	note(w, "  --offline       Smoke test without network")
 	note(w, "  --no-enhance    Disable AI structured query preparation (on by default)")
 	note(w, "  --long-form     Extended Introduction and Background sections (yolo local)")
+	note(w, "  --docgen        Also generate a grounded manuscript after research (yolo local)")
 	note(w, "  --remote        Use HTTP orchestrator (yolo only)")
 	fmt.Fprintln(w)
 

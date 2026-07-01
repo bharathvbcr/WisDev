@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	internalwisdev "github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/envload"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/telemetry"
+	internalwisdev "github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
 	agent "github.com/bharathvbcr/wisdev-arc/orchestrator/pkg/wisdev"
 )
 
@@ -52,6 +52,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return runYOLO(args[1:], stdout, stderr)
 	case "max":
 		return runMax(args[1:], stdout, stderr)
+	case "docgen":
+		return runDocGen(args[1:], stdout, stderr)
 	case "serve":
 		return runServe(stdout, stderr)
 	case "mcp":
@@ -173,6 +175,14 @@ func runYOLO(args []string, stdout, stderr io.Writer) error {
 	noEnhance := fs.Bool("no-enhance", false, "disable query grammar, typo, and acronym enhancement")
 	longForm := fs.Bool("long-form", false, "synthesize extended Introduction and Background sections")
 	stages := fs.Bool("stages", false, "stream research loop stage events to stderr during local runs")
+	docGen := fs.Bool("docgen", false, "after research, generate a grounded manuscript from the retrieved papers (same engine as `wisdev docgen`)")
+	docFormat := fs.String("doc-format", "markdown", "manuscript format when --docgen is set: markdown|latex|json")
+	docOutput := fs.String("doc-output", "", "write the generated manuscript to this file instead of stdout (implies --docgen)")
+	docWords := fs.Int("doc-words", 0, "target total word count for the --docgen manuscript (0 = model default)")
+	docMinCitations := fs.Int("doc-min-citations", 0, "minimum distinct sources the --docgen manuscript should cite (0 = no minimum)")
+	docFlow := fs.String("doc-flow", "", "comma-separated section flow for --docgen, e.g. introduction,methods,results,discussion (empty = default)")
+	docReviewRounds := fs.Int("doc-review-rounds", 0, "max rounds of the agentic generate→review→revise loop for --docgen (0 = default 2, max 5)")
+	docGenre := fs.String("doc-genre", "", "manuscript genre for --docgen, e.g. \"research paper\" (default: narrative literature review)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -184,28 +194,60 @@ func runYOLO(args []string, stdout, stderr io.Writer) error {
 	if *local && *remote {
 		return errors.New("use either --local or --remote, not both")
 	}
+
+	// --doc-output implies --docgen; resolve the manuscript format up front so an
+	// invalid value fails fast before the research loop runs.
+	withDocGen := *docGen || strings.TrimSpace(*docOutput) != ""
+	resolvedDocFormat := "markdown"
+	if withDocGen {
+		var fmtErr error
+		resolvedDocFormat, fmtErr = resolveDocGenFormat(*docFormat, *docOutput, false)
+		if fmtErr != nil {
+			return fmtErr
+		}
+	}
+
+	// Retrieve at least as many papers as the requested docGen citation floor so the
+	// manuscript can cite that many distinct sources.
+	maxUnique := *maxUniquePapers
+	if withDocGen && *docMinCitations > maxUnique {
+		maxUnique = *docMinCitations
+	}
+
 	runLocal := !*remote
 	if runLocal {
 		return runLocalYOLO(stdout, stderr, localYOLOOptions{
-			task:              task,
-			jsonOut:           *jsonOut,
-			quiet:             *quiet,
-			verbose:           *verbose,
-			showStages:        *stages || *verbose,
-			offline:           *offline,
-			providers:         splitCSV(*providers),
-			timeout:           *timeout,
-			domain:            *domain,
-			projectID:         *projectID,
-			maxIterations:     *maxIterations,
-			maxSearchTerms:    *maxSearchTerms,
-			hitsPerSearch:     *hitsPerSearch,
-			maxUniquePapers:   *maxUniquePapers,
+			task:                task,
+			jsonOut:             *jsonOut,
+			quiet:               *quiet,
+			verbose:             *verbose,
+			showStages:          *stages || *verbose,
+			offline:             *offline,
+			providers:           splitCSV(*providers),
+			timeout:             *timeout,
+			domain:              *domain,
+			projectID:           *projectID,
+			maxIterations:       *maxIterations,
+			maxSearchTerms:      *maxSearchTerms,
+			hitsPerSearch:       *hitsPerSearch,
+			maxUniquePapers:     maxUnique,
 			disablePlanning:     *disablePlanning,
 			disableHypotheses:   *disableHypotheses,
 			disableQueryEnhance: *noEnhance,
 			longFormReport:      *longForm,
+			withDocGen:          withDocGen,
+			docFormat:           resolvedDocFormat,
+			docOutputPath:       strings.TrimSpace(*docOutput),
+			docTargetWords:      *docWords,
+			docMinCitations:     *docMinCitations,
+			docSectionFlow:      splitCSV(*docFlow),
+			docReviewRounds:     *docReviewRounds,
+			docGenre:            strings.TrimSpace(*docGenre),
 		})
+	}
+
+	if withDocGen {
+		return errors.New("--docgen is only supported in local mode; drop --remote or use `wisdev docgen`")
 	}
 
 	if !*jsonOut && !*quiet {
@@ -255,24 +297,32 @@ func runYOLO(args []string, stdout, stderr io.Writer) error {
 }
 
 type localYOLOOptions struct {
-	task              string
-	jsonOut           bool
-	quiet             bool
-	verbose           bool
-	showStages        bool
-	offline           bool
-	providers         []string
-	timeout           time.Duration
-	domain            string
-	projectID         string
-	maxIterations     int
-	maxSearchTerms    int
-	hitsPerSearch     int
-	maxUniquePapers   int
+	task                string
+	jsonOut             bool
+	quiet               bool
+	verbose             bool
+	showStages          bool
+	offline             bool
+	providers           []string
+	timeout             time.Duration
+	domain              string
+	projectID           string
+	maxIterations       int
+	maxSearchTerms      int
+	hitsPerSearch       int
+	maxUniquePapers     int
 	disablePlanning     bool
 	disableHypotheses   bool
 	disableQueryEnhance bool
 	longFormReport      bool
+	withDocGen          bool
+	docFormat           string
+	docOutputPath       string
+	docTargetWords      int
+	docMinCitations     int
+	docSectionFlow      []string
+	docReviewRounds     int
+	docGenre            string
 }
 
 func runLocalYOLO(stdout, stderr io.Writer, opts localYOLOOptions) error {
@@ -288,6 +338,9 @@ func runLocalYOLO(stdout, stderr io.Writer, opts localYOLOOptions) error {
 			note(stderr, "  providers: %s", strings.Join(opts.providers, ", "))
 		} else {
 			note(stderr, "  providers: all built-in")
+		}
+		if opts.withDocGen {
+			note(stderr, "  docgen: on (manuscript format: %s)", opts.docFormat)
 		}
 		if opts.showStages {
 			printSection(stderr, "Stages")
@@ -315,18 +368,18 @@ func runLocalYOLO(stdout, stderr io.Writer, opts localYOLOOptions) error {
 			runErr = withGlobalResearchLLMClient(llmClient, func() error {
 				var innerErr error
 				yoloReq := agent.YOLORequest{
-				Task:                opts.task,
-				OriginalQuery:       opts.task,
-				Domain:              opts.domain,
-				ProjectID:           opts.projectID,
-				MaxIterations:       opts.maxIterations,
-				MaxSearchTerms:      opts.maxSearchTerms,
-				HitsPerSearch:       opts.hitsPerSearch,
-				MaxUniquePapers:     opts.maxUniquePapers,
-				DisablePlanning:     opts.disablePlanning,
-				DisableHypotheses:   opts.disableHypotheses,
-				DisableQueryEnhance: opts.disableQueryEnhance,
-				LongFormReport:      opts.longFormReport,
+					Task:                opts.task,
+					OriginalQuery:       opts.task,
+					Domain:              opts.domain,
+					ProjectID:           opts.projectID,
+					MaxIterations:       opts.maxIterations,
+					MaxSearchTerms:      opts.maxSearchTerms,
+					HitsPerSearch:       opts.hitsPerSearch,
+					MaxUniquePapers:     opts.maxUniquePapers,
+					DisablePlanning:     opts.disablePlanning,
+					DisableHypotheses:   opts.disableHypotheses,
+					DisableQueryEnhance: opts.disableQueryEnhance,
+					LongFormReport:      opts.longFormReport,
 				}
 				if opts.showStages {
 					yoloReq.OnProgress = func(event agent.ProgressEvent) {
@@ -343,8 +396,40 @@ func runLocalYOLO(stdout, stderr io.Writer, opts localYOLOOptions) error {
 		return err
 	}
 
+	// Optionally turn the research result into a grounded manuscript using the same
+	// pipeline as `wisdev docgen`. This reuses the papers already retrieved above, so
+	// no second search pass runs. The document is appended after the research output
+	// (or written to --doc-output when requested).
+	var (
+		manuscript     string
+		manuscriptDone bool
+	)
+	if opts.withDocGen {
+		ctx2, cancel2 := context.WithTimeout(context.Background(), opts.timeout)
+		defer cancel2()
+		rendered, _, docErr := generateManuscriptFromResearch(ctx2, stderr, opts.task, result, opts.docFormat, "", opts.offline, manuscriptControls{
+			targetWords:  opts.docTargetWords,
+			minCitations: opts.docMinCitations,
+			sectionFlow:  opts.docSectionFlow,
+			reviewRounds: opts.docReviewRounds,
+			genre:        opts.docGenre,
+		})
+		if docErr != nil {
+			return fmt.Errorf("manuscript generation failed: %w", docErr)
+		}
+		manuscript = rendered
+		manuscriptDone = true
+	}
+
 	if opts.jsonOut {
-		encoded, err := json.MarshalIndent(result, "", "  ")
+		payload := any(result)
+		if manuscriptDone {
+			payload = map[string]any{
+				"research":   result,
+				"manuscript": json.RawMessage(manuscriptRawJSON(manuscript, opts.docFormat)),
+			}
+		}
+		encoded, err := json.MarshalIndent(payload, "", "  ")
 		if err != nil {
 			return err
 		}
@@ -352,7 +437,39 @@ func runLocalYOLO(stdout, stderr io.Writer, opts localYOLOOptions) error {
 		return nil
 	}
 
-	return printYOLOResult(stdout, stderr, result, opts.quiet, opts.verbose)
+	if err := printYOLOResult(stdout, stderr, result, opts.quiet, opts.verbose); err != nil {
+		return err
+	}
+
+	if manuscriptDone {
+		if opts.docOutputPath != "" {
+			if werr := os.WriteFile(opts.docOutputPath, []byte(manuscript), 0o644); werr != nil {
+				return fmt.Errorf("failed to write manuscript to %s: %w", opts.docOutputPath, werr)
+			}
+			note(stderr, "  manuscript (%s) written to %s", opts.docFormat, opts.docOutputPath)
+		} else {
+			if !opts.quiet {
+				printSection(stderr, "DocuGen manuscript")
+			}
+			fmt.Fprintln(stdout)
+			fmt.Fprintln(stdout, manuscript)
+		}
+	}
+	return nil
+}
+
+// manuscriptRawJSON returns a JSON value for embedding the rendered manuscript in
+// a combined --json payload: for the "json" format the manuscript already IS JSON
+// (embed it verbatim), otherwise it is a markdown/latex string and gets quoted.
+func manuscriptRawJSON(rendered, format string) []byte {
+	if format == "json" {
+		return []byte(rendered)
+	}
+	encoded, err := json.Marshal(rendered)
+	if err != nil {
+		return []byte(`""`)
+	}
+	return encoded
 }
 
 func postJSON(baseURL, endpoint string, body []byte, timeout time.Duration) ([]byte, int, error) {
@@ -408,7 +525,6 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-
 func runMCP(args []string, stdout, stderr io.Writer) error {
 	return runMCPWithIO(args, os.Stdin, stdout, stderr)
 }
@@ -436,7 +552,7 @@ func runMCPWithIO(args []string, stdin io.Reader, stdout, stderr io.Writer) erro
 	}
 
 	if stderr != nil {
-		note(stderr, "WisDev MCP stdio ready (Ctrl+C to stop). Tools: wisdevSearchPapers, wisdevPaperLookup, wisdevEvidenceSearch, wisdevAuthorSearch")
+		note(stderr, "WisDev MCP stdio ready (Ctrl+C to stop). Action tools: wisdevSearchPapers, wisdevPaperLookup, wisdevEvidenceSearch, wisdevAuthorSearch, wisdevGenerateManuscript. Tuning tools: wisdevGetConfig, wisdevTuneConfig, wisdevResetConfig, wisdevListProviders, wisdevCapabilities")
 	}
 
 	// MCP stdio reserves stdout for JSON-RPC frames; the telemetry package's

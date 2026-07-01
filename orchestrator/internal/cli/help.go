@@ -14,11 +14,16 @@ Runs local research with default providers openalex,arxiv.
 Aliases: ask`,
 	"ask": `Alias for wisdev search.`,
 	"run": `Legacy alias for wisdev search (optional search: prefix).`,
-	"yolo": `Usage: wisdev yolo [-q] [-v] [-j] [--offline] [--no-enhance] [--long-form] "question"
+	"yolo": `Usage: wisdev yolo [-q] [-v] [-j] [--offline] [--no-enhance] [--long-form] [--docgen] "question"
        wisdev yolo --remote "question"
 
 Local by default. AI structured query preparation (grammar, domain, seeds) is on unless --no-enhance.
 --long-form synthesizes extended Introduction and Background sections.
+--docgen also generates a grounded manuscript from the retrieved papers (same
+engine as ` + "`wisdev docgen`" + `); pair with --doc-format markdown|latex|json,
+--doc-output FILE, --doc-words N, --doc-min-citations N, --doc-flow LIST,
+--doc-review-rounds N (agentic generate→review→revise loop), and --doc-genre STR.
+Local mode only.
 Use --remote for the HTTP orchestrator.`,
 	"mcp": `Usage: wisdev mcp [--provider openalex,arxiv]
 
@@ -50,12 +55,43 @@ and planning stay on.
 Any yolo flag still works and overrides the preset, e.g.:
   wisdev max --max-iterations 6 "question"
   wisdev max -q "question"`,
+	"docgen": `Usage: wisdev docgen [flags] "your topic"
+       wisdev docgen --offline "your topic"
+       wisdev docgen -o paper.md "your topic"
+
+Runs local research to gather grounded papers, then drives the manuscript
+pipeline (the same engine behind the /full-paper route) to produce a grounded
+manuscript draft: ordered sections, visuals, a peer-review critique, and a
+reference list. Section prose is enriched by the Python sidecar when one is
+reachable and falls back to grounded scaffolds otherwise (so --offline works).
+
+  -o, --output PATH   Write the manuscript to a file (format inferred from extension)
+  -f, --format FMT    Output format: markdown | latex | json (default: from -o, else markdown)
+  -j, --json          Emit the raw manuscript pipeline result as JSON
+  -q, --quiet         Print only the manuscript markdown
+  -v, --verbose       Show search queries and pipeline stages on stderr
+  --offline           Skip network providers (grounded scaffold only)
+  --provider LIST     Comma-separated providers for retrieval (e.g. pubmed,arxiv)
+  --domain NAME       Research domain hint (e.g. medicine, cs)
+  --python-url URL    Python sidecar base URL for section enrichment
+  --max-unique-papers N   Cap on papers fed into the manuscript (default 24)
+  --words N           Target total word count (split across sections; 0 = model default)
+  --min-citations N   Minimum distinct sources to cite (raises the retrieval floor)
+  --flow LIST         Comma-separated section flow, e.g. introduction,methods,results,discussion
+  --review-rounds N   Max rounds of the agentic generate→review→revise loop (0 = default 2, max 5)
+  --genre STR         Manuscript genre, e.g. "research paper" (default: narrative literature review)
+
+Section drafting runs an agentic generate → review → revise loop: each round
+re-reviews the draft and rewrites flagged sections, stopping early on convergence.
+
+Alias: docugen`,
+	"docugen": `Alias for wisdev docgen.`,
 	"guide": `Usage: wisdev guide
 
 One-screen guide to every wisdev command, grouped by task.
 Alias: commands`,
 	"commands": `Alias for wisdev guide.`,
-	"version": `Usage: wisdev version`,
+	"version":  `Usage: wisdev version`,
 	"update": `Usage: wisdev update [--check] [--version vX.Y.Z] [--force]
 
 Self-update the wisdev binary from the latest GitHub release

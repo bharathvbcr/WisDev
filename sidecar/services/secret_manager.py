@@ -297,7 +297,15 @@ def _get_sm_client():
             _sm_client_init_failed = False
             _sm_client_retry_at = 0.0
             return _sm_client
-        except Exception as exc:  # pragma: no cover - import/ADC failures are environment-specific
+        except ImportError as exc:  # pragma: no cover - SDK simply not installed
+            # The google-cloud-secret-manager SDK is optional. A manuscript-only /
+            # local deployment runs fine without it (secrets resolve from env vars),
+            # so this is an expected, handled condition — log quietly, not as a warning.
+            _sm_client_init_failed = True
+            _sm_client_retry_at = time.time() + _SM_CLIENT_RETRY_SECONDS
+            logger.debug("secret_manager_sdk_unavailable", error=str(exc))
+            return None
+        except Exception as exc:  # pragma: no cover - ADC/runtime failures are environment-specific
             _sm_client_init_failed = True
             _sm_client_retry_at = time.time() + _SM_CLIENT_RETRY_SECONDS
             logger.warning("secret_manager_client_init_failed", error=str(exc))

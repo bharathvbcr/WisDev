@@ -54,23 +54,39 @@ func TestComposeFollowUpQuery(t *testing.T) {
 }
 
 func TestMoveSettingGridIncludesLongFormRow(t *testing.T) {
+	// Third row holds two settings: Long-form (6) and DocGen (7).
 	if got := moveSettingDown(3); got != 6 {
 		t.Fatalf("down from enhance should reach long-form, got %d", got)
 	}
-	if got := moveSettingDown(5); got != 6 {
-		t.Fatalf("down from exhaustive should reach long-form, got %d", got)
+	if got := moveSettingDown(4); got != 7 {
+		t.Fatalf("down from hypotheses should reach docgen, got %d", got)
+	}
+	if got := moveSettingDown(5); got != 7 {
+		t.Fatalf("down from exhaustive should clamp to docgen, got %d", got)
 	}
 	if got := moveSettingDown(6); got != 6 {
 		t.Fatalf("down from long-form should stay (caller exits settings), got %d", got)
 	}
+	if got := moveSettingDown(7); got != 7 {
+		t.Fatalf("down from docgen should stay (caller exits settings), got %d", got)
+	}
 	if got := moveSettingUp(6); got != 3 {
 		t.Fatalf("up from long-form should reach enhance, got %d", got)
 	}
-	if got := moveSettingRight(6); got != 6 {
-		t.Fatalf("right on single-item row should stay on long-form, got %d", got)
+	if got := moveSettingUp(7); got != 4 {
+		t.Fatalf("up from docgen should reach hypotheses, got %d", got)
 	}
-	if got := moveSettingLeft(6); got != 6 {
-		t.Fatalf("left on single-item row should stay on long-form, got %d", got)
+	if got := moveSettingRight(6); got != 7 {
+		t.Fatalf("right on long-form should reach docgen, got %d", got)
+	}
+	if got := moveSettingRight(7); got != 6 {
+		t.Fatalf("right on docgen should wrap to long-form, got %d", got)
+	}
+	if got := moveSettingLeft(6); got != 7 {
+		t.Fatalf("left on long-form should reach docgen, got %d", got)
+	}
+	if got := moveSettingLeft(7); got != 6 {
+		t.Fatalf("left on docgen should wrap to long-form, got %d", got)
 	}
 }
 

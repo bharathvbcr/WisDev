@@ -144,7 +144,7 @@ def test_wisdev_typed_action_route_is_reachable():
     from main import app
     with TestClient(app) as client:
         response = client.post(
-            "/action/research.verifyCitations",
+            "/wisdev/action/research.verifyCitations",
             json={"papers": [{"title": "Paper A"}], "sessionId": "sess-1"},
         )
         assert response.status_code == 200
@@ -158,7 +158,7 @@ def test_wisdev_typed_action_validation_is_enforced():
     from main import app
     with TestClient(app) as client:
         response = client.post(
-            "/action/research.buildClaimEvidenceTable",
+            "/wisdev/action/research.buildClaimEvidenceTable",
             json={"papers": []},
         )
         assert response.status_code == 422

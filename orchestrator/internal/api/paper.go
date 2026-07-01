@@ -510,63 +510,6 @@ func (h *PaperHandler) HandleExportLaTeX(w http.ResponseWriter, r *http.Request)
 	w.Write([]byte(data))
 }
 
-func (h *PaperHandler) HandleGetPaper(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		WriteError(w, http.StatusMethodNotAllowed, ErrBadRequest, "method not allowed", map[string]any{
-			"allowedMethod": http.MethodGet,
-		})
-		return
-	}
-
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		id = r.URL.Query().Get("paperId")
-	}
-	if id == "" {
-		WriteError(w, http.StatusBadRequest, ErrInvalidParameters, "id or paperId required", nil)
-		return
-	}
-
-	identifier := id
-	if strings.Contains(id, "/") && !strings.HasPrefix(id, "DOI:") {
-		identifier = "DOI:" + id
-	}
-
-	fetchCtx, fetchCancel := paperExternalContext(r.Context())
-	defer fetchCancel()
-
-	apiKey, _ := resilience.GetSecret(fetchCtx, "SEMANTIC_SCHOLAR_API_KEY")
-	fetchUrl := fmt.Sprintf("https://api.semanticscholar.org/graph/v1/paper/%s?fields=paperId,externalIds,title,url,abstract,authors,year,venue,citationCount,influentialCitationCount,referenceCount,openAccessPdf,fieldsOfStudy",
-		url.QueryEscape(identifier))
-
-	req, _ := http.NewRequestWithContext(fetchCtx, http.MethodGet, fetchUrl, nil)
-	if apiKey != "" {
-		req.Header.Set("x-api-key", apiKey)
-	}
-
-	resp, err := h.httpClient.Do(req)
-	if err != nil {
-		WriteError(w, http.StatusBadGateway, ErrDependencyFailed, "semantic scholar request failed", map[string]any{
-			"error": err.Error(),
-		})
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		WriteError(w, resp.StatusCode, ErrDependencyFailed, "semantic scholar returned unexpected status", map[string]any{
-			"status": resp.StatusCode,
-		})
-		return
-	}
-
-	var paperData any
-	json.NewDecoder(resp.Body).Decode(&paperData)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(paperData)
-}
-
 func (h *PaperHandler) HandleGetNetwork(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		WriteError(w, http.StatusMethodNotAllowed, ErrBadRequest, "method not allowed", map[string]any{

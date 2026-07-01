@@ -23,6 +23,7 @@ A bare question is treated as `search`: `wisdev "your question"` ≡ `wisdev sea
 |---------|---------|--------------|
 | `search` / `run` | `ask` | Local research over built-in providers, then synthesize a cited answer |
 | `max` | — | **Maximum-depth research** — forces unleashed budgets, long-form, 12 iterations, wide search |
+| `docgen` | `docugen` | **Search + DocuGen** — retrieve grounded papers, then generate a full manuscript draft (sections, visuals, peer review, references) |
 | `yolo` | — | Same research engine with full flag control (`--local` default, or `--remote`) |
 | `tui` | `ui` | Interactive terminal UI for local research |
 | `demo` | — | Scripted hackathon demo sequence |
@@ -64,6 +65,56 @@ Any flag you add overrides the preset, e.g. `wisdev max --provider pubmed "…"`
 
 ---
 
+## `docgen` / `docugen` — search + DocuGen
+
+```
+wisdev docgen "your topic"
+wisdev docgen --offline "your topic"
+wisdev docgen -o paper.md --provider pubmed,arxiv "your topic"
+wisdev docgen --words 4000 --min-citations 20 --flow introduction,methods,results,discussion "your topic"
+```
+
+A one-shot **search + document generation** command. It runs the local research
+loop to gather grounded papers, then drives the manuscript pipeline (the same
+engine behind the `/full-paper` HTTP route) to produce a grounded manuscript
+draft: ordered sections (Abstract → Conclusion), grounded visuals, a peer-review
+critique, and a reference list. Section prose is enriched by the Python sidecar
+when one is reachable (`PYTHON_SIDECAR_HTTP_URL` / `--python-url`) and falls back
+to grounded scaffolds otherwise, so `--offline` produces a structured draft with
+no network access.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o`, `--output` | stdout | Write the manuscript markdown to this file |
+| `-j`, `--json` | false | Emit the raw manuscript pipeline result as JSON |
+| `-q`, `--quiet` | false | Print only the manuscript markdown |
+| `-v`, `--verbose` | false | Show search queries + pipeline stages on stderr |
+| `--stages` | false | Stream search-loop stage events to stderr |
+| `--offline` | false | Disable network providers (grounded scaffold only) |
+| `--provider` | all built-in | Comma-separated provider names for retrieval |
+| `--domain` | auto | Research domain hint (e.g. `medicine`, `cs`) |
+| `--python-url` | resolved | Python sidecar base URL for section enrichment |
+| `--timeout` | 10m | Overall timeout |
+| `--max-iterations` | 3 (**12 when unleashed**) | Max search-loop iterations |
+| `--max-search-terms` | 6 | Max distinct search terms |
+| `--hits-per-search` | 5 | Results requested per provider query |
+| `--max-unique-papers` | 24 | Cap on papers fed into the manuscript |
+| `--no-enhance` | false | Disable AI query grammar/typo/acronym preparation |
+| `-f`, `--format` | from `-o`, else markdown | Output format: `markdown` \| `latex` \| `json` |
+| `--words` | 0 (model default) | Target total word count, split across sections |
+| `--min-citations` | 0 | Minimum distinct sources to cite (also raises the retrieval floor) |
+| `--flow` | default plan | Comma-separated section flow, e.g. `introduction,methods,results,discussion`. Known ids reuse tuned briefs; unknown ids become generic synthesis sections |
+| `--review-rounds` | 2 | Max rounds of the agentic generate→review→revise loop (early-exits on convergence; max 5) |
+| `--genre` | narrative literature review | Manuscript genre, e.g. `research paper` (controls voice + how the reviewer grades it) |
+
+> Section drafting runs an **agentic generate → review → revise loop**: each round
+> re-reviews the draft and rewrites the sections the review flagged (re-grounding and
+> re-verifying), stopping as soon as a round makes no changes.
+>
+> Manuscript prose minimizes em-dashes (`—`) — enforced by both the writer prompt and a deterministic post-process.
+
+---
+
 ## `search` / `run` / `ask` / `yolo` — research
 
 `search`/`run`/`ask` are shortcuts that run `yolo --local`. Use `yolo` directly
@@ -97,6 +148,14 @@ wisdev yolo --remote --url http://localhost:8081 "question"
 | `--disable-hypotheses` | false | Skip hypothesis generation |
 | `--no-enhance` | false | Disable AI query grammar/typo/acronym preparation |
 | `--long-form` | false | Add extended Introduction + Background sections |
+| `--docgen` | false | After research, also generate a grounded manuscript from the retrieved papers (same engine as `wisdev docgen`; local mode only) |
+| `--doc-format` | markdown | Manuscript format when `--docgen` is set: `markdown` \| `latex` \| `json` |
+| `--doc-output` | stdout | Write the generated manuscript to this file (implies `--docgen`) |
+| `--doc-words` | 0 | Target total word count for the `--docgen` manuscript |
+| `--doc-min-citations` | 0 | Minimum distinct sources the `--docgen` manuscript should cite (also raises the research paper floor) |
+| `--doc-flow` | default plan | Comma-separated section flow for `--docgen`, e.g. `introduction,methods,results,discussion` |
+| `--doc-review-rounds` | 2 | Max rounds of the agentic generate→review→revise loop for `--docgen` (max 5) |
+| `--doc-genre` | narrative literature review | Manuscript genre for `--docgen`, e.g. `research paper` |
 
 > Under `WISDEV_UNLEASHED=1`, the loop also enforces a **minimum of 5 iterations**
 > (capped by `--max-iterations`) so it does not converge on the first pass.

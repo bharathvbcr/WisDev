@@ -14,6 +14,7 @@ import (
 
 type extractedClaim struct {
 	text         string
+	support      string // a distinct adjacent sentence used as the evidence span
 	claimType    string
 	section      string
 	locator      string
@@ -86,6 +87,21 @@ func BuildRawMaterialSet(jobID string, query string, papers []search.Paper) (Man
 		for _, claim := range claims {
 			packetCounter++
 			packetID := fmt.Sprintf("evp_%d_%d", now, packetCounter)
+			// Use a DISTINCT adjacent sentence as the evidence span when available, so
+			// the span is corroborating text rather than a copy of the claim.
+			snippet, supportLabel := claim.text, "asserts"
+			if distinct := strings.TrimSpace(claim.support); distinct != "" && normalizeTitle(distinct) != normalizeTitle(claim.text) {
+				snippet, supportLabel = distinct, "corroborates"
+			}
+			verifierStatus := derivePacketVerifierStatus(record)
+			var verifierNotes []string
+			// Entailment sanity check: if a distinct supporting sentence is on the
+			// same subject but flips polarity vs the claim, the source's own text is
+			// inconsistent — do not call the packet "verified".
+			if verifierStatus == "verified" && !claimSnippetConsistent(claim.text, claim.support) {
+				verifierStatus = "needs_review"
+				verifierNotes = append(verifierNotes, "claim and its supporting sentence disagree in polarity")
+			}
 			packet := EvidencePacket{
 				PacketID:         packetID,
 				ClaimText:        sanitizeString(claim.text, 1024),
@@ -97,14 +113,16 @@ func BuildRawMaterialSet(jobID string, query string, papers []search.Paper) (Man
 					{
 						SourceCanonicalID: record.CanonicalID,
 						Section:           sanitizeString(claim.section, 120),
-						Snippet:           sanitizeString(claim.text, 1024),
+						Snippet:           sanitizeString(snippet, 1024),
 						Locator:           sanitizeString(claim.locator, 240),
-						Support:           "supports",
+						Support:           supportLabel,
 					},
 				},
-				VerifierStatus: derivePacketVerifierStatus(record),
-				Confidence:     record.ResolutionConfidence,
-				CreatedAt:      now,
+				VerifierStatus:     verifierStatus,
+				VerifierNotes:      verifierNotes,
+				Confidence:         record.ResolutionConfidence,
+				QuantitativeClaims: extractQuantitativeClaims(claim.text),
+				CreatedAt:          now,
 			}
 			if claim.visualID != "" {
 				packet.VisualEvidenceIDs = []string{claim.visualID}
@@ -159,6 +177,7 @@ func BuildRawMaterialSet(jobID string, query string, papers []search.Paper) (Man
 		})
 	}
 
+	annotateCorroboration(claimPackets)
 	assignContradictions(claimPackets)
 	linkVisualEvidence(claimPackets, visualEvidence)
 
@@ -274,7 +293,7 @@ func extractClaimsFromPaper(paper search.Paper, record CanonicalCitationRecord) 
 	seen := map[string]struct{}{}
 	visualCounter := 0
 
-	addClaim := func(text string, claimType string, section string, locator string, materialKind string, visualID string) {
+	addClaim := func(text, support, claimType, section, locator, materialKind, visualID string) {
 		text = sanitizeString(text, 1024)
 		if text == "" {
 			return
@@ -289,6 +308,7 @@ func extractClaimsFromPaper(paper search.Paper, record CanonicalCitationRecord) 
 		seen[key] = struct{}{}
 		claims = append(claims, extractedClaim{
 			text:         text,
+			support:      sanitizeString(support, 1024),
 			claimType:    classifyClaimType(text, claimType),
 			section:      sanitizeString(section, 120),
 			locator:      sanitizeString(locator, 240),
@@ -297,16 +317,26 @@ func extractClaimsFromPaper(paper search.Paper, record CanonicalCitationRecord) 
 		})
 	}
 
-	for idx, sentence := range extractSentences(paper.Abstract, 3) {
+	// Cover more of the abstract (most providers populate only the abstract) and
+	// route each sentence to the section it actually fits, rather than dumping all
+	// but the first into "introduction" — this gives thinner sources enough varied
+	// packets and reduces off-section placement. The adjacent sentence is carried
+	// as a distinct supporting span (so the evidence span is not a copy of the claim).
+	abstractSentences := extractSentences(paper.Abstract, 6)
+	for idx, sentence := range abstractSentences {
 		section := "abstract"
 		if idx > 0 {
-			section = "introduction"
+			section = inferSectionHint(sentence, "abstract")
 		}
-		addClaim(sentence, "", section, "abstract", "abstract", "")
+		support := ""
+		if idx+1 < len(abstractSentences) {
+			support = abstractSentences[idx+1]
+		}
+		addClaim(sentence, support, "", section, "abstract", "abstract", "")
 	}
 
 	for idx, sentence := range extractSentences(paper.FullText, 2) {
-		addClaim(sentence, "", inferSectionHint(sentence, "full_text"), fmt.Sprintf("full_text:%d", idx+1), "full_text", "")
+		addClaim(sentence, "", "", inferSectionHint(sentence, "full_text"), fmt.Sprintf("full_text:%d", idx+1), "full_text", "")
 	}
 
 	for idx, item := range sliceAnyMap(paper.StructureMap) {
@@ -328,7 +358,7 @@ func extractClaimsFromPaper(paper search.Paper, record CanonicalCitationRecord) 
 				Caption:           text,
 				Locator:           locator,
 			})
-			addClaim(text, "result", firstNonEmpty(section, "results"), locator, "table", visualID)
+			addClaim(text, title, "result", firstNonEmpty(section, "results"), locator, "table", visualID)
 		case strings.Contains(itemType, "figure"), strings.Contains(itemType, "diagram"), strings.Contains(itemType, "plot"):
 			visualCounter++
 			visualID := fmt.Sprintf("visual_%s_figure_%d", hashID(record.CanonicalID), visualCounter)
@@ -340,15 +370,53 @@ func extractClaimsFromPaper(paper search.Paper, record CanonicalCitationRecord) 
 				Caption:           text,
 				Locator:           locator,
 			})
-			addClaim(text, "result", firstNonEmpty(section, "results"), locator, "figure", visualID)
+			addClaim(text, title, "result", firstNonEmpty(section, "results"), locator, "figure", visualID)
 		default:
 			if text != "" {
-				addClaim(text, "", firstNonEmpty(section, "discussion"), locator, "section", "")
+				addClaim(text, "", "", firstNonEmpty(section, "discussion"), locator, "section", "")
 			}
 		}
 	}
 
 	return claims, visuals
+}
+
+var quantitativePattern = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s?(%|(?:percent|patients|cases|studies|participants|cohorts?|-?fold|points?)\b)`)
+
+// extractQuantitativeClaims pulls (value, unit) pairs from a claim so the writer
+// can only cite numbers that were actually present in the source (anti-fabrication).
+func extractQuantitativeClaims(text string) []QuantitativeClaim {
+	matches := quantitativePattern.FindAllStringSubmatch(text, 6)
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make([]QuantitativeClaim, 0, len(matches))
+	seen := map[string]struct{}{}
+	for _, m := range matches {
+		value, unit := strings.TrimSpace(m[1]), strings.ToLower(strings.TrimSpace(m[2]))
+		key := value + "|" + unit
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, QuantitativeClaim{Value: value, Unit: unit})
+	}
+	return out
+}
+
+// claimSnippetConsistent reports whether a claim and its distinct supporting
+// sentence are consistent: true when there is no distinct snippet or they address
+// different subjects (cannot judge), false only when they share a subject but flip
+// polarity (one negates the other) — a real same-source inconsistency.
+func claimSnippetConsistent(claim, snippet string) bool {
+	snippet = strings.TrimSpace(snippet)
+	if snippet == "" || normalizeTitle(snippet) == normalizeTitle(claim) {
+		return true
+	}
+	if !sharesContradictionSubject(claim, snippet) {
+		return true
+	}
+	return contradictionSignalPattern.MatchString(claim) == contradictionSignalPattern.MatchString(snippet)
 }
 
 func fallbackClaimText(title string, abstract string) string {
@@ -358,8 +426,16 @@ func fallbackClaimText(title string, abstract string) string {
 	return sanitizeString(title, 1024)
 }
 
+// derivePacketVerifierStatus reports how strongly a claim packet's SOURCE is
+// resolved — NOT whether the claim text was independently fact-checked. The
+// pipeline runs no entailment check: the evidence span is the claim sentence
+// itself, so "verified" must not imply content verification. It therefore means
+// the citation resolves to a strong canonical identifier (DOI / arXiv / OpenAlex /
+// Semantic Scholar, confidence >= 0.8); a title-only fuzzy match is "needs_review"
+// (a real but weakly-identified source), and an unresolved/untitled source is
+// "provisional".
 func derivePacketVerifierStatus(record CanonicalCitationRecord) string {
-	if record.Resolved {
+	if record.Resolved && record.ResolutionConfidence >= 0.8 {
 		return "verified"
 	}
 	if strings.TrimSpace(record.Title) != "" {
@@ -368,36 +444,104 @@ func derivePacketVerifierStatus(record CanonicalCitationRecord) string {
 	return "provisional"
 }
 
+// annotateCorroboration sets CorroboratingSourceCount on each packet to the number
+// of DISTINCT sources asserting a near-identical claim (so a finding reported by
+// several independent papers is recognizably stronger), and nudges the confidence
+// of multiply-corroborated packets up. It does not merge or remove packets, so all
+// cluster/visual cross-references stay intact.
+func annotateCorroboration(packets []EvidencePacket) {
+	type corroborationGroup struct {
+		tokens  map[string]struct{}
+		indices []int
+		sources map[string]struct{}
+	}
+	groups := make([]*corroborationGroup, 0)
+	for i := range packets {
+		tokens := contradictionSubjectTokens(packets[i].ClaimText)
+		if len(tokens) == 0 {
+			continue
+		}
+		var match *corroborationGroup
+		for _, group := range groups {
+			if jaccardTokenSets(tokens, group.tokens) >= 0.8 {
+				match = group
+				break
+			}
+		}
+		if match == nil {
+			match = &corroborationGroup{tokens: tokens, sources: map[string]struct{}{}}
+			groups = append(groups, match)
+		}
+		match.indices = append(match.indices, i)
+		for _, span := range packets[i].EvidenceSpans {
+			if span.SourceCanonicalID != "" {
+				match.sources[span.SourceCanonicalID] = struct{}{}
+			}
+		}
+	}
+	for _, group := range groups {
+		count := len(group.sources)
+		if count < 1 {
+			count = 1
+		}
+		for _, idx := range group.indices {
+			packets[idx].CorroboratingSourceCount = count
+			if count >= 2 {
+				if boosted := packets[idx].Confidence + 0.05*float64(count-1); boosted <= 0.99 {
+					packets[idx].Confidence = boosted
+				} else {
+					packets[idx].Confidence = 0.99
+				}
+			}
+		}
+	}
+}
+
+func jaccardTokenSets(a, b map[string]struct{}) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	inter := 0
+	for token := range a {
+		if _, ok := b[token]; ok {
+			inter++
+		}
+	}
+	union := len(a) + len(b) - inter
+	if union == 0 {
+		return 0
+	}
+	return float64(inter) / float64(union)
+}
+
+// assignContradictions links two claim packets as contradictory only when they
+// (a) sit in the same primary manuscript section, (b) are about the same subject
+// (shared content tokens), and (c) at least one carries a genuine opposition
+// signal. The previous implementation linked every hedge-word claim to a single
+// per-section (or global fallback) baseline regardless of subject, which
+// manufactured dozens of spurious "contradictions"; that star topology and the
+// cross-section fallback are removed here.
 func assignContradictions(packets []EvidencePacket) {
-	baselineBySection := map[string]string{}
-	fallbackBaselineID := ""
-	byPacketID := map[string]*EvidencePacket{}
+	bySection := map[string][]int{}
 	for idx := range packets {
 		packet := &packets[idx]
-		byPacketID[packet.PacketID] = packet
-		if fallbackBaselineID == "" && !isPotentiallyContradictory(packet.ClaimText, packet.ClaimType) {
-			fallbackBaselineID = packet.PacketID
-		}
 		if len(packet.SectionRelevance) == 0 {
 			continue
 		}
-		primarySection := packet.SectionRelevance[0]
-		if isPotentiallyContradictory(packet.ClaimText, packet.ClaimType) {
-			baselineID := baselineBySection[primarySection]
-			if baselineID == "" {
-				baselineID = fallbackBaselineID
+		bySection[packet.SectionRelevance[0]] = append(bySection[packet.SectionRelevance[0]], idx)
+	}
+	for _, idxs := range bySection {
+		for a := 0; a < len(idxs); a++ {
+			for b := a + 1; b < len(idxs); b++ {
+				pa, pb := &packets[idxs[a]], &packets[idxs[b]]
+				opposed := isPotentiallyContradictory(pa.ClaimText, pa.ClaimType) ||
+					isPotentiallyContradictory(pb.ClaimText, pb.ClaimType)
+				if !opposed || !sharesContradictionSubject(pa.ClaimText, pb.ClaimText) {
+					continue
+				}
+				pa.ContradictionPacketIDs = uniqueStrings(append(pa.ContradictionPacketIDs, pb.PacketID))
+				pb.ContradictionPacketIDs = uniqueStrings(append(pb.ContradictionPacketIDs, pa.PacketID))
 			}
-			if baselineID == "" || baselineID == packet.PacketID {
-				continue
-			}
-			packet.ContradictionPacketIDs = uniqueStrings(append(packet.ContradictionPacketIDs, baselineID))
-			if baseline := byPacketID[baselineID]; baseline != nil {
-				baseline.ContradictionPacketIDs = uniqueStrings(append(baseline.ContradictionPacketIDs, packet.PacketID))
-			}
-			continue
-		}
-		if _, exists := baselineBySection[primarySection]; !exists {
-			baselineBySection[primarySection] = packet.PacketID
 		}
 	}
 }
@@ -590,16 +734,66 @@ func inferClusterTheme(query string, paper search.Paper) string {
 	}
 }
 
-func isPotentiallyContradictory(text string, claimType string) bool {
-	if claimType == "limitation" {
-		return true
+// contradictionSignalPattern matches genuine opposition/negation language. It
+// uses word boundaries so it cannot fire on innocuous substrings ("but" inside
+// "contribution"/"attribute", "limited" inside "unlimited"), which previously
+// flagged most review claims as contradictory.
+var contradictionSignalPattern = regexp.MustCompile(`(?i)\b(however|whereas|contrary to|in contrast|contradict\w*|conflict\w*|disagree\w*|inconsistent|did not|does not|do not|failed to|fails to|worse than|less effective|no (significant )?(effect|difference|benefit|improvement)|negative (result|finding))\b`)
+
+var contradictionTokenPattern = regexp.MustCompile(`[a-zA-Z0-9]+`)
+
+// contradictionSubjectStopwords are generic + domain-ubiquitous tokens that must
+// not, by themselves, make two claims look like they share a subject.
+var contradictionSubjectStopwords = map[string]struct{}{
+	"study": {}, "studies": {}, "research": {}, "results": {}, "result": {},
+	"paper": {}, "model": {}, "models": {}, "method": {}, "methods": {},
+	"approach": {}, "approaches": {}, "system": {}, "systems": {}, "data": {},
+	"performance": {}, "clinical": {}, "patient": {}, "patients": {}, "medical": {},
+	"using": {}, "based": {}, "between": {}, "across": {}, "within": {},
+	"these": {}, "those": {}, "their": {}, "which": {}, "while": {}, "where": {},
+	"there": {}, "applications": {}, "application": {}, "framework": {}, "frameworks": {},
+}
+
+// isPotentiallyContradictory reports whether a claim's text carries a genuine
+// opposition/negation signal — a prerequisite (not proof) for a contradiction.
+// Self-disclosed limitations (claimType "limitation") and incidental hedge words
+// like "but"/"limited" are deliberately NOT treated as oppositions; they used to
+// fire on most review claims and manufactured spurious contradiction links.
+func isPotentiallyContradictory(text string, _ string) bool {
+	return contradictionSignalPattern.MatchString(text)
+}
+
+// contradictionSubjectTokens returns the meaningful (>=5 char, non-stopword)
+// content tokens of a claim, used to require that two claims are actually about
+// the same subject before they can be called contradictory.
+func contradictionSubjectTokens(text string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, tok := range contradictionTokenPattern.FindAllString(strings.ToLower(text), -1) {
+		if len(tok) < 5 {
+			continue
+		}
+		if _, blocked := contradictionSubjectStopwords[tok]; blocked {
+			continue
+		}
+		out[tok] = struct{}{}
 	}
-	value := strings.ToLower(text)
-	return strings.Contains(value, "however") ||
-		strings.Contains(value, "but") ||
-		strings.Contains(value, "does not") ||
-		strings.Contains(value, "limited") ||
-		strings.Contains(value, "unclear")
+	return out
+}
+
+// sharesContradictionSubject requires at least two shared content tokens so two
+// claims must genuinely address the same subject before being linked.
+func sharesContradictionSubject(a, b string) bool {
+	ta, tb := contradictionSubjectTokens(a), contradictionSubjectTokens(b)
+	if len(ta) == 0 || len(tb) == 0 {
+		return false
+	}
+	shared := 0
+	for tok := range ta {
+		if _, ok := tb[tok]; ok {
+			shared++
+		}
+	}
+	return shared >= 2
 }
 
 func containsNumericSignal(text string) bool {

@@ -653,9 +653,6 @@ def create_app() -> FastAPI:
     app.include_router(compute_router)
     app.include_router(skill_registry_router)
     app.include_router(wisdev_action_router, prefix="/wisdev")
-    # Compatibility shim for older Go-side fallback clients that called the
-    # Python action stubs before the canonical /wisdev prefix was restored.
-    app.include_router(wisdev_action_router)
 
     # trace_id_middleware is registered FIRST so it runs outermost in
     # Starlette/FastAPI's reverse-registration order (last registered = innermost).

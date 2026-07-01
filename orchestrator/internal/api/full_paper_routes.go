@@ -1140,3 +1140,21 @@ func firstSentence(value string) string {
 	}
 	return value
 }
+
+func normalizeFullPaperQueries(query string, planQueries []string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0, len(planQueries)+1)
+	for _, candidate := range append([]string{query}, planQueries...) {
+		normalized := strings.TrimSpace(candidate)
+		if normalized == "" {
+			continue
+		}
+		key := strings.ToLower(normalized)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, normalized)
+	}
+	return out
+}

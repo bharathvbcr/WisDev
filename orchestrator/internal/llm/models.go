@@ -227,12 +227,6 @@ func ResolveLightModel() string {
 	return FetchModelConfig().Light
 }
 
-// ResolveBalancedModel is an alias for ResolveStandardModel kept for API
-// compatibility with callers that use the "balanced" terminology.
-func ResolveBalancedModel() string {
-	return ResolveStandardModel()
-}
-
 // ResolveModelForTier resolves a canonical model ID for the given tier name.
 // Accepted tier values are "light", "standard", "heavy", and the compatibility name
 // "balanced" (treated as "standard").  Any unknown or empty tier defaults to

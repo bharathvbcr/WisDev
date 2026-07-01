@@ -214,16 +214,6 @@ def _request_string_field(request: Any, field_name: str, metadata_key: str) -> s
     return _request_metadata_value(request, metadata_key)
 
 
-def _request_metadata_timeout_s(request: Any) -> float:
-    raw = _request_metadata_value(request, "timeout_s")
-    if not raw:
-        return 60.0
-    try:
-        return max(float(raw), 1.0)
-    except ValueError:
-        return 60.0
-
-
 def _request_metadata_latency_budget_ms(request: Any) -> int | None:
     typed_value = getattr(request, "latency_budget_ms", 0)
     try:
@@ -628,10 +618,6 @@ class LLMRuntime:
             latency_budget_ms = _normalize_latency_budget_ms(
                 _request_metadata_latency_budget_ms(request)
             )
-            # timeout_s from metadata is no longer forwarded: latency_budget_ms drives
-            # per-attempt timeouts inside gemini_service.py via _retry_timeout_s().
-            # We log it only to diagnose callers that still send the field.
-            metadata_timeout_s = _request_metadata_timeout_s(request)
             _log(
                 "llm_structured_start",
                 trace_id=trace_id,
@@ -643,7 +629,6 @@ class LLMRuntime:
                 request_class=request_class,
                 startup_age_ms=_gemini_service_uptime_ms(),
                 cold_start_suspected=_gemini_is_cold_start_window(),
-                metadata_timeout_s=metadata_timeout_s if metadata_timeout_s != 60.0 else None,
             )
             prompt = _merged_prompt(request, trace_id)
             json_result = await _invoke_compatible_method(

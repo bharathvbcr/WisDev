@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -127,109 +126,6 @@ func TestBuildPlanRevisionTasks_BypassesSlowVertexDirectAndUsesBrainSidecar(t *t
 
 	assert.Equal(t, []string{"Retry evidence collection"}, tasks)
 	assert.Equal(t, "brain_coordinate_replan", source)
-	assert.Less(t, elapsed, time.Second)
-	assert.False(t, slowDirect.called.Load())
-	assert.Equal(t, llm.ResolveStandardModel(), captured.Model)
-	assert.Equal(t, "structured_high_value", captured.RequestClass)
-	assert.Equal(t, "standard", captured.RetryProfile)
-	assert.Equal(t, "priority", captured.ServiceTier)
-	assert.Greater(t, captured.LatencyBudgetMs, int32(0))
-	assertStructuredPromptHygiene(t, captured.Prompt)
-}
-
-func TestHandleDecomposeTaskBypassesSlowVertexDirectAndUsesSidecar(t *testing.T) {
-	t.Setenv("PYTHON_SIDECAR_LLM_TRANSPORT", "http-json")
-	t.Setenv("INTERNAL_SERVICE_KEY", "test-key")
-
-	var captured structuredRequestCapture
-	llmServer := newLoopbackTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/llm/structured-output", r.URL.Path)
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&captured))
-		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
-			"jsonResult": `{"tasks":[{"id":"step_1","name":"Gather evidence","action":"search","dependsOnIds":[]}]}`,
-			"modelUsed":  "test-decompose-sidecar",
-		}))
-	}))
-	defer llmServer.Close()
-	t.Setenv("PYTHON_SIDECAR_HTTP_URL", llmServer.URL)
-
-	client := llm.NewClientWithTimeout(500 * time.Millisecond)
-	setUnexportedField(t, client, "transport", "http-json")
-	setUnexportedField(t, client, "httpBaseURL", llmServer.URL)
-
-	slowDirect := &slowVertexModelsClient{}
-	vertexClient := &llm.VertexClient{}
-	setUnexportedField(t, vertexClient, "client", slowDirect)
-	setUnexportedField(t, vertexClient, "backend", "vertex_ai")
-	client.VertexDirect = vertexClient
-
-	handler := NewWisDevHandler(nil, nil, nil, nil, wisdev.NewBrainCapabilities(client), nil, nil)
-	req := httptest.NewRequest(http.MethodPost, "/wisdev/decompose", strings.NewReader(`{"query":"sleep and memory","domain":"cs"}`))
-	w := httptest.NewRecorder()
-
-	start := time.Now()
-	handler.HandleDecomposeTask(w, req)
-	elapsed := time.Since(start)
-
-	require.Equal(t, http.StatusOK, w.Code)
-	var resp struct {
-		Tasks []wisdev.ResearchTask `json:"tasks"`
-	}
-	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	assert.Equal(t, []wisdev.ResearchTask{{ID: "step_1", Name: "Gather evidence", Action: "search", DependsOnIDs: []string{}}}, resp.Tasks)
-	assert.Less(t, elapsed, time.Second)
-	assert.False(t, slowDirect.called.Load())
-	assert.Equal(t, llm.ResolveStandardModel(), captured.Model)
-	assert.Equal(t, "structured_high_value", captured.RequestClass)
-	assert.Equal(t, "standard", captured.RetryProfile)
-	assert.Equal(t, "priority", captured.ServiceTier)
-	assert.Greater(t, captured.LatencyBudgetMs, int32(0))
-	assertStructuredPromptHygiene(t, captured.Prompt)
-}
-
-func TestHandleProposeHypothesesBypassesSlowVertexDirectAndUsesSidecar(t *testing.T) {
-	t.Setenv("PYTHON_SIDECAR_LLM_TRANSPORT", "http-json")
-	t.Setenv("INTERNAL_SERVICE_KEY", "test-key")
-
-	var captured structuredRequestCapture
-	llmServer := newLoopbackTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/llm/structured-output", r.URL.Path)
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&captured))
-		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
-			"jsonResult": `{"hypotheses":[{"claim":"Memory consolidation improves with sleep","falsifiabilityCondition":"No improvement after controlled sleep manipulation","confidenceThreshold":0.65}]}`,
-			"modelUsed":  "test-hypotheses-sidecar",
-		}))
-	}))
-	defer llmServer.Close()
-	t.Setenv("PYTHON_SIDECAR_HTTP_URL", llmServer.URL)
-
-	client := llm.NewClientWithTimeout(500 * time.Millisecond)
-	setUnexportedField(t, client, "transport", "http-json")
-	setUnexportedField(t, client, "httpBaseURL", llmServer.URL)
-
-	slowDirect := &slowVertexModelsClient{}
-	vertexClient := &llm.VertexClient{}
-	setUnexportedField(t, vertexClient, "client", slowDirect)
-	setUnexportedField(t, vertexClient, "backend", "vertex_ai")
-	client.VertexDirect = vertexClient
-
-	handler := NewWisDevHandler(nil, nil, nil, nil, wisdev.NewBrainCapabilities(client), nil, nil)
-	req := httptest.NewRequest(http.MethodPost, "/wisdev/hypotheses", strings.NewReader(`{"query":"sleep and memory","intent":"discovery"}`))
-	w := httptest.NewRecorder()
-
-	start := time.Now()
-	handler.HandleProposeHypotheses(w, req)
-	elapsed := time.Since(start)
-
-	require.Equal(t, http.StatusOK, w.Code)
-	var resp struct {
-		Hypotheses []wisdev.Hypothesis `json:"hypotheses"`
-	}
-	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	require.Len(t, resp.Hypotheses, 1)
-	assert.Equal(t, "Memory consolidation improves with sleep", resp.Hypotheses[0].Claim)
-	assert.Equal(t, "No improvement after controlled sleep manipulation", resp.Hypotheses[0].FalsifiabilityCondition)
-	assert.Equal(t, 0.65, resp.Hypotheses[0].ConfidenceThreshold)
 	assert.Less(t, elapsed, time.Second)
 	assert.False(t, slowDirect.called.Load())
 	assert.Equal(t, llm.ResolveStandardModel(), captured.Model)

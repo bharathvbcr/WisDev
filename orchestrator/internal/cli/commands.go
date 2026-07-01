@@ -10,6 +10,7 @@ var commandAliases = map[string]string{
 	"ui":       "tui",
 	"upgrade":  "update",
 	"commands": "guide",
+	"docugen":  "docgen",
 }
 
 func isKnownCommand(name string) bool {
@@ -18,7 +19,7 @@ func isKnownCommand(name string) bool {
 		return true
 	}
 	switch name {
-	case "search", "run", "yolo", "max", "demo", "mcp", "mcp-config",
+	case "search", "run", "yolo", "max", "docgen", "demo", "mcp", "mcp-config",
 		"doctor", "providers", "version", "serve", "help", "tui", "update", "guide":
 		return true
 	default:

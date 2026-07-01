@@ -154,6 +154,13 @@ func SortPapersByCitations(papers []Paper) []Paper {
 	return fromInternalPapers(sorted)
 }
 
+// PublicPapersFromSearch converts internal search papers into the public Paper
+// type. Exposed so callers (e.g. the CLI's corpus-file docgen path) can build a
+// YOLOResult from a fixed paper set and keep the clean author/venue metadata.
+func PublicPapersFromSearch(papers []search.Paper) []Paper {
+	return fromInternalPapers(papers)
+}
+
 func fromInternalPapers(papers []search.Paper) []Paper {
 	if len(papers) == 0 {
 		return nil

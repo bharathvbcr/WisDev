@@ -330,87 +330,6 @@ func TestPaperHandler_HandleExtractPDF(t *testing.T) {
 	})
 }
 
-func TestPaperHandler_HandleGetPaper(t *testing.T) {
-	mhc := new(mockHTTPClient)
-	h := NewPaperHandler(nil, "")
-	h.SetHTTPClient(mhc)
-
-	t.Run("Success", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/paper?id=p1", nil)
-		rec := httptest.NewRecorder()
-
-		mhc.On("Do", mock.Anything).Return(&http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(bytes.NewBufferString(`{"paperId": "p1"}`)),
-		}, nil).Once()
-
-		h.HandleGetPaper(rec, req)
-		assert.Equal(t, http.StatusOK, rec.Code)
-		assert.Contains(t, rec.Body.String(), "p1")
-	})
-
-	t.Run("DOI Prefix", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/paper?id=10.1/abc", nil)
-		rec := httptest.NewRecorder()
-
-		mhc.On("Do", mock.MatchedBy(func(r *http.Request) bool {
-			return strings.Contains(r.URL.String(), "DOI%3A10.1%2Fabc")
-		})).Return(&http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(bytes.NewBufferString(`{"paperId": "doi-paper"}`)),
-		}, nil).Once()
-
-		h.HandleGetPaper(rec, req)
-		assert.Equal(t, http.StatusOK, rec.Code)
-		assert.Contains(t, rec.Body.String(), "doi-paper")
-	})
-
-	t.Run("Method Not Allowed", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/paper?id=p1", nil)
-		rec := httptest.NewRecorder()
-
-		h.HandleGetPaper(rec, req)
-		assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
-	})
-
-	t.Run("Missing ID", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/paper", nil)
-		rec := httptest.NewRecorder()
-
-		h.HandleGetPaper(rec, req)
-		assert.Equal(t, http.StatusBadRequest, rec.Code)
-	})
-
-	t.Run("Request Error", func(t *testing.T) {
-		mhc := new(mockHTTPClient)
-		h := NewPaperHandler(nil, "")
-		h.SetHTTPClient(mhc)
-		mhc.On("Do", mock.Anything).Return(nil, assert.AnError).Once()
-
-		req := httptest.NewRequest(http.MethodGet, "/paper?id=p1", nil)
-		rec := httptest.NewRecorder()
-
-		h.HandleGetPaper(rec, req)
-		assert.Equal(t, http.StatusBadGateway, rec.Code)
-	})
-
-	t.Run("Bad Status", func(t *testing.T) {
-		mhc := new(mockHTTPClient)
-		h := NewPaperHandler(nil, "")
-		h.SetHTTPClient(mhc)
-		mhc.On("Do", mock.Anything).Return(&http.Response{
-			StatusCode: http.StatusNotFound,
-			Body:       io.NopCloser(bytes.NewBufferString(`not found`)),
-		}, nil).Once()
-
-		req := httptest.NewRequest(http.MethodGet, "/paper?id=p1", nil)
-		rec := httptest.NewRecorder()
-
-		h.HandleGetPaper(rec, req)
-		assert.Equal(t, http.StatusNotFound, rec.Code)
-	})
-}
-
 func TestPaperHandler_HandleCount(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		t.Setenv("SEMANTIC_SCHOLAR_API_KEY", "s2-key")
@@ -709,46 +628,6 @@ func TestPaperHandlerDeadlineExceededFailsQuickly(t *testing.T) {
 		h.HandleExtractPDF(rec, req)
 
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
-		assert.Less(t, time.Since(startedAt), time.Second)
-	})
-
-	t.Run("get paper timeout", func(t *testing.T) {
-		previousTimeout := paperExternalRequestTimeout
-		paperExternalRequestTimeout = 50 * time.Millisecond
-		defer func() { paperExternalRequestTimeout = previousTimeout }()
-
-		mhc := new(mockHTTPClient)
-		h := NewPaperHandler(nil, "")
-		h.SetHTTPClient(mhc)
-
-		mhc.On("Do", mock.Anything).
-			Run(func(args mock.Arguments) {
-				req, ok := args.Get(0).(*http.Request)
-				if !ok {
-					t.Fatalf("expected request argument, got %T", args.Get(0))
-				}
-				if _, ok := req.Context().Deadline(); !ok {
-					t.Fatal("expected get-paper request to carry a deadline")
-				}
-				select {
-				case <-req.Context().Done():
-					if req.Context().Err() != context.DeadlineExceeded {
-						t.Fatalf("expected deadline exceeded, got %v", req.Context().Err())
-					}
-				case <-time.After(1 * time.Second):
-					t.Fatal("expected get-paper context cancellation")
-				}
-			}).
-			Return(nil, context.DeadlineExceeded).
-			Once()
-
-		req := httptest.NewRequest(http.MethodGet, "/paper?id=p1", nil)
-		rec := httptest.NewRecorder()
-
-		startedAt := time.Now()
-		h.HandleGetPaper(rec, req)
-
-		assert.Equal(t, http.StatusBadGateway, rec.Code)
 		assert.Less(t, time.Since(startedAt), time.Second)
 	})
 

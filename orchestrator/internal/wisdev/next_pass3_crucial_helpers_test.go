@@ -97,7 +97,9 @@ func TestNextPass3CrucialWisdevHelpers(t *testing.T) {
 			{PacketID: "p1", ContradictionPacketIDs: []string{"p2", "p2", "p3"}},
 			{PacketID: "p2", ContradictionPacketIDs: []string{"p1"}},
 		}}
-		assert.Equal(t, 3, contradictionCount(raw))
+		// p1<->p2 and p1<->p3 are two UNDIRECTED pairs; the directed A:B/B:A
+		// double count (which returned 3) is the bug contradictionCount now fixes.
+		assert.Equal(t, 2, contradictionCount(raw))
 		assert.Equal(t, 0, contradictionCount(evidence.ManuscriptRawMaterialSet{}))
 	})
 }

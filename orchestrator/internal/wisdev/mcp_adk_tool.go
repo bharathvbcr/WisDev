@@ -37,6 +37,10 @@ func (b *MCPADKBridge) BuildADKTools() []adktool.Tool {
 		b.paperLookupTool(),
 		b.evidenceSearchTool(),
 		b.authorSearchTool(),
+		b.getConfigTool(),
+		b.tuneConfigTool(),
+		b.resetConfigTool(),
+		b.listProvidersTool(),
 	}
 }
 

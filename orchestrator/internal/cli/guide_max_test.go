@@ -13,7 +13,7 @@ func TestRunGuideListsEveryCommand(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"wisdev \"question\"", "wisdev yolo", "wisdev max", "wisdev demo",
+		"wisdev \"question\"", "wisdev yolo", "wisdev max", "wisdev docgen", "wisdev demo",
 		"wisdev tui", "wisdev mcp", "wisdev setup", "wisdev serve",
 		"wisdev check", "wisdev sources", "wisdev version", "wisdev update",
 		"wisdev help", "wisdev guide", "WISDEV_UNLEASHED",

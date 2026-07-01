@@ -10,7 +10,32 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/evidence"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
+
+func TestNewManuscriptPipelineOfflineSkipsSidecar(t *testing.T) {
+	// The offline pipeline must short-circuit every section enrichment call
+	// (empty base URL) and still produce a full grounded-scaffold manuscript
+	// with no network I/O.
+	pipeline := NewManuscriptPipelineOffline()
+	require.Empty(t, pipeline.pythonBaseURL, "offline pipeline must not resolve a sidecar URL")
+
+	content, err := pipeline.postSectionContent(context.Background(), "/wisdev/manuscript/section/generate", map[string]any{"section_id": "results"})
+	require.Error(t, err, "offline pipeline must not attempt a sidecar call")
+	assert.Empty(t, content)
+
+	papers := []search.Paper{
+		{Title: "Off-target CRISPR detection assay", Abstract: "We present an assay that detects off-target CRISPR edits with high sensitivity across cell lines.", Year: 2022, CitationCount: 9},
+		{Title: "Benchmarking guide-RNA specificity", Abstract: "A benchmark comparing guide-RNA specificity prediction tools against experimental ground truth.", Year: 2021, CitationCount: 14},
+	}
+	result, err := pipeline.Run(context.Background(), "job_offline", "CRISPR off-target detection", papers)
+	require.NoError(t, err)
+	assert.Len(t, result.SectionDrafts, 7, "expected the seven-section blueprint")
+	assert.NotEmpty(t, result.Blueprint.SectionOrder)
+	for _, section := range result.SectionDrafts {
+		assert.NotEmpty(t, section.Content, "section %s should have grounded scaffold content", section.SectionID)
+	}
+}
 
 func TestBuildClaimProvenance(t *testing.T) {
 	paragraphs := []SectionDraftParagraph{

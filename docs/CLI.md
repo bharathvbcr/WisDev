@@ -18,6 +18,7 @@ No more `go run ./cmd/wisdev` unless you are hacking the CLI itself.
 |---------|----------------|
 | `wisdev "question"` | Local research (openalex + arxiv) |
 | `wisdev max "question"` | Maximum-depth research: unleashed budgets, 12 iterations, all providers, long-form report |
+| `wisdev docgen "topic"` | Search + DocGen: gather grounded papers, then draft a citation-backed manuscript |
 | `wisdev check` | Health check |
 | `wisdev tui` | Interactive terminal UI for local research |
 | `wisdev demo` | Hackathon demo sequence |
@@ -201,6 +202,32 @@ node scripts/ops/hackathon-ollama-smoke.mjs
 | `--offline` | Smoke test without network |
 | `--remote` | HTTP orchestrator (`yolo` only) |
 | `--long-form` | Extended Introduction and Background sections (`yolo` local mode; same as the TUI Long-form setting) |
+| `--docgen` | After a `yolo` run, also generate a grounded manuscript (pair with `--doc-words`, `--doc-min-citations`, `--doc-flow`, `--doc-format`, `--doc-output`) |
+
+### DocGen controls (`docgen`, and `yolo --docgen` via the `--doc-*` aliases)
+
+| Flag | Effect |
+|------|--------|
+| `--words` / `--doc-words` | Target total word count, split across sections (0 = model default) |
+| `--min-citations` / `--doc-min-citations` | Minimum distinct sources to cite; also raises the retrieval floor |
+| `--flow` / `--doc-flow` | Comma-separated section flow, e.g. `introduction,methods,results,discussion` |
+| `--review-rounds` / `--doc-review-rounds` | Max rounds of the agentic generate→review→revise loop (0 = default 2, max 5) |
+| `--genre` / `--doc-genre` | Manuscript genre, e.g. `research paper` (default: narrative literature review) |
+| `--format` / `--doc-format` | `markdown` (default) \| `latex` \| `json` |
+
+Section drafting runs an **agentic generate → review → revise loop** (re-review and
+rewrite flagged sections each round, stopping on convergence). Manuscript prose
+minimizes em-dashes (`—`). The same controls are exposed over MCP on
+`wisdevGenerateManuscript` (`words`, `minCitations`, `flow`, `reviewRounds`) — see
+[MCP_CLIENTS.md](MCP_CLIENTS.md).
+
+DocGen drafting/review/coordination/fact-check calls go through the sidecar's
+`manuscript_llm()` provider selector, independent of the `WISDEV_LLM_*` vars used
+by the research loop. Set `MANUSCRIPT_LLM_PROVIDER=local` (or `ollama`) plus
+`LOCAL_LLM_BASE_URL`/`LOCAL_LLM_MODEL` (`OLLAMA_BASE_URL` is accepted as an alias)
+to draft manuscripts with a local model and no cloud credentials at all; unset
+defaults to Gemini/Vertex unless a local server is already configured. See
+`.env.example`.
 
 ## Build binary
 

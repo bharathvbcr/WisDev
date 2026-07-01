@@ -56,10 +56,11 @@ func TestMCPServerToolsList(t *testing.T) {
 		t.Errorf("expected at least 4 tools, got %d", len(tools))
 	}
 	wantNames := map[string]bool{
-		"wisdevSearchPapers":   false,
-		"wisdevPaperLookup":    false,
-		"wisdevEvidenceSearch": false,
-		"wisdevAuthorSearch":   false,
+		"wisdevSearchPapers":       false,
+		"wisdevPaperLookup":        false,
+		"wisdevEvidenceSearch":     false,
+		"wisdevAuthorSearch":       false,
+		"wisdevGenerateManuscript": false,
 	}
 	for _, toolRaw := range tools {
 		if tool, ok := toolRaw.(map[string]any); ok {
@@ -190,6 +191,7 @@ func TestMCPServerMissingRequiredParams(t *testing.T) {
 		{"wisdevEvidenceSearch", "{}"},
 		{"wisdevPaperLookup", "{}"},
 		{"wisdevAuthorSearch", "{}"},
+		{"wisdevGenerateManuscript", "{}"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.tool, func(t *testing.T) {
@@ -230,11 +232,47 @@ func TestMCPADKBridgeBuildTools(t *testing.T) {
 	}
 }
 
+func TestMCPGenerateManuscriptToolRegistered(t *testing.T) {
+	if !isKnownMCPTool("wisdevGenerateManuscript") {
+		t.Error("wisdevGenerateManuscript should be a known MCP tool")
+	}
+	// Aliases normalize to the canonical name.
+	for _, alias := range []string{"wisdevDocGen", "scholarlmGenerateManuscript"} {
+		if got := normalizeMCPToolName(alias); got != MCPToolGenerateManuscript {
+			t.Errorf("alias %q normalized to %q, want %q", alias, got, MCPToolGenerateManuscript)
+		}
+	}
+	// The tool definition exposes the words option and requires a query.
+	def := mcpGenerateManuscriptTool()
+	props, _ := def.InputSchema["properties"].(map[string]any)
+	if _, ok := props["words"]; !ok {
+		t.Error("wisdevGenerateManuscript should expose a 'words' option")
+	}
+	required, _ := def.InputSchema["required"].([]string)
+	if len(required) != 1 || required[0] != "query" {
+		t.Errorf("expected query to be the only required field, got %v", required)
+	}
+}
+
+func TestMCPSectionWordBudget(t *testing.T) {
+	p := &ManuscriptPipeline{TargetWords: 0}
+	if got := p.sectionWordBudget(7); got != 0 {
+		t.Errorf("no target -> budget 0, got %d", got)
+	}
+	p.TargetWords = 2100
+	if got := p.sectionWordBudget(7); got != 300 {
+		t.Errorf("2100/7 -> 300, got %d", got)
+	}
+	if got := p.sectionWordBudget(0); got != 0 {
+		t.Errorf("no sections -> 0, got %d", got)
+	}
+}
+
 func TestMCPArgHelpers(t *testing.T) {
 	args := map[string]any{
-		"str":  "  hello  ",
-		"int":  float64(42),
-		"bool": true,
+		"str":   "  hello  ",
+		"int":   float64(42),
+		"bool":  true,
 		"slice": []any{"a", "b"},
 	}
 	if got := mcpStringArg(args, "str"); got != "hello" {

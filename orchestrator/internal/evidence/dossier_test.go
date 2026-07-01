@@ -75,7 +75,118 @@ func TestBuildRawMaterialSet(t *testing.T) {
 	assert.NotEmpty(t, rawMaterials.CoverageMetrics["sectionCoverage"])
 	assert.NotEmpty(t, rawMaterials.ClaimPackets[0].SectionRelevance)
 	assert.NotEmpty(t, rawMaterials.ClaimPackets[0].SourceClusterID)
-	assert.GreaterOrEqual(t, len(dossier.Contradictions), 1)
+	// This single paper only pairs an improvement ("improves recall") with a
+	// self-disclosed caveat ("coverage remains narrow") — that is NOT a
+	// contradiction, so no spurious link should be manufactured. (The old
+	// heuristic linked every hedge-word claim to a baseline and reported one.)
+	assert.Empty(t, dossier.Contradictions)
+}
+
+func TestExtractQuantitativeClaims(t *testing.T) {
+	got := extractQuantitativeClaims("RAG reduced hallucinations by 35% across 250 patients in 12 studies")
+	require.NotEmpty(t, got)
+	pairs := map[string]string{}
+	for _, q := range got {
+		pairs[q.Value] = q.Unit
+	}
+	assert.Equal(t, "%", pairs["35"])
+	assert.Equal(t, "patients", pairs["250"])
+	assert.Equal(t, "studies", pairs["12"])
+	// Bare numbers / years without a unit are not captured.
+	assert.Nil(t, extractQuantitativeClaims("published in 2024 by the lab"))
+}
+
+func TestClaimSnippetConsistent(t *testing.T) {
+	// No distinct snippet -> cannot judge -> consistent.
+	assert.True(t, claimSnippetConsistent("RAG improves accuracy", ""))
+	assert.True(t, claimSnippetConsistent("RAG improves accuracy", "RAG improves accuracy"))
+	// Different subject -> cannot judge -> consistent.
+	assert.True(t, claimSnippetConsistent("RAG improves accuracy", "Tokenizers are fast"))
+	// Same subject, polarity flip -> inconsistent.
+	assert.False(t, claimSnippetConsistent(
+		"Retrieval augmentation improved diagnostic accuracy in the cohort",
+		"Retrieval augmentation did not improve diagnostic accuracy in the cohort"))
+}
+
+func TestAnnotateCorroboration(t *testing.T) {
+	packets := []EvidencePacket{
+		// Same finding from two distinct sources -> corroboration count 2.
+		{PacketID: "a", ClaimText: "Retrieval augmentation reduces clinical hallucinations substantially", Confidence: 0.8, EvidenceSpans: []EvidenceSpan{{SourceCanonicalID: "s1"}}},
+		{PacketID: "b", ClaimText: "Retrieval augmentation reduces clinical hallucinations substantially", Confidence: 0.8, EvidenceSpans: []EvidenceSpan{{SourceCanonicalID: "s2"}}},
+		// A distinct, single-source claim -> count 1.
+		{PacketID: "c", ClaimText: "Knowledge graphs improve longitudinal patient modelling", Confidence: 0.7, EvidenceSpans: []EvidenceSpan{{SourceCanonicalID: "s3"}}},
+	}
+	annotateCorroboration(packets)
+	assert.Equal(t, 2, packets[0].CorroboratingSourceCount)
+	assert.Equal(t, 2, packets[1].CorroboratingSourceCount)
+	assert.Greater(t, packets[0].Confidence, 0.8, "corroborated packets get a confidence nudge")
+	assert.Equal(t, 1, packets[2].CorroboratingSourceCount)
+	assert.Equal(t, 0.7, packets[2].Confidence)
+}
+
+func TestBuildRawMaterialSetCorroboratesAcrossSources(t *testing.T) {
+	// Two distinct sources (different DOIs) assert the SAME finding -> the merged
+	// claim is corroborated by 2 independent sources end-to-end.
+	finding := "Retrieval augmented generation substantially reduces clinical hallucinations in large language models."
+	rawMaterials, _, err := BuildRawMaterialSet("job-corr", "clinical RAG", []search.Paper{
+		{ID: "doi:10.1/aaa", Title: "Paper One on Clinical RAG Decision Support", DOI: "10.1/aaa", Abstract: finding},
+		{ID: "doi:10.2/bbb", Title: "Paper Two on Clinical RAG Decision Support", DOI: "10.2/bbb", Abstract: finding},
+	})
+	require.NoError(t, err)
+	maxCorroboration := 0
+	for _, packet := range rawMaterials.ClaimPackets {
+		if packet.CorroboratingSourceCount > maxCorroboration {
+			maxCorroboration = packet.CorroboratingSourceCount
+		}
+	}
+	assert.GreaterOrEqual(t, maxCorroboration, 2, "the shared finding should be corroborated by both sources")
+}
+
+func TestDerivePacketVerifierStatus(t *testing.T) {
+	// Strongly-resolved (DOI/arXiv-grade) -> verified.
+	assert.Equal(t, "verified", derivePacketVerifierStatus(CanonicalCitationRecord{Resolved: true, ResolutionConfidence: 0.95}))
+	assert.Equal(t, "verified", derivePacketVerifierStatus(CanonicalCitationRecord{Resolved: true, ResolutionConfidence: 0.82}))
+	// Resolved only by a fuzzy title match -> needs_review, not verified.
+	assert.Equal(t, "needs_review", derivePacketVerifierStatus(CanonicalCitationRecord{Resolved: true, ResolutionConfidence: 0.7, Title: "A Title"}))
+	// Unresolved but titled -> needs_review; untitled -> provisional.
+	assert.Equal(t, "needs_review", derivePacketVerifierStatus(CanonicalCitationRecord{Resolved: false, Title: "A Title"}))
+	assert.Equal(t, "provisional", derivePacketVerifierStatus(CanonicalCitationRecord{}))
+}
+
+func TestAssignContradictions(t *testing.T) {
+	t.Run("links only same-section, same-subject, opposed claims", func(t *testing.T) {
+		packets := []EvidencePacket{
+			{PacketID: "a", ClaimText: "Retrieval augmentation improved diagnostic accuracy in the cohort", SectionRelevance: []string{"results"}},
+			{PacketID: "b", ClaimText: "Retrieval augmentation did not improve diagnostic accuracy in the external cohort", SectionRelevance: []string{"results"}},
+		}
+		assignContradictions(packets)
+		assert.Equal(t, []string{"b"}, packets[0].ContradictionPacketIDs)
+		assert.Equal(t, []string{"a"}, packets[1].ContradictionPacketIDs)
+	})
+
+	t.Run("does not link unrelated subjects or non-opposed hedges", func(t *testing.T) {
+		packets := []EvidencePacket{
+			// Opposition word but different subjects -> no shared subject tokens.
+			{PacketID: "a", ClaimText: "Tokenizer throughput did not regress", SectionRelevance: []string{"methods"}},
+			{PacketID: "b", ClaimText: "Knowledge graphs improve grounding", SectionRelevance: []string{"methods"}},
+			// Same subject but neither is an opposition (a plain limitation hedge).
+			{PacketID: "c", ClaimText: "Knowledge graphs improve grounding but require curation", SectionRelevance: []string{"methods"}},
+		}
+		assignContradictions(packets)
+		assert.Empty(t, packets[0].ContradictionPacketIDs)
+		assert.Empty(t, packets[1].ContradictionPacketIDs)
+		assert.Empty(t, packets[2].ContradictionPacketIDs)
+	})
+
+	t.Run("does not link across different sections", func(t *testing.T) {
+		packets := []EvidencePacket{
+			{PacketID: "a", ClaimText: "Retrieval augmentation improved diagnostic accuracy", SectionRelevance: []string{"results"}},
+			{PacketID: "b", ClaimText: "Retrieval augmentation did not improve diagnostic accuracy", SectionRelevance: []string{"discussion"}},
+		}
+		assignContradictions(packets)
+		assert.Empty(t, packets[0].ContradictionPacketIDs)
+		assert.Empty(t, packets[1].ContradictionPacketIDs)
+	})
 }
 
 func TestEvidenceHelpers(t *testing.T) {

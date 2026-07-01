@@ -282,6 +282,14 @@ def format_regenerate_prompt(
 # =============================================================================
 # Manuscript Section Writing Prompts
 # =============================================================================
+#
+# CITATION CONVENTION: these builders use the secondary square-bracket PACKET-ID form
+# (e.g. [packet_123]), resolved by the Go pipeline's extractExplicitPacketIDs. The CANONICAL,
+# live convention used by routers/manuscript_router.py is POSITIONAL [n] (resolved by
+# resolvePositionalPacketIDs). These SECTION_WRITER_PROMPTS / SECTION_REFINER_PROMPT builders
+# are currently exercised only by tests/unit/test_wisdev_prompts.py and are NOT wired into the
+# live section/generate path, so the two conventions do not conflict at runtime. If you wire these
+# in, switch the instruction text to positional [n] to match the router.
 
 SECTION_WRITER_PROMPTS: dict[str, str] = {
     "abstract_writer": (

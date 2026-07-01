@@ -85,6 +85,7 @@ type tuiState struct {
 	enableHypotheses    bool
 	deepSearch          bool
 	longFormReport      bool
+	generateDoc         bool
 	offlineMode         bool
 	originalQuery       string
 	preparedQuery       string
@@ -92,7 +93,8 @@ type tuiState struct {
 	seedQueries         []string
 	bypassSearchCache   bool
 	llmBackend          string
-	activeSetting       int // 0=iterations 1=planning 2=offline 3=enhance 4=hypotheses 5=deep 6=longform
+	manuscriptPath      string // last manuscript written by the docGen toggle, for the results status line
+	activeSetting       int    // 0=iterations 1=planning 2=offline 3=enhance 4=hypotheses 5=deep 6=longform 7=docgen
 	outputPath          string
 	showHelp            bool
 	completedElapsed    time.Duration
@@ -414,7 +416,23 @@ func (s *tuiState) toggleActiveSetting() {
 		s.deepSearch = !s.deepSearch
 	case 6:
 		s.longFormReport = !s.longFormReport
+	case 7:
+		s.generateDoc = !s.generateDoc
 	}
+}
+
+// manuscriptOutputPath picks where the docGen toggle writes the generated
+// manuscript. When the user set an export output path it places the manuscript
+// beside it with a "-manuscript.md" suffix; otherwise it falls back to a
+// timestamped file in the working directory.
+func (s *tuiState) manuscriptOutputPath() string {
+	base := strings.TrimSpace(s.outputPath)
+	if base == "" {
+		return fmt.Sprintf("wisdev-manuscript-%d.md", time.Now().UnixMilli())
+	}
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	return stem + "-manuscript.md"
 }
 
 // composeFollowUpQuery builds the task for a follow-up run: the new question
@@ -607,6 +625,7 @@ func (s *tuiState) saveSession() {
 		EnableHypotheses:   s.enableHypotheses,
 		DeepSearch:         s.deepSearch,
 		LongFormReport:     s.longFormReport,
+		GenerateDoc:        s.generateDoc,
 	}
 
 	data, err := json.Marshal(sess)
@@ -647,6 +666,7 @@ func (s *tuiState) restoreSession() {
 		s.enableHypotheses = sess.EnableHypotheses
 		s.deepSearch = sess.DeepSearch
 		s.longFormReport = sess.LongFormReport
+		s.generateDoc = sess.GenerateDoc
 
 		for _, sp := range sess.Providers {
 			for idx, p := range s.providers {
@@ -669,6 +689,7 @@ type tuiSession struct {
 	EnableHypotheses   bool             `json:"enable_hypotheses"`
 	DeepSearch         bool             `json:"deep_search"`
 	LongFormReport     bool             `json:"long_form_report"`
+	GenerateDoc        bool             `json:"generate_doc"`
 }
 
 type tuiSessionProv struct {
@@ -1427,6 +1448,7 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 		enableQueryEnhance:  true,
 		enableHypotheses:    true,
 		deepSearch:          false,
+		generateDoc:         false,
 		offlineMode:         offlineMode,
 		activeSetting:       0,
 		outputPath:          strings.TrimSpace(*outputFlag),
@@ -2065,6 +2087,8 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 							state.deepSearch = !state.deepSearch
 						} else if state.activeElement == 2 && state.activeSetting == 6 {
 							state.longFormReport = !state.longFormReport
+						} else if state.activeElement == 2 && state.activeSetting == 7 {
+							state.generateDoc = !state.generateDoc
 						} else if state.activeElement == 0 {
 							state.validationMsg = ""
 							state.insertQueryChar(" ")
@@ -2620,6 +2644,8 @@ func (s *tuiState) startResearchWithOptions(parentCtx context.Context, forceExha
 		done := make(chan struct{})
 		var result *agent.YOLOResult
 		var runErr error
+		var manuscriptPath string
+		var manuscriptErr error
 
 		go func() {
 			defer close(done)
@@ -2653,7 +2679,29 @@ func (s *tuiState) startResearchWithOptions(parentCtx context.Context, forceExha
 						s.handleProgressEvent(event)
 					},
 				})
-				return innerErr
+				if innerErr != nil {
+					return innerErr
+				}
+				// Optional docGen step: turn the research result into a grounded
+				// manuscript using the same pipeline as `wisdev docgen`, and write it
+				// beside the export target. A manuscript failure is non-fatal — the
+				// research already succeeded, so we surface a warning instead of
+				// failing the whole run.
+				if s.generateDoc && result != nil {
+					s.addLog("DocGen: generating grounded manuscript…", "I")
+					rendered, _, derr := generateManuscriptFromResearch(runCtx, io.Discard, task, result, "markdown", "", s.offlineMode, manuscriptControls{})
+					if derr != nil {
+						manuscriptErr = derr
+					} else {
+						path := s.manuscriptOutputPath()
+						if werr := os.WriteFile(path, []byte(rendered), 0o644); werr != nil {
+							manuscriptErr = werr
+						} else {
+							manuscriptPath = path
+						}
+					}
+				}
+				return nil
 			})
 		}()
 
@@ -2668,6 +2716,12 @@ func (s *tuiState) startResearchWithOptions(parentCtx context.Context, forceExha
 					s.logs = append(s.logs, tuiLogEntry{msg: fmt.Sprintf("Error: %v", runErr), tag: "E"})
 				} else {
 					s.logs = append(s.logs, tuiLogEntry{msg: "Research loop complete.", tag: "I"})
+					s.manuscriptPath = manuscriptPath
+					if manuscriptErr != nil {
+						s.logs = append(s.logs, tuiLogEntry{msg: fmt.Sprintf("DocGen warning: manuscript not generated: %v", manuscriptErr), tag: "W"})
+					} else if manuscriptPath != "" {
+						s.logs = append(s.logs, tuiLogEntry{msg: fmt.Sprintf("DocGen: manuscript written to %s", manuscriptPath), tag: "I"})
+					}
 					if result != nil {
 						s.iterations = result.Iterations
 						s.papersFound = result.PapersFound
@@ -3562,7 +3616,10 @@ func (s *tuiState) render() {
 			highlightSetting(fmt.Sprintf(" Hypotheses: %s", onOff(s.enableHypotheses)), 4),
 			highlightSetting(fmt.Sprintf(" Exhaustive: %s", onOff(s.deepSearch)), 5),
 		}, "   ")
-		rowThree := highlightSetting(fmt.Sprintf(" Long-form: %s", onOff(s.longFormReport)), 6)
+		rowThree := strings.Join([]string{
+			highlightSetting(fmt.Sprintf(" Long-form: %s", onOff(s.longFormReport)), 6),
+			highlightSetting(fmt.Sprintf(" DocGen: %s", onOff(s.generateDoc)), 7),
+		}, "   ")
 
 		drawLine("   "+rowOne, "")
 		drawLine("   "+rowTwo, "")
@@ -3600,6 +3657,8 @@ func (s *tuiState) render() {
 				settingHint = "Exhaustive: Run all max iterations without early convergence stops."
 			case 6:
 				settingHint = "Long-form: Write extended Introduction and Background sections in the report."
+			case 7:
+				settingHint = "DocGen: After research, generate a grounded manuscript from the retrieved papers and save it alongside the export."
 			}
 		} else {
 			settingHint = "Exhaustive runs all max iterations before early stop."
@@ -4262,6 +4321,10 @@ func moveSettingRight(setting int) int {
 		return 5
 	case 5:
 		return 3
+	case 6:
+		return 7 // third row has two settings (Long-form, DocGen)
+	case 7:
+		return 6
 	default:
 		return setting
 	}
@@ -4281,6 +4344,10 @@ func moveSettingLeft(setting int) int {
 		return 3
 	case 5:
 		return 4
+	case 6:
+		return 7 // third row has two settings (Long-form, DocGen)
+	case 7:
+		return 6
 	default:
 		return setting
 	}
@@ -4291,7 +4358,12 @@ func moveSettingDown(setting int) int {
 		return setting + settingsPerRow
 	}
 	if setting < 2*settingsPerRow {
-		return 6 // third row has a single setting (Long-form)
+		// Third row has two settings: Long-form (6) and DocGen (7). Map the first
+		// two columns of the middle row down onto them; the third column clamps to 7.
+		if next := setting + settingsPerRow; next <= 7 {
+			return next
+		}
+		return 7
 	}
 	return setting
 }
@@ -4299,6 +4371,9 @@ func moveSettingDown(setting int) int {
 func moveSettingUp(setting int) int {
 	if setting == 6 {
 		return 3
+	}
+	if setting == 7 {
+		return 4
 	}
 	if setting >= settingsPerRow {
 		return setting - settingsPerRow

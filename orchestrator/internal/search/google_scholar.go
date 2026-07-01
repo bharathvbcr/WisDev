@@ -7,8 +7,19 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 )
+
+// serpAPIKeyPattern matches the api_key query parameter so the SERPAPI_API_KEY
+// secret can be scrubbed from error strings (e.g. *url.Error embeds the full
+// request URL) before they reach logs or HTTP responses.
+var serpAPIKeyPattern = regexp.MustCompile(`api_key=[^&\s"]+`)
+
+// redactSerpAPIKey removes the SerpAPI key value from a string.
+func redactSerpAPIKey(s string) string {
+	return serpAPIKeyPattern.ReplaceAllString(s, "api_key=REDACTED")
+}
 
 // GoogleScholarProvider queries SerpAPI's Google Scholar engine.
 // Requires SERPAPI_API_KEY. If the key is not configured, the provider
@@ -70,14 +81,14 @@ func (g *GoogleScholarProvider) Search(ctx context.Context, query string, opts S
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		g.RecordFailure()
-		return nil, providerError("google_scholar", "build request: %v", err)
+		return nil, providerError("google_scholar", "build request: %s", redactSerpAPIKey(err.Error()))
 	}
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := SharedHTTPClient.Do(req)
 	if err != nil {
 		g.RecordFailure()
-		return nil, providerError("google_scholar", "request failed: %v", err)
+		return nil, providerError("google_scholar", "request failed: %s", redactSerpAPIKey(err.Error()))
 	}
 	defer resp.Body.Close()
 
@@ -155,12 +166,12 @@ func (g *GoogleScholarProvider) SearchByAuthor(ctx context.Context, authorID str
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build author request: %w", err)
+		return nil, fmt.Errorf("build author request: %s", redactSerpAPIKey(err.Error()))
 	}
 
 	resp, err := SharedHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("author request failed: %w", err)
+		return nil, fmt.Errorf("author request failed: %s", redactSerpAPIKey(err.Error()))
 	}
 	defer resp.Body.Close()
 

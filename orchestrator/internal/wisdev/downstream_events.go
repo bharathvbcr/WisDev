@@ -735,6 +735,9 @@ func errString(err error) string {
 
 // waitWaitGroup waits up to d for wg, returning true if it finished in time.
 func waitWaitGroup(wg *sync.WaitGroup, d time.Duration) bool {
+	if wg == nil {
+		return true // nothing to wait on (e.g. reflective zero-value coverage call)
+	}
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()

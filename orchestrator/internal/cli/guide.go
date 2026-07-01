@@ -19,6 +19,7 @@ func runGuide(stdout io.Writer) error {
 	note(stdout, `  wisdev "question"                Quick local research with openalex + arxiv (aliases: search, ask)`)
 	note(stdout, `  wisdev yolo [flags] "question"   The research loop with full flag control`)
 	note(stdout, `  wisdev max "question"            Everything dialed up: 12 iterations, all sources, long-form report`)
+	note(stdout, `  wisdev docgen [-o paper.md] "q" Search + DocuGen: a grounded manuscript draft (alias: docugen)`)
 	note(stdout, `  wisdev demo [--offline]          Narrated demo run`)
 	fmt.Fprintln(stdout)
 

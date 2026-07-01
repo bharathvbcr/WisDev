@@ -32,7 +32,7 @@ func NewPaper2SkillCompiler(llm LLMRequester) *Paper2SkillCompiler {
 	base := ResolvePythonBase()
 	return &Paper2SkillCompiler{
 		LLM:              llm,
-		HTTPClient:       &http.Client{Timeout: 30 * time.Second},
+		HTTPClient:       &http.Client{Timeout: 30 * time.Second, CheckRedirect: secureRedirectPolicy},
 		PDFSourceBaseURL: "https://arxiv.org/pdf/",
 		RegistryURL:      base + "/skills/register",
 		PDFWorkerURL:     base + "/ml/pdf",
@@ -266,7 +266,10 @@ func (c *Paper2SkillCompiler) resolvePDFSourceURL(arxivID string) (string, error
 	}
 
 	if parsed, err := url.Parse(raw); err == nil && parsed.Scheme != "" && parsed.Host != "" {
-		return parsed.String(), nil
+		// SECURITY (SSRF): the arxiv_id / paper URL is attacker-controlled, so a
+		// full URL must be validated (http/https + non-private host) before it is
+		// fetched server-side. This blocks cloud-metadata/internal-host access.
+		return validateOutboundFetchURL(parsed.String())
 	}
 
 	normalized := strings.TrimPrefix(raw, "https://arxiv.org/abs/")

@@ -37,6 +37,8 @@ Specialized ML worker service for heavy compute primitives. Stateless and optimi
 - `SCHOLAR_MODELS_CONFIG`: Optional explicit path to the canonical `scholar_models.json` file.
 - `AI_NATIVE_STRUCTURED_ENABLED`: Keep this enabled for `generate_json(...)` and other schema-backed routes. Defaults to `true`; turning it off now causes structured callers to fail fast instead of proxy-parsing JSON.
 - `SKIP_GCP_SECRET_MANAGER`: Set to `true` to disable Secret Manager lookup and rely on process env only.
+- `MANUSCRIPT_LLM_PROVIDER`: Selects the backend for `/wisdev/manuscript/*` drafting/review/coordination/fact-check routes via `services/manuscript_llm.py`. `local`/`ollama` forces the local backend, `gemini`/`vertex`/`cloud` forces Gemini/Vertex, unset auto-prefers a local backend when one is configured.
+- `LOCAL_LLM_BASE_URL` (alias `OLLAMA_BASE_URL`), `LOCAL_LLM_MODEL`, `LOCAL_LLM_API_KEY`: Local/self-hosted OpenAI-compatible LLM server used by `services/local_llm_service.py` for credential-free manuscript drafting (Ollama by default; see `.env.example`).
 
 ## Local Environment
 - Prefer a repo-local environment at `sidecar/.venv`.
@@ -62,6 +64,7 @@ Specialized ML worker service for heavy compute primitives. Stateless and optimi
 - `POST /ml/bm25/index`, `POST /ml/bm25/search`, `DELETE /ml/bm25`: Local BM25 helper surface.
 - `POST /llm/generate`, `POST /llm/generate/stream`, `POST /llm/structured-output`: Canonical LLM generation HTTP surface.
 - `POST /llm/embed`, `POST /llm/embed/batch`, `GET /llm/health`: Canonical remote LLM helper surface.
+- `POST /wisdev/manuscript/section/generate`, `/section/refine`, `/section/revise`, `/review`, `/coordinate`, `/coordinate-dedupe`, `/fact-check`: Manuscript drafting/review/coordination routes consumed by the orchestrator's manuscript pipeline; backend selected via `manuscript_llm()` (Gemini/Vertex or local, see `MANUSCRIPT_LLM_PROVIDER` above). `manuscript_app.py` is a slim ASGI entrypoint for a manuscript-only deployment that skips `ml_router`/numpy.
 - `GET /wisdev/agent/card`, `GET /wisdev/deep-agents/capabilities`, `POST /wisdev/deep-agents/execute`: internal sidecar helpers retained for Go-owned orchestration and migration compatibility.
 - `POST /skills/register`: Dynamic skill registration.
 - `gRPC :50052`: LLM service implementation for local/container overlays.

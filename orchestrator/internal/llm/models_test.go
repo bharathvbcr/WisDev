@@ -110,7 +110,6 @@ func TestModels(t *testing.T) {
 		is.Equal("helper-heavy", ResolveHeavyModel())
 		is.Equal("helper-standard", ResolveStandardModel())
 		is.Equal("helper-light", ResolveLightModel())
-		is.Equal("helper-standard", ResolveBalancedModel())
 	})
 
 	t.Run("Resolve helpers honor explicit environment overrides", func(t *testing.T) {

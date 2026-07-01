@@ -94,6 +94,27 @@ This sub-repo is indexed by GitNexus; the index lives in `.gitnexus/`. Skills ar
 Use `gitnexus context`/`impact` to understand call graphs and blast radius before
 non-trivial edits, rather than grepping blind.
 
+## WisDev usage skills (for agents driving the runtime, not editing it)
+
+Installable Claude Code skills documenting how to *use* WisDev ARC (CLI, MCP tools,
+the YOLO research loop, DocGen, and the Go embedding/HTTP API) live in
+`.claude/skills/wisdev/`. They ship with the repo so any Claude Code session that has
+this checkout open — or that adds `wisdev mcp` as an MCP server elsewhere — picks them
+up automatically:
+
+| Skill | Covers |
+|-------|--------|
+| `wisdev-cli` | Install, `check`/`doctor`, `tui`, `demo`, `serve`, provider listing |
+| `wisdev-mcp-research` | The MCP search/evidence/author tools and tuning knobs |
+| `wisdev-yolo` | The autonomous multi-iteration research loop (`search`/`yolo`/`max`) |
+| `wisdev-docgen` | Manuscript generation via CLI `docgen` and `wisdevGenerateManuscript` |
+| `wisdev-embed` | Embedding the Go agent, the HTTP/gRPC API, custom search providers |
+
+These are distinct from the GitNexus skills above: GitNexus skills are for agents
+*editing this codebase*; the `wisdev-*` skills are for agents (or end users) *operating
+the research agent itself*. Keep both sets current — the `wisdev-*` skills should track
+`docs/CLI.md`, `docs/COMMANDS.md`, and `docs/MCP_CLIENTS.md` when those change.
+
 ## Before opening a PR
 
 1. `verify.ps1 -StaticRelease -Go -PythonContract -SmokeLocal` (or the `make` equivalents)

@@ -15,7 +15,6 @@ func TestAutoCoverageGenerated(t *testing.T) {
 	callWithZeroValueArgs(NewModelProvider)
 	callWithZeroValueArgs(NewServer)
 	callWithZeroValueArgs(NewVertexClient)
-	callWithZeroValueArgs(ResolveBalancedModel)
 	callWithZeroValueArgs(ResolveGoogleAPIKey)
 	callWithZeroValueArgs(ResolveHeavyModel)
 	callWithZeroValueArgs(ResolveLightModel)

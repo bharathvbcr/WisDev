@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,8 +18,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// setAsyncSafeStateDir points WISDEV_STATE_DIR at a fresh temp dir and cleans it
+// up tolerantly. Session initialization spawns detached background goroutines
+// (see session_routes.go: complexity triage + dynamic-options seeding) that
+// persist session state into WISDEV_STATE_DIR after the request — and the test
+// body — has returned. t.TempDir()'s automatic RemoveAll races those in-flight
+// writes and intermittently fails with "directory not empty" under load. Owning
+// the cleanup and retrying lets the writers drain before the dir is removed.
+func setAsyncSafeStateDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "wisdev-state-")
+	require.NoError(t, err)
+	t.Setenv("WISDEV_STATE_DIR", dir)
+	t.Cleanup(func() {
+		for i := 0; i < 100; i++ {
+			if err := os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		_ = os.RemoveAll(dir)
+	})
+	return dir
+}
+
 func TestWisDevSessionListRoute(t *testing.T) {
-	t.Setenv("WISDEV_STATE_DIR", t.TempDir())
+	setAsyncSafeStateDir(t)
 
 	journal := wisdev.NewRuntimeJournal(nil)
 	gw := &wisdev.AgentGateway{
@@ -97,7 +122,7 @@ func TestWisDevSessionListRoute(t *testing.T) {
 }
 
 func TestWisDevSessionInitializeGeneratesDistinctSessionIDs(t *testing.T) {
-	t.Setenv("WISDEV_STATE_DIR", t.TempDir())
+	setAsyncSafeStateDir(t)
 
 	journal := wisdev.NewRuntimeJournal(nil)
 	gw := &wisdev.AgentGateway{

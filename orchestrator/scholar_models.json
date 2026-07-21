@@ -1,0 +1,20 @@
+{
+  "tiers": {
+    "light": "gemini-3.1-flash-lite",
+    "standard": "gemini-3.5-flash",
+    "heavy": "gemini-3.5-flash"
+  },
+  "embeddings": {
+    "primary": "gemini-embedding-2",
+    "standard": "gemini-embedding-2",
+    "fallback": "gemini-embedding-001"
+  },
+  "locations": {
+    "generative": "global",
+    "embedding": "global"
+  },
+  "defaults": {
+    "maxTokens": 8192,
+    "temperature": 0.7
+  }
+}

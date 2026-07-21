@@ -178,8 +178,12 @@ func loadModelConfig() ScholarModels {
 		slog.Warn("scholar model config file unavailable; using explicit environment model overrides")
 		return envModels
 	}
-	slog.Error("could not load scholar model config and no complete environment override was configured")
-	return ScholarModels{}
+	slog.Warn("could not load scholar model config; using default model tier fallbacks")
+	return ScholarModels{
+		Heavy:    "gemini-2.5-pro",
+		Standard: "gemini-2.5-flash",
+		Light:    "gemini-2.5-flash-lite",
+	}
 }
 
 func loadEmbeddingConfig() ScholarEmbeddingModels {
@@ -202,8 +206,12 @@ func loadEmbeddingConfig() ScholarEmbeddingModels {
 		slog.Warn("scholar embedding model config file unavailable; using explicit environment model overrides")
 		return envEmbeddings
 	}
-	slog.Error("could not load scholar embedding model config and no complete environment override was configured")
-	return ScholarEmbeddingModels{}
+	slog.Warn("could not load scholar embedding model config; using default embedding fallbacks")
+	return ScholarEmbeddingModels{
+		Primary:  "text-embedding-004",
+		Standard: "text-embedding-004",
+		Fallback: "text-embedding-004",
+	}
 }
 
 func ResolveHeavyModel() string {

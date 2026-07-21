@@ -95,8 +95,8 @@ func TestSidecarPostExhaustsRetriesAndFallsBackToScaffold(t *testing.T) {
 	assert.Empty(t, content)
 	assert.Equal(t, 3, sidecar.count(), "the retry budget is exactly three attempts")
 
-	// The pipeline-level contract: generateSectionContent surfaces the error and
-	// writeSections keeps the grounded scaffold, never a hard failure.
+	brief := SectionBrief{SectionID: "introduction", Title: "Introduction", Goal: "Frame the problem.", WriterRole: "framing_writer"}
+	blueprint := ManuscriptBlueprint{Query: "graphene battery anodes", Sections: []SectionBrief{brief}}
 	_, genErr := pipeline.generateSectionContent(context.Background(), brief, nil, blueprint)
 	require.NoError(t, genErr, "generateSectionContent handles sidecar failure internally by returning the grounded scaffold")
 	assert.Equal(t, 6, sidecar.count(), "the second call also spends its full retry budget")

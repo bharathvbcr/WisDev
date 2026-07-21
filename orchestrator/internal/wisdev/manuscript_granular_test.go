@@ -62,27 +62,9 @@ func TestMinimizeEmDashes(t *testing.T) {
 	}
 }
 
-func TestReviewRoundsClamping(t *testing.T) {
-	cases := map[int]int{0: defaultReviewRounds, -3: defaultReviewRounds, 1: 1, 3: 3, 99: 5}
-	for set, want := range cases {
-		p := &ManuscriptPipeline{ReviewRounds: set}
-		if got := p.reviewRounds(); got != want {
-			t.Errorf("ReviewRounds=%d -> reviewRounds()=%d, want %d", set, got, want)
-		}
-	}
-}
-
-func TestSectionsContentFingerprintDetectsChange(t *testing.T) {
-	a := []SectionDraftArtifact{{SectionID: "intro", Content: "alpha"}, {SectionID: "results", Content: "beta"}}
-	b := []SectionDraftArtifact{{SectionID: "intro", Content: "alpha"}, {SectionID: "results", Content: "beta"}}
-	if sectionsContentFingerprint(a) != sectionsContentFingerprint(b) {
-		t.Fatal("identical sections should share a fingerprint (loop must detect convergence)")
-	}
-	b[1].Content = "beta revised"
-	if sectionsContentFingerprint(a) == sectionsContentFingerprint(b) {
-		t.Fatal("changed content must change the fingerprint (loop must keep iterating)")
-	}
-}
+// NOTE: TestReviewRoundsClamping and TestSectionsContentFingerprintDetectsChange
+// live in manuscript_review_loop_test.go in this (backend) tree, so they are not
+// duplicated here. The WisDev ARC tree keeps them in this file.
 
 func TestGenerateManuscriptToolExposesGranularControls(t *testing.T) {
 	props, _ := mcpGenerateManuscriptTool().InputSchema["properties"].(map[string]any)

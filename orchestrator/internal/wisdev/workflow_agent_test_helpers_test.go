@@ -8,8 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	"google.golang.org/adk/agent"
-	adksession "google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	adksession "google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
 )
 
@@ -149,6 +149,31 @@ func (m *mockInvocationContext) WithContext(ctx context.Context) agent.Invocatio
 	}
 	return &mockInvocationContext{Context: ctx}
 }
+
+// IsolationScope, ResumedInput, and WithICDelta satisfy the ADK v2
+// agent.InvocationContext surface (new methods added in v2.0).
+func (m *mockInvocationContext) IsolationScope() string { return "" }
+
+func (m *mockInvocationContext) ResumedInput(string) (any, bool) { return nil, false }
+
+func (m *mockInvocationContext) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
+	return m
+}
+
+// The context.Context methods guard against a nil embedded context so mocks
+// built as &mockInvocationContext{} stay safe. ADK v2's session.NewEvent reads
+// time/UUID providers via ctx.Value, which would nil-panic on an unset embed.
+func (m *mockInvocationContext) ctxOrBackground() context.Context {
+	if m.Context == nil {
+		return context.Background()
+	}
+	return m.Context
+}
+
+func (m *mockInvocationContext) Deadline() (time.Time, bool) { return m.ctxOrBackground().Deadline() }
+func (m *mockInvocationContext) Done() <-chan struct{}       { return m.ctxOrBackground().Done() }
+func (m *mockInvocationContext) Err() error                  { return m.ctxOrBackground().Err() }
+func (m *mockInvocationContext) Value(key any) any           { return m.ctxOrBackground().Value(key) }
 
 type mockSession struct{}
 

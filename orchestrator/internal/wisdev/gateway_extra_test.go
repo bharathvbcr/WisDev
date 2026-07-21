@@ -92,7 +92,7 @@ func TestAgentGateway_RuntimeMetadata(t *testing.T) {
 		assert.True(t, meta["configured"].(bool))
 		assert.False(t, meta["ready"].(bool))
 		assert.Equal(t, "initializing", meta["status"])
-		assert.Equal(t, "google.golang.org/adk", meta["canonicalWrapper"])
+		assert.Equal(t, "google.golang.org/adk/v2", meta["canonicalWrapper"])
 		assert.Equal(t, "adk_primary_direct_executor_fallback_only", meta["executionPolicy"])
 		directExecutor, ok := meta["directExecutor"].(map[string]any)
 		if assert.True(t, ok) {

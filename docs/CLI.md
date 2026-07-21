@@ -18,12 +18,12 @@ No more `go run ./cmd/wisdev` unless you are hacking the CLI itself.
 |---------|----------------|
 | `wisdev "question"` | Local research (openalex + arxiv) |
 | `wisdev max "question"` | Maximum-depth research: unleashed budgets, 12 iterations, all providers, long-form report |
-| `wisdev docgen "topic"` | Search + DocGen: gather grounded papers, then draft a citation-backed manuscript |
+| `wisdev docgen "topic"` | Search + DocGen: gather grounded papers, then draft a citation-backed document (`report`, `litreview`, or `fullpaper`) |
 | `wisdev check` | Health check |
 | `wisdev tui` | Interactive terminal UI for local research |
-| `wisdev demo` | Hackathon demo sequence |
 | `wisdev mcp` | MCP stdio server |
-| `wisdev setup --write .cursor/mcp.json` | MCP client config |
+| `wisdev setup --write ~/.cursor/mcp.json --binary` | MCP client config (absolute binary; merges) |
+| `./scripts/install-skills.sh` | Symlink WisDev skills into Claude + Cursor skill dirs |
 | `wisdev serve` | Start HTTP orchestrator |
 | `wisdev sources` | List search providers |
 | `wisdev update` | Self-update to the latest GitHub release (`--check` to only report; alias: `upgrade`) |
@@ -36,7 +36,6 @@ cd wisdev-arc
 .\wisdev.cmd check
 .\wisdev.cmd tui
 .\wisdev.cmd "RAG for scientific literature"
-.\wisdev.cmd demo --offline
 .\wisdev.cmd setup --write .cursor\mcp.json
 ```
 
@@ -70,6 +69,11 @@ Run settings:
 | Hypotheses | on | Swarm hypothesis generation |
 | Exhaustive | off | Run all max iterations before early stop |
 | Long-form | off | Synthesize extended Introduction and Background sections in the report |
+| DocGen | off | After research, generate a grounded document (space toggles on/off; when focused and on: **i** intent, **f** format, **c** citation style) |
+
+When DocGen is enabled, the settings sub-line shows the current intent, format, and
+citation style. The manuscript is written beside the research export as
+`{stem}-manuscript.{ext}` (extension follows the selected format).
 
 With **Enhance** on, the input screen previews the corrected query and detected domain (e.g. `medicine` for meniscus/ACL questions). Status shows `iterations=3/9` when the loop stops early unless **Exhaustive** is on. Setting max iterations to **8+** auto-enables Exhaustive so the loop runs the full budget. When many providers are enabled, detected domains auto-apply provider presets (`medicine`/`biology` → biomedical, `cs`/`ai` → computer science, `physics`/`math` → physics).
 
@@ -92,14 +96,11 @@ While the TUI is open it renames the terminal tab/window to `WisDev` (restored o
 > VS Code's integrated terminal shows the process name as the tab title by default. To see the WisDev title there, set `"terminal.integrated.tabs.title": "${sequence}"` in VS Code settings.
 
 ```powershell
-.\wisdev.cmd tui --demo
-.\wisdev.cmd tui --demo --autostart
+.\wisdev.cmd tui
 .\wisdev.cmd tui --query "RAG for scientific literature"
 .\wisdev.cmd tui --query "meniscus scaffolds and ACL reconstruction" --biomedical --exhaustive --iterations 9 --autostart
-.\wisdev.cmd tui --offline --output demo-result.md
+.\wisdev.cmd tui --offline --output result.md
 ```
-
-`--demo` pre-fills the hackathon question and offline mode; add `--autostart` (on by default with `--demo`) to launch research immediately for screen recording.
 
 Keyboard controls:
 
@@ -124,6 +125,7 @@ Keyboard controls:
 | `E` | Re-run with Exhaustive mode (results view) |
 | `f` | Follow-up chat: ask about the results, answered only from the retrieved sources with `[n]` citations (results view). In chat, `Enter` asks, `Ctrl+R` turns the typed question into a full new research run, `Esc` returns |
 | `?` | Keyboard help overlay |
+| `i` / `f` / `c` | When DocGen setting is focused: cycle intent / format / citation style |
 | Mouse wheel | Scroll results (Windows Terminal, iTerm, etc.) |
 
 ## LLM providers (Ollama, cloud, hybrid)
@@ -186,12 +188,6 @@ $env:GOOGLE_CLOUD_PROJECT = "your-gcp-project"
 
 The CLI auto-loads `.env` from the current directory, parent directory, or `WISDEV_DOTENV` without overriding shell env vars. `wisdev doctor` reports the active mode, fallback chain, and backend health. TUI status shows `llm=hybrid:light→ollama/llama3.1|heavy→vertex_ai` when both backends are wired. ADK agent sessions use cloud in hybrid mode (heavy agent loop); structured light/standard calls still route to Ollama when configured.
 
-Offline Ollama adapter smoke:
-
-```powershell
-node scripts/ops/hackathon-ollama-smoke.mjs
-```
-
 ## Flags
 
 | Flag | Effect |
@@ -202,9 +198,46 @@ node scripts/ops/hackathon-ollama-smoke.mjs
 | `--offline` | Smoke test without network |
 | `--remote` | HTTP orchestrator (`yolo` only) |
 | `--long-form` | Extended Introduction and Background sections (`yolo` local mode; same as the TUI Long-form setting) |
-| `--docgen` | After a `yolo` run, also generate a grounded manuscript (pair with `--doc-words`, `--doc-min-citations`, `--doc-flow`, `--doc-format`, `--doc-output`) |
+| `--docgen` | After a `yolo` run, also generate a grounded manuscript. Zero-config: auto-saves to `manuscript-<topic>-<timestamp>.<ext>` with an auto citation floor of 10 distinct sources; override with `--doc-output`, `--doc-min-citations`, `--doc-words`, `--doc-flow`, `--doc-format` |
 
 ### DocGen controls (`docgen`, and `yolo --docgen` via the `--doc-*` aliases)
+
+DocGen is the headless ScholarDoc document generator. All surfaces (CLI, TUI, MCP,
+`pkg/wisdev.GenerateDocument`) route through `internal/docgen`, which dispatches by
+**intent** and renders with **citation-style-aware** bibliographies.
+
+#### Document intents
+
+| Intent | Flag | Description |
+|--------|------|-------------|
+| `fullpaper` | `--intent fullpaper` (default) | Full grounded manuscript pipeline: plan → draft → review → fact-check → references |
+| `report` | `--intent report` | Quick Report — fast thematic synthesis from retrieved papers |
+| `litreview` | `--intent litreview` | Thematic literature review with grounded in-text citations |
+
+#### Examples
+
+```powershell
+# Default: full grounded manuscript
+wisdev docgen --offline "transformers in drug discovery"
+
+# Quick report with IEEE bibliography
+wisdev docgen --intent report --citation-style ieee --offline "clinical RAG"
+
+# Literature review as HTML
+wisdev docgen --intent litreview --format html --offline "graph neural networks"
+
+# Full paper as LaTeX with custom section flow
+wisdev docgen --intent fullpaper --format latex --flow introduction,methods,results,discussion `
+  --min-citations 10 --words 5000 "battery anodes"
+
+# DOCX export (requires pandoc on PATH)
+wisdev docgen --format docx -o paper.docx --offline "topic"
+
+# Replay a fixed corpus (skip retrieval; good for A/B testing pipeline changes)
+wisdev docgen --corpus-file papers.json --intent fullpaper "topic"
+```
+
+#### Flags
 
 | Flag | Effect |
 |------|--------|
@@ -213,13 +246,29 @@ node scripts/ops/hackathon-ollama-smoke.mjs
 | `--flow` / `--doc-flow` | Comma-separated section flow, e.g. `introduction,methods,results,discussion` |
 | `--review-rounds` / `--doc-review-rounds` | Max rounds of the agentic generate→review→revise loop (0 = default 2, max 5) |
 | `--genre` / `--doc-genre` | Manuscript genre, e.g. `research paper` (default: narrative literature review) |
-| `--format` / `--doc-format` | `markdown` (default) \| `latex` \| `json` |
+| `--format` / `--doc-format` | `markdown` (default) \| `latex` \| `html` \| `docx` \| `json` |
+| `--intent` / `--doc-intent` | Document type: `fullpaper` (default) \| `report` \| `litreview` |
+| `--citation-style` / `--doc-citation-style` | Bibliography style: `apa` (default) \| `mla` \| `chicago` \| `vancouver` \| `ieee` \| `harvard` \| `nature` |
+| `--corpus-dump` | After retrieval, save papers as JSON for reproducible re-runs |
+| `--corpus-file` | Replay papers from a `--corpus-dump` file instead of live retrieval |
+| `--all-references` | List every retrieved source in the bibliography, not only in-text-cited ones (default on for `--corpus-file`) |
+
+Both paths are zero-config: without `--min-citations`/`--doc-min-citations` an
+auto floor of 10 distinct sources applies (and raises the retrieval floor), and
+`yolo --docgen` without `--doc-output` auto-saves the manuscript and prints the
+absolute path. The progress spinner streams live pipeline stages (drafting,
+review round *n*, fact-check) so long runs never look stalled.
 
 Section drafting runs an **agentic generate → review → revise loop** (re-review and
 rewrite flagged sections each round, stopping on convergence). Manuscript prose
 minimizes em-dashes (`—`). The same controls are exposed over MCP on
-`wisdevGenerateManuscript` (`words`, `minCitations`, `flow`, `reviewRounds`) — see
-[MCP_CLIENTS.md](MCP_CLIENTS.md).
+`wisdevGenerateManuscript` (`words`, `minCitations`, `flow`, `reviewRounds`, `intent`,
+`citationStyle`, `format`) — see [MCP_CLIENTS.md](MCP_CLIENTS.md). MCP supports
+`markdown`, `json`, `latex`, and `html`; `docx` is CLI-only.
+
+The public Go embedding API `pkg/wisdev.GenerateDocument` exposes the same pipeline
+(additive; requires `SetDocumentGenerator` wired at startup — the CLI does this
+automatically).
 
 DocGen drafting/review/coordination/fact-check calls go through the sidecar's
 `manuscript_llm()` provider selector, independent of the `WISDEV_LLM_*` vars used

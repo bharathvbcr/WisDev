@@ -39,4 +39,38 @@ func TestExport(t *testing.T) {
 		is.Contains(tex, "\\section{Intro}")
 		is.Contains(tex, "Intro content")
 	})
+
+	t.Run("GenerateMarkdownWithReferencesAPA", func(t *testing.T) {
+		reqWithRefs := ExportRequest{
+			Content: DocumentContent{
+				Title: "Cited Paper",
+				Sections: []Section{
+					{Name: "Body", Content: "Content here."},
+				},
+				References: []ExportReference{
+					{Authors: []string{"Smith, J."}, Year: 2024, Title: "A Study", Journal: "Science"},
+				},
+			},
+			Options: ExportOptions{CitationStyle: "apa"},
+		}
+		md := GenerateMarkdown(reqWithRefs)
+		is.Contains(md, "## References")
+		is.Contains(md, "Smith")
+		is.Contains(md, "citation_style: \"apa\"")
+	})
+
+	t.Run("GenerateHTMLWithReferencesIEEE", func(t *testing.T) {
+		reqWithRefs := ExportRequest{
+			Content: DocumentContent{
+				Title: "IEEE Paper",
+				References: []ExportReference{
+					{Authors: []string{"Lee, M."}, Year: 2023, Title: "Neural Nets", Journal: "IEEE Trans."},
+				},
+			},
+			Options: ExportOptions{CitationStyle: "ieee"},
+		}
+		html := GenerateHTML(reqWithRefs)
+		is.Contains(html, "<h2>References</h2>")
+		is.Contains(html, "<ol>")
+	})
 }

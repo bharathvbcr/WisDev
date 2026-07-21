@@ -4,7 +4,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/citations"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/docgen"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/evidence"
 	internalwisdev "github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
 	agent "github.com/bharathvbcr/wisdev-arc/orchestrator/pkg/wisdev"
@@ -76,6 +79,102 @@ func TestResolveDocGenFormat(t *testing.T) {
 	}
 	if _, err := resolveDocGenFormat("pdf", "", false); err == nil {
 		t.Fatalf("expected error for unknown format pdf")
+	}
+}
+
+func TestResolveDocGenFormatHTMLDocx(t *testing.T) {
+	cases := []struct {
+		format, output string
+		want           string
+	}{
+		{"html", "", "html"},
+		{"docx", "", "docx"},
+		{"", "paper.html", "html"},
+		{"", "paper.docx", "docx"},
+	}
+	for _, c := range cases {
+		got, err := resolveDocGenFormat(c.format, c.output, false)
+		if err != nil {
+			t.Fatalf("resolveDocGenFormat(%q,%q) error: %v", c.format, c.output, err)
+		}
+		if got != c.want {
+			t.Fatalf("resolveDocGenFormat(%q,%q)=%q want %q", c.format, c.output, got, c.want)
+		}
+	}
+}
+
+func TestDocGenIntentCitationStyleParsing(t *testing.T) {
+	intents := map[string]string{
+		"":           "fullpaper",
+		"fullpaper":  "fullpaper",
+		"report":     "report",
+		"litreview":  "litreview",
+		"manuscript": "fullpaper",
+	}
+	for raw, want := range intents {
+		got, err := docgen.ParseIntent(raw)
+		if err != nil {
+			t.Fatalf("ParseIntent(%q) error: %v", raw, err)
+		}
+		if string(got) != want {
+			t.Errorf("ParseIntent(%q)=%q want %q", raw, got, want)
+		}
+	}
+	styles := []string{"apa", "mla", "chicago", "vancouver", "ieee", "harvard", "nature"}
+	for _, s := range styles {
+		got, err := citations.ParseStyle(s)
+		if err != nil {
+			t.Fatalf("ParseStyle(%q) error: %v", s, err)
+		}
+		if string(got) != s {
+			t.Errorf("ParseStyle(%q)=%q", s, got)
+		}
+	}
+}
+
+func TestDocGenDefaultFilename(t *testing.T) {
+	now := time.Date(2026, 7, 2, 15, 4, 0, 0, time.UTC)
+	cases := []struct {
+		query, format, want string
+	}{
+		{"LLM hallucinations in clinical decision support!", "markdown", "manuscript-llm-hallucinations-in-clinical-decision-support-20260702-1504.md"},
+		{"RAG", "latex", "manuscript-rag-20260702-1504.tex"},
+		{"one two three four five six seven eight", "json", "manuscript-one-two-three-four-five-six-20260702-1504.json"},
+		{"  ", "markdown", "manuscript-untitled-20260702-1504.md"},
+	}
+	for _, c := range cases {
+		if got := docGenDefaultFilename(c.query, c.format, now); got != c.want {
+			t.Fatalf("docGenDefaultFilename(%q,%q)=%q want %q", c.query, c.format, got, c.want)
+		}
+	}
+}
+
+// TestDocGenProgressNotifier pins the live-progress contract: known stages map to
+// next-activity labels, review rounds are numbered, and unknown stages are silent
+// (the spinner keeps its previous label rather than flashing raw stage ids).
+func TestDocGenProgressNotifier(t *testing.T) {
+	var got []string
+	notify := docGenProgressNotifier(func(label string) { got = append(got, label) })
+	notify("compose_visuals")
+	notify("write_sections")
+	notify("review_revise.round")
+	notify("review_revise.round")
+	notify("some_future_stage") // unknown: must not emit
+	notify("adversarial_review")
+	want := []string{
+		"Drafting sections",
+		"Verifying grounding",
+		"Review round 1 done — re-reviewing",
+		"Review round 2 done — re-reviewing",
+		"Rendering manuscript",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("labels = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("label[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

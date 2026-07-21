@@ -104,6 +104,52 @@ def test_section_generate_honors_min_citations():
     assert "at least 12 DISTINCT sources" in prompt
 
 
+def test_section_generate_includes_style_exemplar():
+    with patch(
+        "services.gemini_service.gemini_service.generate_text",
+        AsyncMock(return_value="Generated section text [1]."),
+    ) as mock_generate:
+        client = TestClient(make_app())
+        resp = client.post("/wisdev/manuscript/section/generate", json=_GENERATE_PAYLOAD)
+
+    assert resp.status_code == 200
+    prompt = mock_generate.await_args.args[0]
+    assert "STYLE EXEMPLAR" in prompt
+    assert "Mechanical (wrong)" in prompt
+    assert "Natural (right)" in prompt
+
+
+def test_section_generate_threads_previous_section_ending():
+    payload = {
+        **_GENERATE_PAYLOAD,
+        "previous_section_ending": "That tension frames the design choices explored next.",
+    }
+    with patch(
+        "services.gemini_service.gemini_service.generate_text",
+        AsyncMock(return_value="Generated section text [1]."),
+    ) as mock_generate:
+        client = TestClient(make_app())
+        resp = client.post("/wisdev/manuscript/section/generate", json=payload)
+
+    assert resp.status_code == 200
+    prompt = mock_generate.await_args.args[0]
+    assert "FLOW: The immediately preceding section ends" in prompt
+    assert "That tension frames the design choices explored next." in prompt
+
+
+def test_section_generate_no_flow_block_without_previous_ending():
+    with patch(
+        "services.gemini_service.gemini_service.generate_text",
+        AsyncMock(return_value="Generated section text [1]."),
+    ) as mock_generate:
+        client = TestClient(make_app())
+        resp = client.post("/wisdev/manuscript/section/generate", json=_GENERATE_PAYLOAD)
+
+    assert resp.status_code == 200
+    prompt = mock_generate.await_args.args[0]
+    assert "FLOW: The immediately preceding section ends" not in prompt
+
+
 def test_section_generate_discourages_em_dashes():
     with patch(
         "services.gemini_service.gemini_service.generate_text",
@@ -182,7 +228,6 @@ def test_review_manuscript_returns_structured_review():
 def test_review_manuscript_genre_and_citation_aware():
     from routers.manuscript_router import ManuscriptReviewResponse
 
-    # Default genre (review) + provided sources -> review voice rule + sources block.
     with patch(
         "services.gemini_service.gemini_service.generate_json",
         AsyncMock(return_value=ManuscriptReviewResponse(content_score=0.8)),
@@ -200,10 +245,9 @@ def test_review_manuscript_genre_and_citation_aware():
     assert resp.status_code == 200
     prompt = mock_review.await_args.args[0]
     assert "narrative literature review" in prompt.lower()
-    assert "Scaffold repair improves outcomes" in prompt  # sources block (citation-aware)
+    assert "Scaffold repair improves outcomes" in prompt
     assert "GROUNDED" in prompt
 
-    # Research-paper genre -> first-person voice is EXPECTED, not penalized.
     with patch(
         "services.gemini_service.gemini_service.generate_json",
         AsyncMock(return_value=ManuscriptReviewResponse(content_score=0.8)),
@@ -393,6 +437,9 @@ def test_fact_check_llm_failure_degrades():
     assert resp.status_code == 200
     assert resp.json()["flagged_sentences"] == []
 
+    assert resp.status_code == 200
+    assert resp.json()["flagged_sentences"] == []
+
 
 def test_manuscript_llm_selects_local_when_configured(monkeypatch):
     """#2: the manuscript endpoints route through manuscript_llm(), which uses a
@@ -463,3 +510,96 @@ def test_coordinate_dedupe_revises_all_sections():
     assert "no longer repeating" in out["results"]
     prompt = mock_dedupe.await_args.args[0]
     assert "Definition of X repeated" in prompt
+
+
+# --- naturalness / voice + custom instructions (goal: natural prose, author steering) ---
+
+def test_section_generate_includes_voice_guidance():
+    """Every draft prompt must carry the positive readability directive so the writer
+    produces natural, flowing prose instead of a citation-after-every-clause list."""
+    with patch(
+        "services.gemini_service.gemini_service.generate_text",
+        AsyncMock(return_value="Generated section text [1]."),
+    ) as mock_generate:
+        client = TestClient(make_app())
+        resp = client.post("/wisdev/manuscript/section/generate", json=_GENERATE_PAYLOAD)
+
+    assert resp.status_code == 200
+    prompt = mock_generate.await_args.args[0]
+    assert "VOICE & READABILITY" in prompt
+    assert "INTEGRATE CITATIONS SMOOTHLY" in prompt
+    # Breadth-without-clutter rebalance is now folded into the voice guidance itself.
+    assert "Citing broadly and reading naturally are BOTH required" in prompt
+
+
+def test_section_generate_threads_custom_instructions():
+    payload = {**_GENERATE_PAYLOAD, "customInstructions": "Write for a clinical audience; stress safety."}
+    with patch(
+        "services.gemini_service.gemini_service.generate_text",
+        AsyncMock(return_value="Generated section text [1]."),
+    ) as mock_generate:
+        client = TestClient(make_app())
+        resp = client.post("/wisdev/manuscript/section/generate", json=payload)
+
+    assert resp.status_code == 200
+    prompt = mock_generate.await_args.args[0]
+    assert "USER CUSTOM INSTRUCTIONS" in prompt
+    assert "Write for a clinical audience; stress safety." in prompt
+
+
+def test_section_generate_no_custom_instructions_block_when_absent():
+    with patch(
+        "services.gemini_service.gemini_service.generate_text",
+        AsyncMock(return_value="Generated section text [1]."),
+    ) as mock_generate:
+        client = TestClient(make_app())
+        resp = client.post("/wisdev/manuscript/section/generate", json=_GENERATE_PAYLOAD)
+
+    assert resp.status_code == 200
+    prompt = mock_generate.await_args.args[0]
+    assert "USER CUSTOM INSTRUCTIONS" not in prompt
+
+
+def test_section_refine_and_revise_thread_custom_instructions():
+    directive = "Prefer active voice and short paragraphs."
+    for path, payload in (
+        ("/wisdev/manuscript/section/refine", {**_REFINE_PAYLOAD, "customInstructions": directive}),
+        (
+            "/wisdev/manuscript/section/revise",
+            {
+                "section_id": "introduction",
+                "original_content": "Draft [1].",
+                "claim_packets": _GENERATE_PAYLOAD["claim_packets"],
+                "review_findings": ["tighten"],
+                "customInstructions": directive,
+            },
+        ),
+    ):
+        with patch(
+            "services.gemini_service.gemini_service.generate_text",
+            AsyncMock(return_value="Revised text [1]."),
+        ) as mock_generate:
+            client = TestClient(make_app())
+            resp = client.post(path, json=payload)
+        assert resp.status_code == 200, path
+        prompt = mock_generate.await_args.args[0]
+        assert "USER CUSTOM INSTRUCTIONS" in prompt, path
+        assert directive in prompt, path
+
+
+def test_review_prompt_asks_for_readability_issues():
+    from routers.manuscript_router import ManuscriptReviewResponse
+
+    with patch(
+        "services.gemini_service.gemini_service.generate_json",
+        AsyncMock(return_value=ManuscriptReviewResponse(content_score=0.8, readability_issues=["choppy citations"])),
+    ) as mock_review:
+        client = TestClient(make_app())
+        resp = client.post(
+            "/wisdev/manuscript/review",
+            json={"query": "q", "thesis": "t", "sections": [{"title": "Intro", "text": "A [1]. B [2]. C [3]."}]},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["readability_issues"] == ["choppy citations"]
+    prompt = mock_review.await_args.args[0]
+    assert "readability_issues" in prompt

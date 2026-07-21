@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
-	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 	"log/slog"
 	"net/http"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 	"strings"
 	"sync"
 	"time"
@@ -75,6 +75,13 @@ type YoloJob struct {
 	Mode                          string // "yolo" | "guided"
 	ServiceTier                   string
 	Domain                        string
+	WithDocGen                    bool     // YOLO only: generate a grounded manuscript after research
+	DocGenWords                   int      // optional manuscript-wide target word count for docGen
+	DocGenMinCitations            int      // optional minimum distinct sources to cite
+	DocGenGenre                   string   // optional manuscript genre (e.g. "research paper")
+	DocGenFlow                    []string // optional ordered section flow
+	DocGenReviewRounds            int      // optional agentic review→revise loop budget
+	DocGenInstructions            string   // optional free-text author steering (tone/audience/emphasis)
 	InitialMemoryTiers            *wisdev.MemoryTierState
 	UnifiedEvents                 chan UnifiedEvent
 	Cancel                        context.CancelFunc
@@ -940,6 +947,15 @@ func runWisDevPipeline(ctx context.Context, job *YoloJob, loop AutonomousLoopInt
 		Mode:               jobMode,
 		ServiceTier:        resolveWisDevJobServiceTier(jobMode, job.ServiceTier),
 	}
+	profile := wisdev.BuildResearchExecutionProfile(ctx, job.Query, jobMode, "balanced", false, 0)
+	loopReq.MaxIterations = profile.MaxIterations
+	loopReq.MaxSearchTerms = profile.SearchBudget.MaxSearchTerms
+	loopReq.HitsPerSearch = profile.SearchBudget.HitsPerSearch
+	maxUniquePapers := profile.SearchBudget.MaxUniquePapers
+	if job.WithDocGen {
+		maxUniquePapers = raiseSearchBudgetForDocGen(maxUniquePapers, job.DocGenMinCitations)
+	}
+	loopReq.MaxUniquePapers = maxUniquePapers
 	runtime := resolveUnifiedResearchRuntime(GlobalYoloGateway)
 	if runtime == nil {
 		if loop == nil {
@@ -958,6 +974,10 @@ func runWisDevPipeline(ctx context.Context, job *YoloJob, loop AutonomousLoopInt
 			sendTerminal(buildUnifiedFailureEvent(job.ID, jobMode, latestTraceID, "AUTONOMOUS_LOOP_EMPTY", "wisdev unified research runtime returned no result"))
 			return
 		}
+		fallbackPayload := buildUnifiedLoopPayload(result)
+		if job.WithDocGen && jobMode == string(wisdev.WisDevModeYOLO) {
+			attachYoloDocGenPayload(ctx, job, result, fallbackPayload)
+		}
 		sendTerminal(UnifiedEvent{
 			Type:        "job_done",
 			ResultCount: len(result.Papers),
@@ -966,7 +986,7 @@ func runWisDevPipeline(ctx context.Context, job *YoloJob, loop AutonomousLoopInt
 			TraceID:     latestTraceID,
 			Mode:        jobMode,
 			ServiceTier: string(loopReq.ServiceTier),
-			Payload:     buildUnifiedLoopPayload(result),
+			Payload:     fallbackPayload,
 		})
 		return
 	}
@@ -1010,6 +1030,14 @@ func runWisDevPipeline(ctx context.Context, job *YoloJob, loop AutonomousLoopInt
 		serviceTier = string(resolveWisDevJobServiceTier(resultMode, job.ServiceTier))
 	}
 
+	payload := buildUnifiedLoopPayload(result)
+	// Optional docGen: when the YOLO run opted in, turn the retrieved papers into a
+	// grounded manuscript and attach the workspace to the terminal payload so the
+	// client can render it. Best-effort — research already succeeded.
+	if job.WithDocGen && normalizeWisDevJobMode(resultMode) == string(wisdev.WisDevModeYOLO) {
+		attachYoloDocGenPayload(ctx, job, result, payload)
+	}
+
 	sendTerminal(UnifiedEvent{
 		Type:           "job_done",
 		ResultCount:    len(result.Papers),
@@ -1018,10 +1046,259 @@ func runWisDevPipeline(ctx context.Context, job *YoloJob, loop AutonomousLoopInt
 		TraceID:        latestTraceID,
 		Mode:           resultMode,
 		ServiceTier:    serviceTier,
-		Payload:        buildUnifiedLoopPayload(result),
+		Payload:        payload,
 		ReasoningGraph: result.ReasoningGraph,
 		MemoryTiers:    result.MemoryTiers,
 	})
+}
+
+// attachYoloDocGenPayload runs the manuscript pipeline on the YOLO research papers
+// and merges a docGen workspace into the terminal payload under "docGen". It is
+// best-effort: the research answer is already complete, so a manuscript failure
+// only logs and records a status marker instead of failing the job.
+func attachYoloDocGenPayload(ctx context.Context, job *YoloJob, result *wisdev.LoopResult, payload map[string]any) {
+	if payload == nil || result == nil {
+		return
+	}
+	attachManuscriptDocGen(ctx, payload, job.ID, job.ProjectID, job.Query, job.UserID, result.Papers, docGenControls{
+		targetWords:        job.DocGenWords,
+		minCitations:       job.DocGenMinCitations,
+		genre:              job.DocGenGenre,
+		sectionFlow:        job.DocGenFlow,
+		reviewRounds:       job.DocGenReviewRounds,
+		customInstructions: job.DocGenInstructions,
+	}, GlobalYoloGateway)
+}
+
+// attachManuscriptDocGen runs the (scaffold) manuscript pipeline on the supplied
+// papers and merges the resulting full-paper workspace into a research payload
+// under the "docGen" key, so a YOLO run can carry a grounded manuscript alongside
+// its answer. It is best-effort: a pipeline failure records a "failed" status
+// marker rather than propagating, since the underlying research already succeeded.
+// Shared by the async job handler (yolo.go) and the synchronous deep-research
+// route (research_routes.go).
+// docGenControls carries the optional granular DocGen knobs surfaced as web
+// params, applied to the manuscript pipeline before it runs.
+type docGenControls struct {
+	targetWords        int
+	minCitations       int
+	genre              string
+	sectionFlow        []string
+	reviewRounds       int
+	customInstructions string
+}
+
+// applyDocGenControls sets the optional manuscript-pipeline knobs from the parsed
+// web controls. Shared by every DocGen entry point (YOLO attach, deep-research, and
+// /full-paper/start) so the customization surface stays identical across them (a
+// zero/empty field leaves the pipeline default in place).
+func applyDocGenControls(pipeline *wisdev.ManuscriptPipeline, controls docGenControls) {
+	if pipeline == nil {
+		return
+	}
+	if controls.targetWords > 0 {
+		pipeline.TargetWords = controls.targetWords
+	}
+	if controls.minCitations > 0 {
+		pipeline.MinCitations = controls.minCitations
+	}
+	if g := strings.TrimSpace(controls.genre); g != "" {
+		pipeline.Genre = g
+	}
+	if len(controls.sectionFlow) > 0 {
+		pipeline.SectionFlow = controls.sectionFlow
+	}
+	if controls.reviewRounds > 0 {
+		pipeline.ReviewRounds = controls.reviewRounds
+	}
+	if ci := strings.TrimSpace(controls.customInstructions); ci != "" {
+		pipeline.CustomInstructions = ci
+	}
+}
+
+// applyFullPaperDocGenControls is the /full-paper/start alias for applyDocGenControls
+// (named for readability at the call site).
+func applyFullPaperDocGenControls(pipeline *wisdev.ManuscriptPipeline, controls docGenControls) {
+	applyDocGenControls(pipeline, controls)
+}
+
+// extractDocGenControls reads the optional DocGen knobs from the /full-paper/start
+// request's free-form `options` (preferred) and `metadata` (fallback) maps, so the
+// full-paper UI can steer generation the same way the YOLO/deep-research JSON bodies
+// do. Recognized keys (camelCase): docGenWords, docGenMinCitations, docGenGenre,
+// docGenFlow, docGenReviewRounds, docGenInstructions (also accepts customInstructions).
+func extractDocGenControls(sources ...map[string]any) docGenControls {
+	var controls docGenControls
+	pickInt := func(keys ...string) int {
+		for _, src := range sources {
+			for _, k := range keys {
+				if v, ok := src[k]; ok {
+					if n := wisdev.IntValue(v); n > 0 {
+						return n
+					}
+				}
+			}
+		}
+		return 0
+	}
+	pickString := func(keys ...string) string {
+		for _, src := range sources {
+			for _, k := range keys {
+				if s := strings.TrimSpace(wisdev.AsOptionalString(src[k])); s != "" {
+					return s
+				}
+			}
+		}
+		return ""
+	}
+	pickStrings := func(keys ...string) []string {
+		for _, src := range sources {
+			for _, k := range keys {
+				if v, ok := src[k]; ok {
+					if out := sliceStrings(v); len(out) > 0 {
+						return out
+					}
+				}
+			}
+		}
+		return nil
+	}
+	controls.targetWords = pickInt("docGenWords", "targetWords")
+	controls.minCitations = pickInt("docGenMinCitations", "minCitations")
+	controls.genre = pickString("docGenGenre", "genre")
+	controls.sectionFlow = pickStrings("docGenFlow", "sectionFlow")
+	controls.reviewRounds = pickInt("docGenReviewRounds", "reviewRounds")
+	controls.customInstructions = pickString("docGenInstructions", "customInstructions")
+	return controls
+}
+
+// smartDocGenMinCitations is the citation floor applied when the caller passes no
+// explicit minimum. Mirrors the wisdev-arc CLI's auto default: a grounded
+// manuscript citing only two or three sources reads thin, and ten distinct
+// sources is a baseline the retrieval budgets comfortably satisfy.
+const smartDocGenMinCitations = 10
+
+// docGenRetrievalPaperCap is the maximum papers the DocGen retrieval/hydration
+// paths will fetch or admit when MinCitations raises the budget.
+const docGenRetrievalPaperCap = 80
+
+func docGenEffectiveMinCitations(raw int) int {
+	if raw > 0 {
+		return raw
+	}
+	return smartDocGenMinCitations
+}
+
+// raiseSearchBudgetForDocGen lifts MaxUniquePapers to satisfy the DocGen citation
+// floor (smart default when unset). Used by YOLO/deep-research HTTP paths.
+func raiseSearchBudgetForDocGen(maxUniquePapers, rawMinCitations int) int {
+	floor := docGenEffectiveMinCitations(rawMinCitations)
+	if floor > maxUniquePapers {
+		maxUniquePapers = floor
+	}
+	if maxUniquePapers > docGenRetrievalPaperCap {
+		maxUniquePapers = docGenRetrievalPaperCap
+	}
+	return maxUniquePapers
+}
+
+type fullPaperHydrationBudget struct {
+	maxQueries    int
+	limitPerQuery int
+	dedupCap      int
+}
+
+// resolveFullPaperHydrationBudget scales the fixed 4×5 hydration when MinCitations
+// exceeds what ~20 deduped papers can satisfy.
+func resolveFullPaperHydrationBudget(minCitations int) fullPaperHydrationBudget {
+	floor := docGenEffectiveMinCitations(minCitations)
+	dedupCap := floor
+	if dedupCap > docGenRetrievalPaperCap {
+		dedupCap = docGenRetrievalPaperCap
+	}
+	maxQueries := 4
+	switch {
+	case floor > 40:
+		maxQueries = 8
+	case floor > 20:
+		maxQueries = 6
+	}
+	targetHits := dedupCap + dedupCap/3
+	if targetHits > docGenRetrievalPaperCap*2 {
+		targetHits = docGenRetrievalPaperCap * 2
+	}
+	limitPerQuery := (targetHits + maxQueries - 1) / maxQueries
+	if limitPerQuery < 5 {
+		limitPerQuery = 5
+	}
+	if limitPerQuery > 15 {
+		limitPerQuery = 15
+	}
+	return fullPaperHydrationBudget{
+		maxQueries:    maxQueries,
+		limitPerQuery: limitPerQuery,
+		dedupCap:      dedupCap,
+	}
+}
+
+// withSmartDocGenDefaults fills unset DocGen knobs with the smart defaults at
+// the request entry points. Kept OUT of extractDocGenControls/applyDocGenControls
+// so parsing stays a faithful decode (tests pin zero-passthrough there). Any
+// explicit positive client value wins; note the HTTP paths cannot express "no
+// minimum" (0 decodes the same as absent) — only the MCP tool honors an explicit 0.
+func withSmartDocGenDefaults(controls docGenControls) docGenControls {
+	if controls.minCitations <= 0 {
+		controls.minCitations = smartDocGenMinCitations
+	}
+	return controls
+}
+
+func attachManuscriptDocGen(ctx context.Context, payload map[string]any, jobID, sessionID, query, userID string, papers []search.Paper, controls docGenControls, agentGateway *wisdev.AgentGateway) {
+	if payload == nil {
+		return
+	}
+	controls = withSmartDocGenDefaults(controls)
+	slog.Info("wisdev docgen starting",
+		"component", "wisdev_docgen",
+		"operation", "attachManuscriptDocGen",
+		"job_id", jobID,
+		"paper_count", len(papers),
+		"target_words", controls.targetWords,
+		"min_citations", controls.minCitations,
+		"genre", controls.genre,
+	)
+	pipeline := wisdev.NewManuscriptPipeline(wisdev.ResolvePythonBase())
+	// Checkpoint each completed section draft to disk so a crashed or canceled
+	// docgen re-run with the same jobID resumes instead of re-drafting sections.
+	pipeline.Checkpoints = wisdev.NewFileCheckpointStore("")
+	applyDocGenControls(pipeline, controls)
+	manuscript, err := pipeline.Run(ctx, jobID, query, papers)
+	if err != nil {
+		slog.Warn("wisdev docgen failed",
+			"component", "wisdev_docgen",
+			"operation", "attachManuscriptDocGen",
+			"job_id", jobID,
+			"error", err.Error(),
+		)
+		payload["docGen"] = map[string]any{
+			"status":    "failed",
+			"error":     err.Error(),
+			"persisted": false,
+		}
+		return
+	}
+	workspace := buildFullPaperWorkspace(jobID, sessionID, query, manuscript, papers)
+	docGenPayload := map[string]any{
+		"status":    "ready",
+		"workspace": workspace,
+		"jobId":     jobID,
+	}
+	if persistFullPaperJobFromManuscript(agentGateway, jobID, userID, sessionID, query, manuscript, papers) {
+		docGenPayload["persisted"] = true
+	} else {
+		docGenPayload["persisted"] = false
+	}
+	payload["docGen"] = docGenPayload
 }
 
 func resolveWisDevJobServiceTier(mode string, requested string) wisdev.ServiceTier {
@@ -1222,6 +1499,13 @@ func WisDevJobHandler(w http.ResponseWriter, r *http.Request) {
 		Mode               string                  `json:"mode"` // "yolo" | "guided"
 		ServiceTier        string                  `json:"serviceTier"`
 		Domain             string                  `json:"domain"`
+		WithDocGen         bool                    `json:"withDocGen"`         // YOLO only: also generate a grounded manuscript
+		DocGenWords        int                     `json:"docGenWords"`        // optional manuscript-wide target word count
+		DocGenMinCitations int                     `json:"docGenMinCitations"` // optional minimum distinct sources to cite
+		DocGenGenre        string                  `json:"docGenGenre"`        // optional manuscript genre
+		DocGenFlow         []string                `json:"docGenFlow"`         // optional ordered section flow
+		DocGenReviewRounds int                     `json:"docGenReviewRounds"` // optional review→revise loop budget
+		DocGenInstructions string                  `json:"docGenInstructions"` // optional free-text author steering (tone/audience/emphasis)
 		InitialMemoryTiers *wisdev.MemoryTierState `json:"initialMemoryTiers,omitempty"`
 		MemoryTiers        *wisdev.MemoryTierState `json:"memoryTiers,omitempty"`
 		MemoryTiersSnake   *wisdev.MemoryTierState `json:"memory_tiers,omitempty"`
@@ -1285,16 +1569,23 @@ func WisDevJobHandler(w http.ResponseWriter, r *http.Request) {
 		req.Domain = detectedDomain
 	}
 	job := &YoloJob{
-		ID:            jobID,
-		TraceID:       traceID,
-		UserID:        userID,
-		Query:         searchQuery,
-		OriginalQuery: originalQuery,
-		ProjectID:     req.ProjectID,
-		Status:        "running",
-		Mode:          req.Mode,
-		ServiceTier:   req.ServiceTier,
-		Domain:        req.Domain,
+		ID:                 jobID,
+		TraceID:            traceID,
+		UserID:             userID,
+		Query:              searchQuery,
+		OriginalQuery:      originalQuery,
+		ProjectID:          req.ProjectID,
+		Status:             "running",
+		Mode:               req.Mode,
+		ServiceTier:        req.ServiceTier,
+		Domain:             req.Domain,
+		WithDocGen:         req.WithDocGen,
+		DocGenWords:        req.DocGenWords,
+		DocGenMinCitations: req.DocGenMinCitations,
+		DocGenGenre:        strings.TrimSpace(req.DocGenGenre),
+		DocGenFlow:         req.DocGenFlow,
+		DocGenReviewRounds: req.DocGenReviewRounds,
+		DocGenInstructions: strings.TrimSpace(req.DocGenInstructions),
 		InitialMemoryTiers: firstNonNilMemoryTiers(
 			req.InitialMemoryTiers,
 			req.MemoryTiers,
@@ -1693,6 +1984,7 @@ func writePersistedResearchJobStream(w http.ResponseWriter, r *http.Request, pay
 
 // WisDevScheduleHandler handles POST /wisdev/schedule.
 func (h *WisDevHandler) WisDevScheduleHandler(w http.ResponseWriter, r *http.Request) {
+	logAPIRouteLifecycle(r, "api", "wis_dev_schedule_handler", "request_received", "", "result", "accepted")
 	if r.Method != http.MethodPost {
 		WriteError(w, http.StatusMethodNotAllowed, ErrBadRequest, "method not allowed", map[string]any{
 			"allowedMethod": http.MethodPost,
@@ -1741,6 +2033,7 @@ func (h *WisDevHandler) WisDevScheduleHandler(w http.ResponseWriter, r *http.Req
 
 // WisDevScheduleRunHandler handles POST /wisdev/schedule/run/:id.
 func (h *WisDevHandler) WisDevScheduleRunHandler(w http.ResponseWriter, r *http.Request) {
+	logAPIRouteLifecycle(r, "api", "wis_dev_schedule_run_handler", "request_received", "", "result", "accepted")
 	if r.Method != http.MethodPost {
 		WriteError(w, http.StatusMethodNotAllowed, ErrBadRequest, "method not allowed", map[string]any{
 			"allowedMethod": http.MethodPost,

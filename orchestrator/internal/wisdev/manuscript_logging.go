@@ -25,6 +25,10 @@ type stageLogger struct {
 	jobID   string
 	started time.Time
 	prev    time.Time
+	// notify, when set, is invoked (synchronously) with each completed stage name
+	// so a caller-supplied observer (e.g. a progress event emitter) can surface
+	// live pipeline progress without parsing logs. Must be fast and non-blocking.
+	notify func(stage string)
 }
 
 func newStageLogger(jobID string) *stageLogger {
@@ -45,6 +49,9 @@ func (s *stageLogger) stage(name string, attrs ...any) {
 	}
 	slog.Info("manuscript stage", append(base, attrs...)...)
 	s.prev = now
+	if s.notify != nil {
+		s.notify(name)
+	}
 }
 
 // warn logs a degradation/anomaly at the current stage (fallbacks, empties, low
@@ -112,15 +119,6 @@ func groundingMetrics(sections []SectionDraftArtifact) []any {
 		"blocking_issues", blocking,
 		"grounding_ratio", ratio,
 	}
-}
-
-// sectionIDs returns the ordered section ids for a plan/stage log.
-func sectionIDs(sections []SectionDraftArtifact) []string {
-	ids := make([]string, 0, len(sections))
-	for i := range sections {
-		ids = append(ids, sections[i].SectionID)
-	}
-	return ids
 }
 
 // truncForLog clamps free text (a query, a finding, a prose excerpt) to a bounded

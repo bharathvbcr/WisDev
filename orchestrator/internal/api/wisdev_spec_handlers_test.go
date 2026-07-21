@@ -234,7 +234,7 @@ func TestWisDev_SpecializedHandlers(t *testing.T) {
 		}
 	})
 
-	t.Run("full-paper and drafting edge cases", func(t *testing.T) {
+	t.Run("full-paper edge cases", func(t *testing.T) {
 		assertBadRequestCode(t, mux, http.MethodPost, "/full-paper/start", []byte(`{bad`), ErrBadRequest)
 		assertBadRequestCode(t, mux, http.MethodPost, "/full-paper/start", encodeJSON(t, map[string]any{}), ErrInvalidParameters)
 		assertNotFoundCode(t, mux, http.MethodPost, "/full-paper/status", encodeJSON(t, map[string]any{"jobId": "missing"}))
@@ -244,25 +244,6 @@ func TestWisDev_SpecializedHandlers(t *testing.T) {
 		assertBadRequestCode(t, mux, http.MethodPost, "/full-paper/control", encodeJSON(t, map[string]any{"jobId": "missing", "action": "invalid"}), ErrInvalidParameters)
 		assertBadRequestCode(t, mux, http.MethodPost, "/full-paper/sandbox-action", encodeJSON(t, map[string]any{"jobId": "job1"}), ErrInvalidParameters)
 
-		assertBadRequestCode(t, mux, http.MethodPost, "/drafting/outline", []byte(`{bad`), ErrBadRequest)
-		assertBadRequestCode(t, mux, http.MethodPost, "/drafting/outline", encodeJSON(t, map[string]any{"documentId": "", "title": ""}), ErrInvalidParameters)
-		assertBadRequestCode(t, mux, http.MethodPost, "/drafting/section", []byte(`{bad`), ErrBadRequest)
-		assertBadRequestCode(t, mux, http.MethodPost, "/drafting/section", encodeJSON(t, map[string]any{"documentId": "doc"}), ErrInvalidParameters)
-
-		for _, documentID := range []string{"doc-trace-outline", "doc-trace-section"} {
-			require.NoError(t, gw.StateStore.PersistFullPaperMutation(documentID, map[string]any{
-				"jobId":  documentID,
-				"userId": "u1",
-				"status": "running",
-				"workspace": map[string]any{
-					"drafting": map[string]any{
-						"sections":           map[string]any{},
-						"sectionArtifactIds": []string{},
-						"claimPacketIds":     []string{},
-					},
-				},
-			}, wisdev.RuntimeJournalEntry{}))
-		}
 		require.NoError(t, gw.StateStore.PersistFullPaperMutation("job-owned-spec", map[string]any{
 			"jobId":     "job-owned-spec",
 			"userId":    "u1",
@@ -278,134 +259,6 @@ func TestWisDev_SpecializedHandlers(t *testing.T) {
 		mux.ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 		assertAPIErrorCode(t, rec.Body.Bytes(), ErrUnauthorized)
-
-		rec = httptest.NewRecorder()
-		req = httptest.NewRequest(http.MethodPost, "/drafting/outline", bytes.NewReader(encodeJSON(t, map[string]any{
-			"documentId": "doc-trace-outline",
-			"title":      "Trace Outline",
-		})))
-		req = req.WithContext(context.WithValue(req.Context(), contextKey("user_id"), "u2"))
-		mux.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusForbidden, rec.Code)
-		assertAPIErrorCode(t, rec.Body.Bytes(), ErrUnauthorized)
-
-		rec = httptest.NewRecorder()
-		req = httptest.NewRequest(http.MethodPost, "/drafting/outline", bytes.NewReader(encodeJSON(t, map[string]any{
-			"documentId": "missing-draft-doc",
-			"title":      "Missing Draft",
-		})))
-		req = req.WithContext(context.WithValue(req.Context(), contextKey("user_id"), "u1"))
-		mux.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusNotFound, rec.Code)
-		assertAPIErrorCode(t, rec.Body.Bytes(), ErrNotFound)
-
-		rec = httptest.NewRecorder()
-		req = httptest.NewRequest(http.MethodPost, "/drafting/outline", bytes.NewReader(encodeJSON(t, map[string]any{
-			"documentId": "doc-trace-outline",
-			"title":      "Trace Outline",
-			"traceId":    "trace-drafting-outline-1",
-		})))
-		req = req.WithContext(context.WithValue(req.Context(), contextKey("user_id"), "u1"))
-		mux.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusOK, rec.Code)
-		assert.Equal(t, "trace-drafting-outline-1", rec.Header().Get("X-Trace-Id"))
-		outlinePayload := decodeJSONMap(t, rec.Body.Bytes())
-		assert.Equal(t, "trace-drafting-outline-1", outlinePayload["traceId"])
-
-		rec = httptest.NewRecorder()
-		req = httptest.NewRequest(http.MethodPost, "/drafting/outline", bytes.NewReader(encodeJSON(t, map[string]any{
-			"documentId": "doc-trace-outline",
-			"title":      "Trace Outline",
-			"traceId":    "trace-drafting-outline-2",
-		})))
-		req = req.WithContext(context.WithValue(req.Context(), contextKey("user_id"), "u1"))
-		mux.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusOK, rec.Code)
-		assert.Equal(t, "trace-drafting-outline-1", rec.Header().Get("X-Trace-Id"))
-		cachedOutlinePayload := decodeJSONMap(t, rec.Body.Bytes())
-		assert.Equal(t, "trace-drafting-outline-1", cachedOutlinePayload["traceId"])
-
-		rec = httptest.NewRecorder()
-		req = httptest.NewRequest(http.MethodPost, "/drafting/outline", bytes.NewReader(encodeJSON(t, map[string]any{
-			"documentId": "doc-trace-outline",
-			"title":      "Trace Outline Revised",
-			"traceId":    "trace-drafting-outline-3",
-		})))
-		req = req.WithContext(context.WithValue(req.Context(), contextKey("user_id"), "u1"))
-		mux.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusOK, rec.Code)
-		assert.Equal(t, "trace-drafting-outline-3", rec.Header().Get("X-Trace-Id"))
-		changedOutlinePayload := decodeJSONMap(t, rec.Body.Bytes())
-		assert.Equal(t, "trace-drafting-outline-3", changedOutlinePayload["traceId"])
-
-		rec = httptest.NewRecorder()
-		req = httptest.NewRequest(http.MethodPost, "/drafting/section", bytes.NewReader(encodeJSON(t, map[string]any{
-			"documentId":   "doc-trace-section",
-			"sectionId":    "intro",
-			"sectionTitle": "Introduction",
-			"trace_id":     "trace-drafting-section-legacy-1",
-		})))
-		req = req.WithContext(context.WithValue(req.Context(), contextKey("user_id"), "u1"))
-		mux.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusOK, rec.Code)
-		assert.Equal(t, "trace-drafting-section-legacy-1", rec.Header().Get("X-Trace-Id"))
-		sectionPayload := decodeJSONMap(t, rec.Body.Bytes())
-		assert.Equal(t, "trace-drafting-section-legacy-1", sectionPayload["traceId"])
-
-		versionedJobID := "doc-versioned-outline"
-		require.NoError(t, gw.StateStore.PersistFullPaperMutation(versionedJobID, map[string]any{
-			"jobId":     versionedJobID,
-			"userId":    "u1",
-			"status":    "running",
-			"workspace": map[string]any{"drafting": map[string]any{}},
-		}, wisdev.RuntimeJournalEntry{}))
-		versionedJob, err := gw.StateStore.LoadFullPaperJob(versionedJobID)
-		require.NoError(t, err)
-		expectedOutlineUpdatedAt := wisdev.IntValue64(versionedJob["updatedAt"])
-		require.NotZero(t, expectedOutlineUpdatedAt)
-
-		sendVersionedOutline := func(title string, traceID string) *httptest.ResponseRecorder {
-			req := httptest.NewRequest(http.MethodPost, "/drafting/outline", bytes.NewReader(encodeJSON(t, map[string]any{
-				"documentId":        versionedJobID,
-				"title":             title,
-				"expectedUpdatedAt": expectedOutlineUpdatedAt,
-				"traceId":           traceID,
-			})))
-			req = req.WithContext(context.WithValue(req.Context(), contextKey("user_id"), "u1"))
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
-			return rec
-		}
-
-		rec = sendVersionedOutline("Versioned Outline", "trace-versioned-outline-1")
-		assert.Equal(t, http.StatusOK, rec.Code)
-		assert.Equal(t, "trace-versioned-outline-1", rec.Header().Get("X-Trace-Id"))
-
-		rec = sendVersionedOutline("Versioned Outline", "trace-versioned-outline-2")
-		assert.Equal(t, http.StatusOK, rec.Code)
-		assert.Equal(t, "trace-versioned-outline-1", rec.Header().Get("X-Trace-Id"))
-
-		rec = sendVersionedOutline("Versioned Outline Changed", "trace-versioned-outline-3")
-		assert.Equal(t, http.StatusConflict, rec.Code)
-		assertAPIErrorCode(t, rec.Body.Bytes(), ErrInvalidParameters)
-
-		terminalJobID := "job_terminal_spec"
-		require.NoError(t, gw.StateStore.PersistFullPaperMutation(terminalJobID, map[string]any{
-			"jobId":     terminalJobID,
-			"userId":    "u1",
-			"status":    "completed",
-			"updatedAt": time.Now().UnixMilli(),
-			"workspace": map[string]any{"drafting": map[string]any{}},
-		}, wisdev.RuntimeJournalEntry{}))
-		req = httptest.NewRequest(http.MethodPost, "/drafting/outline", bytes.NewReader(encodeJSON(t, map[string]any{
-			"documentId": terminalJobID,
-			"title":      "Draft title",
-		})))
-		req = req.WithContext(context.WithValue(req.Context(), contextKey("user_id"), "u1"))
-		rec = httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusConflict, rec.Code)
-		assertAPIErrorCode(t, rec.Body.Bytes(), ErrInvalidParameters)
 	})
 
 	t.Run("session initialization and questioning lifecycle", func(t *testing.T) {

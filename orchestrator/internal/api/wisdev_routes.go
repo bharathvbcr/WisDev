@@ -104,7 +104,6 @@ func RegisterWisDevRoutes(mux *http.ServeMux, agentGateway *wisdev.AgentGateway,
 	s.registerResearchRoutes(mux, agentGateway)
 	s.registerObserveRoutes(mux, agentGateway)
 	s.registerContractRoutes(mux, agentGateway)
-	s.registerDraftingRoutes(mux, agentGateway)
 	s.registerFullPaperRoutes(mux, agentGateway)
 	s.registerHealthRoutes(mux, agentGateway)
 	s.registerEvidenceRoutes(mux, agentGateway)

@@ -22,6 +22,8 @@ change and include the generated artifacts.
 
 - Put agent orchestration, planning, search fan-out, RAG, evidence handling,
   policy, API handlers, and CLI behavior in `orchestrator/`.
+- Put headless document generation (`internal/docgen`, `internal/citations`) in
+  `orchestrator/` — DocGen is Go-owned, not browser or sidecar orchestration.
 - Put optional ML, LLM, embedding, and document worker logic in `sidecar/`.
 - Do not add Rust to this open-source project.
 - Keep private app integrations behind `adapters/`; do not make them part of

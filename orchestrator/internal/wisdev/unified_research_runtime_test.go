@@ -1001,7 +1001,7 @@ func TestFinalizeLoopResultWithVerifierKeepsBaseResultWhenRevisionIsCancelled(t 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var events []PlanExecutionEvent
-	err := rt.finalizeLoopResultWithVerifier(ctx, LoopRequest{Query: "sleep memory", MaxIterations: 1, MaxSearchTerms: 1}, state, loopResult, nil, func(event PlanExecutionEvent) {
+	err := rt.finalizeLoopResultWithVerifier(ctx, LoopRequest{Query: "sleep memory", MaxIterations: 1, MaxSearchTerms: 1}, state, loopResult, nil, nil, func(event PlanExecutionEvent) {
 		events = append(events, event)
 	})
 	if err != nil {

@@ -125,6 +125,7 @@ func NewRouter(cfg ServerConfig) http.Handler {
 		citationGrounder = NewCitationGrounder(search.NewSemanticScholarProvider())
 	}
 	synthesisHandler := NewSynthesisHandler(cfg.LLMClient, citationGrounder)
+	relevanceHandler := NewRelevanceHandler(cfg.LLMClient) // Go-owned LLM relevance scoring (Priority-5)
 	llmHandler := NewLLMHandler(cfg.LLMClient)
 
 	healthHandler := NewHealthHandler(cfg.LLMClient)
@@ -142,6 +143,9 @@ func NewRouter(cfg ServerConfig) http.Handler {
 	// 0. Operational Endpoints
 	RegisterRuntimeManifestRoutes(mux, cfg.LLMClient)
 	RegisterPaperclipIntegrationRoutes(mux)
+	RegisterProviderDOIRoutes(mux)
+	RegisterProviderEnrichmentRoutes(mux)
+	RegisterSearchDecisionRoutes(mux)
 	mux.HandleFunc("/healthz", healthHandler.Liveness)
 	mux.HandleFunc("/readiness", healthHandler.Readiness)
 	mux.Handle("/metrics", telemetry.MetricsHandler())
@@ -161,6 +165,7 @@ func NewRouter(cfg ServerConfig) http.Handler {
 
 	// 2. Paper Insight Routes
 	mux.HandleFunc("/paper/extract-pdf", paperHandler.HandleExtractPDF)
+	mux.HandleFunc("/paper/full-text/resolve", paperHandler.HandleResolveFullText)
 	mux.HandleFunc("/paper/profile", paperHandler.HandleProfile)
 	mux.HandleFunc("/export/markdown", paperHandler.HandleExportMarkdown)
 	mux.HandleFunc("/export/html", paperHandler.HandleExportHTML)
@@ -175,10 +180,15 @@ func NewRouter(cfg ServerConfig) http.Handler {
 	mux.HandleFunc("/search/hybrid", searchHandler.HandleHybridSearch)
 	mux.HandleFunc("/search/opensearch-hybrid", HandleOpenSearchHybrid)
 	mux.HandleFunc("/search/batch", searchHandler.HandleBatchSearch)
+	mux.HandleFunc("/search/quick-mode", searchHandler.HandleQuickModeSearch)
 	mux.HandleFunc("/search/tools", searchHandler.HandleSearchTools)
 	mux.HandleFunc("/search/tool", searchHandler.HandleToolSearch)
+	mux.HandleFunc("/search/plan", NewSearchPlanHandler(cfg.LLMClient).Handle)
 	mux.HandleFunc("/expand/aggressive", searchHandler.HandleAggressiveExpansion)
 	mux.HandleFunc("/expand/splade", searchHandler.HandleSPLADEExpansion)
+	mux.HandleFunc("/expand/intent", NewQueryIntentHandler(cfg.LLMClient).Handle)
+	mux.HandleFunc("/expand/query-policy", (&QueryPolicyHandler{}).Handle)
+	mux.HandleFunc("/provider/citations", searchHandler.HandleCitations)
 
 	// 4. Full Paper Endpoints (Managed by RegisterWisDevRoutes)
 
@@ -187,6 +197,8 @@ func NewRouter(cfg ServerConfig) http.Handler {
 
 	// 4b. Analysis & Synthesis Endpoints
 	mux.HandleFunc("/analysis", analysisHandler.HandleAnalysis)
+	RegisterResearchHypothesisRoutes(mux, cfg.LLMClient, cfg.DB)
+	mux.HandleFunc("/api/relevance", relevanceHandler.Handle)
 	mux.HandleFunc("/synthesis", synthesisHandler.HandleSynthesis)
 	mux.HandleFunc("/generate", llmHandler.HandleGenerate)
 	mux.HandleFunc("/llm/embed", llmHandler.HandleEmbed)

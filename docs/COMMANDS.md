@@ -23,10 +23,9 @@ A bare question is treated as `search`: `wisdev "your question"` ≡ `wisdev sea
 |---------|---------|--------------|
 | `search` / `run` | `ask` | Local research over built-in providers, then synthesize a cited answer |
 | `max` | — | **Maximum-depth research** — forces unleashed budgets, long-form, 12 iterations, wide search |
-| `docgen` | `docugen` | **Search + DocuGen** — retrieve grounded papers, then generate a full manuscript draft (sections, visuals, peer review, references) |
+| `docgen` | `docugen` | **Search + DocuGen** — retrieve grounded papers, then generate a ScholarDoc document (`report`, `litreview`, or `fullpaper`) |
 | `yolo` | — | Same research engine with full flag control (`--local` default, or `--remote`) |
 | `tui` | `ui` | Interactive terminal UI for local research |
-| `demo` | — | Scripted hackathon demo sequence |
 | `serve` | — | Start the HTTP orchestrator (port from `$PORT`, default 8081) |
 | `mcp` | — | MCP stdio server (academic search tools for IDE agents) |
 | `mcp-config` | `setup` | Generate an MCP client config (e.g. `.cursor/mcp.json`) |
@@ -71,17 +70,28 @@ Any flag you add overrides the preset, e.g. `wisdev max --provider pubmed "…"`
 wisdev docgen "your topic"
 wisdev docgen --offline "your topic"
 wisdev docgen -o paper.md --provider pubmed,arxiv "your topic"
-wisdev docgen --words 4000 --min-citations 20 --flow introduction,methods,results,discussion "your topic"
+wisdev docgen --intent report --citation-style ieee --offline "clinical RAG"
+wisdev docgen --intent litreview --format html "graph neural networks"
+wisdev docgen --intent fullpaper --words 4000 --min-citations 20 --flow introduction,methods,results,discussion "your topic"
+wisdev docgen --format docx -o paper.docx "your topic"
+wisdev docgen --corpus-file papers.json --intent fullpaper "your topic"
 ```
 
 A one-shot **search + document generation** command. It runs the local research
-loop to gather grounded papers, then drives the manuscript pipeline (the same
-engine behind the `/full-paper` HTTP route) to produce a grounded manuscript
-draft: ordered sections (Abstract → Conclusion), grounded visuals, a peer-review
-critique, and a reference list. Section prose is enriched by the Python sidecar
-when one is reachable (`PYTHON_SIDECAR_HTTP_URL` / `--python-url`) and falls back
-to grounded scaffolds otherwise, so `--offline` produces a structured draft with
-no network access.
+loop to gather grounded papers, then dispatches through `internal/docgen` by
+**intent**:
+
+| Intent | `--intent` | Engine | Output |
+|--------|------------|--------|--------|
+| `fullpaper` (default) | `fullpaper` | `ManuscriptPipeline` — plan, draft, review, fact-check, peer review, references | Full grounded manuscript with sections, visuals, critique block |
+| `report` | `report` | Quick Report synthesis (ported from ScholarDoc) | Thematic overview: Executive Summary, Thematic Analysis, Conclusion |
+| `litreview` | `litreview` | Literature-review synthesis with grounded citations | Thematic review: Introduction, Analysis, Gaps, Conclusion |
+
+All intents share citation-style-aware rendering via `internal/citations` (seven
+styles). Section prose for `fullpaper` is enriched by the Python sidecar when
+reachable (`PYTHON_SIDECAR_HTTP_URL` / `--python-url`) and falls back to grounded
+scaffolds otherwise, so `--offline` produces a structured draft with no network access.
+Report and litreview also emit offline scaffolds when no LLM backend is available.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -100,18 +110,33 @@ no network access.
 | `--hits-per-search` | 5 | Results requested per provider query |
 | `--max-unique-papers` | 24 | Cap on papers fed into the manuscript |
 | `--no-enhance` | false | Disable AI query grammar/typo/acronym preparation |
-| `-f`, `--format` | from `-o`, else markdown | Output format: `markdown` \| `latex` \| `json` |
+| `-f`, `--format` | from `-o`, else markdown | Output format: `markdown` \| `latex` \| `html` \| `docx` \| `json` |
+| `--intent` | fullpaper | Document type: `report` \| `litreview` \| `fullpaper` |
+| `--citation-style` | apa | Bibliography citation style: `apa` \| `mla` \| `chicago` \| `vancouver` \| `ieee` \| `harvard` \| `nature` |
 | `--words` | 0 (model default) | Target total word count, split across sections |
-| `--min-citations` | 0 | Minimum distinct sources to cite (also raises the retrieval floor) |
+| `--min-citations` | auto 10 (0 for `--corpus-file` replays) | Minimum distinct sources to cite (also raises the retrieval floor) |
 | `--flow` | default plan | Comma-separated section flow, e.g. `introduction,methods,results,discussion`. Known ids reuse tuned briefs; unknown ids become generic synthesis sections |
 | `--review-rounds` | 2 | Max rounds of the agentic generate→review→revise loop (early-exits on convergence; max 5) |
-| `--genre` | narrative literature review | Manuscript genre, e.g. `research paper` (controls voice + how the reviewer grades it) |
+| `--genre` | narrative literature review | Manuscript genre for `fullpaper`, e.g. `research paper` (controls voice + how the reviewer grades it) |
+| `--corpus-dump` | — | After retrieval, write papers as JSON for reproducible re-runs |
+| `--corpus-file` | — | Replay papers from a corpus dump instead of live retrieval |
+| `--all-references` | off (on for `--corpus-file`) | List every retrieved source in the bibliography, not only in-text-cited ones |
+
+> **JSON output:** `fullpaper` + `--json` emits the raw `ManuscriptPipelineResult`;
+> `report` / `litreview` + `--json` emit the canonical `Document` envelope.
+>
+> **DOCX:** requires `pandoc` on PATH. MCP `wisdevGenerateManuscript` does not support
+> `docx` (text-based tool); use the CLI for DOCX export.
 
 > Section drafting runs an **agentic generate → review → revise loop**: each round
 > re-reviews the draft and rewrites the sections the review flagged (re-grounding and
 > re-verifying), stopping as soon as a round makes no changes.
 >
 > Manuscript prose minimizes em-dashes (`—`) — enforced by both the writer prompt and a deterministic post-process.
+>
+> The progress spinner streams live pipeline stages (planning, drafting, review
+> round *n*, fact-check, rendering) so long runs never look stalled; `-o` prints
+> the saved manuscript's absolute path when done.
 
 ---
 
@@ -149,10 +174,12 @@ wisdev yolo --remote --url http://localhost:8081 "question"
 | `--no-enhance` | false | Disable AI query grammar/typo/acronym preparation |
 | `--long-form` | false | Add extended Introduction + Background sections |
 | `--docgen` | false | After research, also generate a grounded manuscript from the retrieved papers (same engine as `wisdev docgen`; local mode only) |
-| `--doc-format` | markdown | Manuscript format when `--docgen` is set: `markdown` \| `latex` \| `json` |
-| `--doc-output` | stdout | Write the generated manuscript to this file (implies `--docgen`) |
+| `--doc-format` | markdown | Manuscript format when `--docgen` is set: `markdown` \| `latex` \| `html` \| `docx` \| `json` |
+| `--doc-intent` | fullpaper | Document type when `--docgen` is set: `report` \| `litreview` \| `fullpaper` |
+| `--doc-citation-style` | apa | Bibliography citation style when `--docgen` is set |
+| `--doc-output` | auto `manuscript-<topic>-<timestamp>.<ext>` (stdout for `--json`) | Write the generated manuscript to this file (implies `--docgen`); the saved absolute path is printed |
 | `--doc-words` | 0 | Target total word count for the `--docgen` manuscript |
-| `--doc-min-citations` | 0 | Minimum distinct sources the `--docgen` manuscript should cite (also raises the research paper floor) |
+| `--doc-min-citations` | auto 10 | Minimum distinct sources the `--docgen` manuscript should cite (also raises the research paper floor) |
 | `--doc-flow` | default plan | Comma-separated section flow for `--docgen`, e.g. `introduction,methods,results,discussion` |
 | `--doc-review-rounds` | 2 | Max rounds of the agentic generate→review→revise loop for `--docgen` (max 5) |
 | `--doc-genre` | narrative literature review | Manuscript genre for `--docgen`, e.g. `research paper` |
@@ -166,14 +193,12 @@ wisdev yolo --remote --url http://localhost:8081 "question"
 
 ```
 wisdev tui
-wisdev tui --demo
 wisdev tui --query "question" --autostart
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--offline` | false | Run without network providers |
-| `--demo` | false | Prefill the demo query (implies `--offline`) |
 | `--autostart` | false | Start research immediately when a query is set |
 | `--query` | — | Pre-fill the research question |
 | `--output` | — | Save results to this markdown file (also `s` in results) |
@@ -193,21 +218,12 @@ wisdev tui --query "question" --autostart
 `Ctrl+W` delete word · `Ctrl+V` paste · `Ctrl+O` recent saved runs ·
 `Esc Esc` exit.
 
+**DocGen settings (when setting #7 is focused and enabled):** `i` cycle intent
+(`fullpaper` / `report` / `litreview`) · `f` cycle format (`markdown` / `latex` /
+`html` / `json`) · `c` cycle citation style (`apa` / `mla` / `chicago` / `vancouver` /
+`ieee` / `harvard` / `nature`). The manuscript is saved as `{export-stem}-manuscript.{ext}`.
+
 ---
-
-## `demo`
-
-```
-wisdev demo [--offline]
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--offline` | false | Run the offline smoke instead of live search |
-| `--provider` | `defaultRunProviders` | Providers for the live demo |
-| `--skip-doctor` | false | Skip the doctor preflight scene |
-| `--query` | demo query | Research question for the YOLO scene |
-| `--json` | false | Emit a JSON report |
 
 ## `serve`
 
@@ -330,6 +346,10 @@ wisdev max "therapeutic strategies targeting tau aggregation in Alzheimer's"
 # Targeted providers, long-form, watch the stages
 wisdev yolo --local --provider pubmed,clinicaltrials --long-form --stages \
   --max-iterations 8 "GLP-1 agonists and cardiovascular outcomes"
+
+# Research + document generation in one run
+wisdev yolo --docgen --doc-intent report --doc-citation-style ieee "clinical RAG"
+wisdev docgen --intent litreview --format html --offline "graph neural networks"
 
 # Interactive
 wisdev tui --biomedical

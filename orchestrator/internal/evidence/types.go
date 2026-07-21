@@ -17,6 +17,7 @@ type CanonicalCitationRecord struct {
 	Year                 int          `json:"year,omitempty"`
 	Abstract             string       `json:"abstract,omitempty"`
 	LandingURL           string       `json:"landingUrl,omitempty"`
+	CitationCount        int          `json:"citationCount,omitempty"`
 	Resolved             bool         `json:"resolved"`
 	ResolutionEngine     string       `json:"resolutionEngine"`
 	ResolutionConfidence float64      `json:"resolutionConfidence"`
@@ -58,13 +59,15 @@ type QuantitativeClaim struct {
 }
 
 type VisualEvidence struct {
-	VisualID          string   `json:"visualId"`
-	SourceCanonicalID string   `json:"sourceCanonicalId,omitempty"`
-	Kind              string   `json:"kind"`
-	Title             string   `json:"title,omitempty"`
-	Caption           string   `json:"caption,omitempty"`
-	Locator           string   `json:"locator,omitempty"`
-	SourcePacketIDs   []string `json:"sourcePacketIds,omitempty"`
+	VisualID          string     `json:"visualId"`
+	SourceCanonicalID string     `json:"sourceCanonicalId,omitempty"`
+	Kind              string     `json:"kind"`
+	Title             string     `json:"title,omitempty"`
+	Caption           string     `json:"caption,omitempty"`
+	Locator           string     `json:"locator,omitempty"`
+	Headers           []string   `json:"headers,omitempty"`
+	Rows              [][]string `json:"rows,omitempty"`
+	SourcePacketIDs   []string   `json:"sourcePacketIds,omitempty"`
 }
 
 type ManuscriptSourceCluster struct {

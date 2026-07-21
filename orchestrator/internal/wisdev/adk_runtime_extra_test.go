@@ -13,11 +13,11 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
-	"google.golang.org/adk/agent"
-	adkmemory "google.golang.org/adk/memory"
-	"google.golang.org/adk/model"
-	adksession "google.golang.org/adk/session"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/agent"
+	adkmemory "google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/model"
+	adksession "google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 	"google.golang.org/genai"
 )
 
@@ -44,7 +44,10 @@ func (m *mockADKAgent) SubAgents() []agent.Agent {
 }
 
 type mockADKToolContext struct {
-	context.Context
+	// StrictContextMock supplies the full unified agent.Context surface
+	// (ADK v2 merged ToolContext/CallbackContext); the explicit methods
+	// below override only what these tests exercise.
+	agent.StrictContextMock
 	actions adksession.EventActions
 }
 
@@ -220,7 +223,7 @@ func TestADKRuntime_Metadata(t *testing.T) {
 	assert.Equal(t, "initializing", meta["status"])
 	assert.Equal(t, 5, meta["toolCount"])
 	assert.Equal(t, "google-adk-go", meta["framework"])
-	assert.Equal(t, "google.golang.org/adk", meta["canonicalWrapper"])
+	assert.Equal(t, "google.golang.org/adk/v2", meta["canonicalWrapper"])
 	assert.Equal(t, "adk_primary_direct_executor_fallback_only", meta["executionPolicy"])
 	directExecutor, ok := meta["directExecutor"].(map[string]any)
 	if assert.True(t, ok) {
@@ -250,7 +253,7 @@ func TestADKToolExecutionContextPreservesCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	got := adkToolExecutionContext(&mockADKToolContext{Context: ctx})
+	got := adkToolExecutionContext(&mockADKToolContext{StrictContextMock: agent.StrictContextMock{Ctx: ctx}})
 	assert.ErrorIs(t, got.Err(), context.Canceled)
 
 	fallback := adkToolExecutionContext(nil)
@@ -258,7 +261,7 @@ func TestADKToolExecutionContextPreservesCancellation(t *testing.T) {
 }
 
 func TestPlanEventFromADKEventMapsNativeToolConfirmation(t *testing.T) {
-	event := adksession.NewEvent("inv-confirm")
+	event := adksession.NewEvent(t.Context(), "inv-confirm")
 	event.Author = "wisdev-workflow"
 	event.Actions.RequestedToolConfirmations = map[string]toolconfirmation.ToolConfirmation{
 		"call-1": {
@@ -304,7 +307,7 @@ func TestPlanEventFromADKEventMapsNativeToolConfirmation(t *testing.T) {
 	assert.Equal(t, "call-1", got.Payload["adkOriginalFunctionCallId"])
 	assert.Equal(t, "research.retrievePapers", got.Payload["action"])
 	assert.Equal(t, "sleep memory", got.Payload["query"])
-	assert.Equal(t, "google.golang.org/adk", got.Payload["adkRuntime"])
+	assert.Equal(t, "google.golang.org/adk/v2", got.Payload["adkRuntime"])
 	assert.Equal(t, "inv-confirm", got.Payload["adkInvocationId"])
 }
 

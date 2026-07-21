@@ -55,12 +55,26 @@ func (a *ArXivProvider) Search(ctx context.Context, query string, opts SearchOpt
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
+	if shouldSkipArXivQuery(query) {
+		a.RecordSuccess()
+		return []Paper{}, nil
+	}
+
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = 10
 	}
 
-	searchQuery := query
+	searchQuery := buildArXivSearchQuery(query)
+	if searchQuery == "" {
+		searchQuery = strings.TrimSpace(query)
+	}
+	if searchQuery != strings.TrimSpace(query) {
+		logProviderSearchStage(ctx, "provider_query_normalized", a.Name(), query, opts,
+			"result", "normalized",
+			"provider_query_preview", queryPreview(searchQuery),
+		)
+	}
 	// arXiv supports date-range filtering via submittedDate Lucene field.
 	// Format: submittedDate:[YYYYMMDDHHMMSS TO YYYYMMDDHHMMSS]
 	// We pass it as part of the search_query parameter (will be URL-encoded).
@@ -101,6 +115,12 @@ func (a *ArXivProvider) Search(ctx context.Context, query string, opts SearchOpt
 
 	var papers []Paper
 	for _, entry := range feed.Entries {
+		title := collapseWhitespace(entry.Title)
+		abstract := collapseWhitespace(entry.Summary)
+		if !isRelevantProviderSearchText(query, title, abstract, "") {
+			continue
+		}
+
 		pdfLink := ""
 		for _, link := range entry.Links {
 			if link.Type == "application/pdf" || link.Title == "pdf" {
@@ -130,8 +150,8 @@ func (a *ArXivProvider) Search(ctx context.Context, query string, opts SearchOpt
 
 		papers = append(papers, Paper{
 			ID:            "arxiv:" + arxivID,
-			Title:         collapseWhitespace(entry.Title),
-			Abstract:      collapseWhitespace(entry.Summary),
+			Title:         title,
+			Abstract:      abstract,
 			Link:          pdfLink,
 			Source:        "arxiv",
 			SourceApis:    []string{"arxiv"},
@@ -142,6 +162,7 @@ func (a *ArXivProvider) Search(ctx context.Context, query string, opts SearchOpt
 			PdfUrl:        pdfLink,
 		})
 	}
+	logArXivFilterApplied(ctx, query, opts, len(feed.Entries), len(papers))
 
 	a.RecordSuccess()
 
@@ -162,6 +183,44 @@ func (a *ArXivProvider) Search(ctx context.Context, query string, opts SearchOpt
 	}
 
 	return papers, nil
+}
+
+func buildArXivSearchQuery(query string) string {
+	terms := significantSemanticScholarQueryTerms(query)
+	if len(terms) < 2 {
+		return strings.TrimSpace(query)
+	}
+	return strings.Join(terms, " ")
+}
+
+func logArXivFilterApplied(ctx context.Context, query string, opts SearchOpts, rawCount int, keptCount int) {
+	if rawCount <= keptCount {
+		return
+	}
+	logProviderSearchStage(ctx, "provider_result_filter_applied", "arxiv", query, opts,
+		"result", "filtered",
+		"raw_result_count", rawCount,
+		"kept_count", keptCount,
+		"filtered_count", rawCount-keptCount,
+	)
+}
+
+func shouldSkipArXivQuery(query string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(query))
+	if normalized == "" {
+		return true
+	}
+	if strings.Contains(normalized, "arxiv") {
+		return false
+	}
+	hasDOI := strings.Contains(normalized, "doi:") || strings.Contains(normalized, "10.")
+	if !hasDOI {
+		return false
+	}
+	return strings.Contains(normalized, "reference") ||
+		strings.Contains(normalized, "citation") ||
+		strings.Contains(normalized, "lookup") ||
+		strings.Contains(normalized, "metadata")
 }
 
 func extractArXivID(rawURL string) string {

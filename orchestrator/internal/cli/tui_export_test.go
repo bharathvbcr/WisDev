@@ -94,7 +94,13 @@ func TestDefaultTUIResultFile(t *testing.T) {
 }
 
 func TestSaveTUIResultDefaultsToResultsFolder(t *testing.T) {
-	dir := t.TempDir()
+	dir, err := os.MkdirTemp("", "wisdev-tui-export")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eval, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = eval
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)

@@ -190,7 +190,7 @@ func (r *ToolRegistry) registerDefaults() {
 		ExecutionTarget:    ExecutionTargetPythonCapability,
 		Parallelizable:     false,
 		EstimatedCostCents: 2,
-		ParameterSchema:    json.RawMessage(`{"type":"object","properties":{"records_identified":{"type":"integer"},"records_screened":{"type":"integer"},"full_text_assessed":{"type":"integer"},"studies_included":{"type":"integer"}}}`),
+		ParameterSchema:    json.RawMessage(`{"type":"object","properties":{"identified":{"type":"integer"},"duplicatesRemoved":{"type":"integer"},"screened":{"type":"integer"},"excluded":{"type":"integer"},"fullTextAssessed":{"type":"integer"},"fullTextExcluded":{"type":"integer"},"included":{"type":"integer"}}}`),
 	})
 	r.Register(ToolDefinition{
 		Name:               "research.snowballCitations",

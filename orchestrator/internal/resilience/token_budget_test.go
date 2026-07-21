@@ -150,6 +150,47 @@ func TestTokenBudgetRemainingBranches(t *testing.T) {
 	})
 }
 
+func TestTokenBudgetConsumeUsage(t *testing.T) {
+	t.Run("consume within budget", func(t *testing.T) {
+		tb := NewTokenBudget("req-consume", "user", 1000)
+		exhausted := tb.ConsumeUsage("research_pass", 400)
+		assert.False(t, exhausted)
+		assert.Equal(t, 400, tb.Usage())
+		assert.False(t, tb.Exceeded())
+	})
+
+	t.Run("consume clamps at allocation and flags exhaustion", func(t *testing.T) {
+		tb := NewTokenBudget("req-consume", "user", 1000)
+		exhausted := tb.ConsumeUsage("research_pass", 1500)
+		assert.True(t, exhausted)
+		assert.Equal(t, 1000, tb.Usage())
+		assert.Equal(t, 0, tb.Remaining())
+		assert.True(t, tb.Exceeded())
+	})
+
+	t.Run("negative usage is ignored", func(t *testing.T) {
+		tb := NewTokenBudget("req-consume", "user", 1000)
+		assert.False(t, tb.ConsumeUsage("research_pass", -50))
+		assert.Equal(t, 0, tb.Usage())
+	})
+}
+
+func TestTokenBudgetAllocated(t *testing.T) {
+	tb := NewTokenBudget("req-alloc", "user", 750)
+	assert.Equal(t, 750, tb.Allocated())
+}
+
+func TestBudgetAwareAgentLoopBudgetAccessorAndExceededGate(t *testing.T) {
+	tb := NewTokenBudget("req-loop", "user", 1000)
+	loop := NewBudgetAwareAgentLoop(tb, 5, 100)
+	assert.Same(t, tb, loop.Budget())
+	assert.True(t, loop.CanIterate())
+
+	tb.ConsumeUsage("research_pass", 2000)
+	assert.False(t, loop.CanIterate())
+	assert.True(t, loop.ReachedBudgetLimit())
+}
+
 func TestTokenBudgetUsageRatioEdges(t *testing.T) {
 	t.Run("zero allocation is safe", func(t *testing.T) {
 		tb := NewTokenBudget("req-zero", "user", 0)

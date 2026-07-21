@@ -7,8 +7,9 @@ import (
 	"strings"
 	"time"
 
-	adktool "google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	adktool "google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
@@ -17,7 +18,7 @@ import (
 // ADK ↔ MCP bridge — Function-tool wrappers
 //
 // Uses the canonical ADK Go API:
-//   functiontool.New(functiontool.Config{Name, Description}, func(adktool.Context, In) (Out, error))
+//   functiontool.New(functiontool.Config{Name, Description}, func(agent.Context, In) (Out, error))
 // ──────────────────────────────────────────────
 
 // MCPADKBridge holds ADK function-tool wrappers backed by the MCPServer.
@@ -111,7 +112,7 @@ func (b *MCPADKBridge) searchPapersTool() adktool.Tool {
 	tool, _ := functiontool.New(functiontool.Config{
 		Name:        MCPToolSearchPapers,
 		Description: "Search academic papers across 15+ providers (OpenAlex, arXiv, Semantic Scholar, PubMed, Europe PMC, Crossref, DBLP). Returns ranked papers with metadata.",
-	}, func(toolCtx adktool.Context, in adkSearchPapersInput) (adkSearchPapersOutput, error) {
+	}, func(toolCtx agent.Context, in adkSearchPapersInput) (adkSearchPapersOutput, error) {
 		ctx := adkCtxToContext(toolCtx)
 		if strings.TrimSpace(in.Query) == "" {
 			return adkSearchPapersOutput{}, fmt.Errorf("query is required")
@@ -181,7 +182,7 @@ func (b *MCPADKBridge) paperLookupTool() adktool.Tool {
 	tool, _ := functiontool.New(functiontool.Config{
 		Name:        MCPToolPaperLookup,
 		Description: "Fetch full metadata for a single paper by its ID (arXiv ID, DOI, or Semantic Scholar ID).",
-	}, func(toolCtx adktool.Context, in adkPaperLookupInput) (adkPaperLookupOutput, error) {
+	}, func(toolCtx agent.Context, in adkPaperLookupInput) (adkPaperLookupOutput, error) {
 		ctx := adkCtxToContext(toolCtx)
 		if strings.TrimSpace(in.PaperID) == "" {
 			return adkPaperLookupOutput{}, fmt.Errorf("paperId is required")
@@ -225,7 +226,7 @@ func (b *MCPADKBridge) evidenceSearchTool() adktool.Tool {
 	tool, _ := functiontool.New(functiontool.Config{
 		Name:        MCPToolEvidenceSearch,
 		Description: "Find supporting or contradicting evidence for a specific claim or hypothesis.",
-	}, func(toolCtx adktool.Context, in adkEvidenceSearchInput) (adkEvidenceSearchOutput, error) {
+	}, func(toolCtx agent.Context, in adkEvidenceSearchInput) (adkEvidenceSearchOutput, error) {
 		ctx := adkCtxToContext(toolCtx)
 		if strings.TrimSpace(in.Claim) == "" {
 			return adkEvidenceSearchOutput{}, fmt.Errorf("claim is required")
@@ -279,7 +280,7 @@ func (b *MCPADKBridge) authorSearchTool() adktool.Tool {
 	tool, _ := functiontool.New(functiontool.Config{
 		Name:        MCPToolAuthorSearch,
 		Description: "Retrieve papers by a specific author using their provider-specific author ID.",
-	}, func(toolCtx adktool.Context, in adkAuthorSearchInput) (adkAuthorSearchOutput, error) {
+	}, func(toolCtx agent.Context, in adkAuthorSearchInput) (adkAuthorSearchOutput, error) {
 		ctx := adkCtxToContext(toolCtx)
 		if strings.TrimSpace(in.AuthorID) == "" {
 			return adkAuthorSearchOutput{}, fmt.Errorf("authorId is required")
@@ -313,7 +314,7 @@ func (b *MCPADKBridge) authorSearchTool() adktool.Tool {
 // Context helper
 // ──────────────────────────────────────────────
 
-func adkCtxToContext(toolCtx adktool.Context) context.Context {
+func adkCtxToContext(toolCtx agent.Context) context.Context {
 	if toolCtx == nil {
 		return context.Background()
 	}

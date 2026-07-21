@@ -1,9 +1,13 @@
 package wisdev
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"time"
+
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
 
 const (
@@ -29,29 +33,44 @@ type ResearchBudgetUsage struct {
 }
 
 type ResearchDurableJobState struct {
-	JobID                       string                     `json:"jobId"`
-	SessionID                   string                     `json:"sessionId"`
-	Query                       string                     `json:"query"`
-	Domain                      string                     `json:"domain,omitempty"`
-	Plane                       ResearchExecutionPlane     `json:"plane"`
-	Mode                        string                     `json:"mode,omitempty"`
-	Required                    bool                       `json:"required"`
-	Status                      string                     `json:"status"`
-	Storage                     string                     `json:"storage"`
-	Replayable                  bool                       `json:"replayable"`
-	ResumeSupported             bool                       `json:"resumeSupported"`
-	CancellationSupported       bool                       `json:"cancellationSupported"`
-	ResumeToken                 string                     `json:"resumeToken,omitempty"`
-	StartedAt                   int64                      `json:"startedAt"`
-	UpdatedAt                   int64                      `json:"updatedAt"`
-	Budget                      *ResearchBudgetDecision    `json:"budget,omitempty"`
-	BudgetUsed                  ResearchBudgetUsage        `json:"budgetUsed"`
-	ReasoningRuntime            map[string]any             `json:"reasoningRuntime,omitempty"`
-	Tasks                       []ResearchDurableTaskState `json:"tasks,omitempty"`
-	StopReason                  string                     `json:"stopReason,omitempty"`
-	FailureReason               string                     `json:"failureReason,omitempty"`
-	DisableProgrammaticPlanning bool                       `json:"disableProgrammaticPlanning,omitempty"`
-	DisableHypothesisGeneration bool                       `json:"disableHypothesisGeneration,omitempty"`
+	JobID                       string                         `json:"jobId"`
+	SessionID                   string                         `json:"sessionId"`
+	Query                       string                         `json:"query"`
+	Domain                      string                         `json:"domain,omitempty"`
+	Plane                       ResearchExecutionPlane         `json:"plane"`
+	Mode                        string                         `json:"mode,omitempty"`
+	Required                    bool                           `json:"required"`
+	Status                      string                         `json:"status"`
+	Storage                     string                         `json:"storage"`
+	Replayable                  bool                           `json:"replayable"`
+	ResumeSupported             bool                           `json:"resumeSupported"`
+	CancellationSupported       bool                           `json:"cancellationSupported"`
+	ResumeToken                 string                         `json:"resumeToken,omitempty"`
+	StartedAt                   int64                          `json:"startedAt"`
+	UpdatedAt                   int64                          `json:"updatedAt"`
+	Budget                      *ResearchBudgetDecision        `json:"budget,omitempty"`
+	BudgetUsed                  ResearchBudgetUsage            `json:"budgetUsed"`
+	ReasoningRuntime            map[string]any                 `json:"reasoningRuntime,omitempty"`
+	Tasks                       []ResearchDurableTaskState     `json:"tasks,omitempty"`
+	StopReason                  string                         `json:"stopReason,omitempty"`
+	FailureReason               string                         `json:"failureReason,omitempty"`
+	DisableProgrammaticPlanning bool                           `json:"disableProgrammaticPlanning,omitempty"`
+	DisableHypothesisGeneration bool                           `json:"disableHypothesisGeneration,omitempty"`
+	SourceSummaries             []ResearchDurableSourceSummary `json:"sourceSummaries,omitempty"`
+	// AttachedSourcesUsed is how many of the user's uploaded/connected papers
+	// reached the research output, for provenance display.
+	AttachedSourcesUsed int `json:"attachedSourcesUsed,omitempty"`
+}
+
+type ResearchDurableSourceSummary struct {
+	SourceIDHash string `json:"sourceIdHash,omitempty"`
+	// Attached marks a summary as a user-provided (uploaded or connected) source.
+	Attached                 bool     `json:"attached,omitempty"`
+	AuthorNames              []string `json:"authorNames,omitempty"`
+	CitationCount            int      `json:"citationCount,omitempty"`
+	InfluentialCitationCount int      `json:"influentialCitationCount,omitempty"`
+	Year                     int      `json:"year,omitempty"`
+	SourceApis               []string `json:"sourceApis,omitempty"`
 }
 
 func (rt *UnifiedResearchRuntime) WithDurableResearchState(store *RuntimeStateStore, journal *RuntimeJournal) *UnifiedResearchRuntime {
@@ -166,6 +185,8 @@ func updateResearchDurableJobBudget(job *ResearchDurableJobState, state *Researc
 	if loopResult != nil {
 		job.BudgetUsed.ExecutedQueries = len(loopResult.ExecutedQueries)
 		job.BudgetUsed.Papers = len(loopResult.Papers)
+		job.SourceSummaries = researchDurableSourceSummaries(loopResult.Papers, 5)
+		job.AttachedSourcesUsed = CountAttachedSourcesUsed(loopResult.Papers)
 		if loopResult.GapAnalysis != nil {
 			job.BudgetUsed.OpenLedgerCount = countOpenCoverageLedgerEntries(loopResult.GapAnalysis.Ledger)
 		}
@@ -174,6 +195,87 @@ func updateResearchDurableJobBudget(job *ResearchDurableJobState, state *Researc
 		job.BudgetUsed.Exhausted = job.Budget.SearchTermBudget > 0 && job.BudgetUsed.ExecutedQueries >= job.Budget.SearchTermBudget && job.BudgetUsed.OpenLedgerCount > 0
 	}
 	job.UpdatedAt = time.Now().UnixMilli()
+}
+
+func researchDurableSourceSummaries(papers []search.Paper, limit int) []ResearchDurableSourceSummary {
+	if len(papers) == 0 || limit <= 0 {
+		return nil
+	}
+	out := make([]ResearchDurableSourceSummary, 0, limit)
+	seen := map[string]struct{}{}
+	for _, paper := range papers {
+		sourceIDHash := researchDurableSourceHash(paper)
+		if sourceIDHash == "" {
+			continue
+		}
+		if _, exists := seen[sourceIDHash]; exists {
+			continue
+		}
+		seen[sourceIDHash] = struct{}{}
+		summary := ResearchDurableSourceSummary{
+			SourceIDHash:             sourceIDHash,
+			Attached:                 IsAttachedSourceProvenance(paper.Source, paper.SourceApis),
+			AuthorNames:              researchDurableSourceStrings(paper.Authors, 3),
+			CitationCount:            nonNegativeResearchDurableInt(paper.CitationCount),
+			InfluentialCitationCount: nonNegativeResearchDurableInt(paper.InfluentialCitationCount),
+			Year:                     nonNegativeResearchDurableInt(paper.Year),
+			SourceApis:               researchDurableSourceStrings(append([]string{paper.Source}, paper.SourceApis...), 4),
+		}
+		if !summary.Attached && len(summary.AuthorNames) == 0 && summary.CitationCount == 0 && summary.InfluentialCitationCount == 0 && summary.Year == 0 && len(summary.SourceApis) == 0 {
+			continue
+		}
+		out = append(out, summary)
+		if len(out) >= limit {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func researchDurableSourceHash(paper search.Paper) string {
+	seed := firstNonEmpty(paper.DOI, paper.ID, paper.ArxivID, paper.Link, paper.Title)
+	if seed == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(seed))))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+func researchDurableSourceStrings(values []string, limit int) []string {
+	if len(values) == 0 || limit <= 0 {
+		return nil
+	}
+	out := make([]string, 0, minInt(len(values), limit))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		cleaned := strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+		if cleaned == "" {
+			continue
+		}
+		key := strings.ToLower(cleaned)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, cleaned)
+		if len(out) >= limit {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func nonNegativeResearchDurableInt(value int) int {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 func completeResearchDurableJob(job *ResearchDurableJobState, state *ResearchSessionState, loopResult *LoopResult) {
@@ -206,6 +308,18 @@ func failResearchDurableJob(job *ResearchDurableJobState, err error, cancelled b
 		job.FailureReason = err.Error()
 	}
 	job.UpdatedAt = time.Now().UnixMilli()
+}
+
+func failResearchDurableJobWithLoopResult(job *ResearchDurableJobState, state *ResearchSessionState, loopResult *LoopResult, err error, cancelled bool) {
+	updateResearchDurableJobBudget(job, state, loopResult)
+	failResearchDurableJob(job, err, cancelled)
+}
+
+func researchDurableJobFailureEventType(cancelled bool) string {
+	if cancelled {
+		return "research_job_cancelled"
+	}
+	return "research_job_failed"
 }
 
 func researchDurableJobPayload(job *ResearchDurableJobState) map[string]any {

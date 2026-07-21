@@ -21,8 +21,8 @@ def service():
 async def test_gemini_select_model(service):
     assert service._select_model(0.1, 0.1) == "light"
     assert service._select_model(0.5, 0.5) == "balanced"
-    assert service._select_model(0.9, 0.9) == "heavy"
-    assert service._select_model(0.1, 0.1, strict_domain=True) == "heavy"
+    assert service._select_model(0.9, 0.9) == "balanced"
+    assert service._select_model(0.1, 0.1, strict_domain=True) == "balanced"
     assert service._select_model(0.4, 0.35, remaining_budget_ratio=0.1) == "light"
     assert service._select_model(0.2, 0.2, historical_reward=0.1) == "balanced"
     assert service._select_model(0.5, strategy=ModelSelectionStrategy.ALWAYS_LIGHT) == "light"

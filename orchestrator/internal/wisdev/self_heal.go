@@ -8,9 +8,9 @@ import (
 	"log/slog"
 	"strings"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
 	llmv1 "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm"
@@ -71,11 +71,11 @@ func (sh *SelfHealer) executeWithADKRunner(ctx context.Context, sessionID string
 		Run: func(invocation agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				result, runErr := sh.executeDirect(invocation, sessionID, step)
-				event := session.NewEvent(invocation.InvocationID())
+				event := session.NewEvent(invocation, invocation.InvocationID())
 				event.Author = agentName
 				event.Content = genai.NewContentFromText("WisDev self-heal execution completed.", genai.RoleModel)
 				event.Actions.StateDelta["selfHealResult"] = ensureExecutionResultMap(result)
-				event.Actions.StateDelta["adkRuntime"] = "google.golang.org/adk"
+				event.Actions.StateDelta["adkRuntime"] = "google.golang.org/adk/v2"
 				event.Actions.StateDelta["adkRunnerExecuted"] = true
 				event.Actions.StateDelta["adkSubAgent"] = agentName
 				if runErr != nil {
@@ -163,7 +163,7 @@ func (sh *SelfHealer) executeWithADKRunner(ctx context.Context, sessionID string
 	result["adkRunnerExecuted"] = true
 	result["adkInvocationId"] = invocationID
 	result["adkEventAuthor"] = eventAuthor
-	result["adkRuntime"] = "google.golang.org/adk"
+	result["adkRuntime"] = "google.golang.org/adk/v2"
 	result["resultOrigin"] = "adk_self_heal"
 	result["resultFusionIntent"] = "self_heal_result_fusion"
 	if runErrorText != "" {

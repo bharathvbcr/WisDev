@@ -12,16 +12,108 @@ Registered with absolute paths (like ``agent_router``) in main.py.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import structlog
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from routers.route_logging import log_route_stage
 from services.manuscript_llm import manuscript_llm
+
+# All drafting/review/coordination/fact-check calls go through ``manuscript_llm()``
+# so a configured local model (Ollama / any OpenAI-compatible server) can serve them
+# instead of Gemini/Vertex — see services/manuscript_llm.py. The selector returns the
+# gemini_service singleton by default, so tests patch services.gemini_service directly.
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
+
+# _VOICE_GUIDANCE is the shared POSITIVE readability directive used by every
+# content-producing endpoint (generate / refine / revise / abstract). The prompts
+# were previously almost entirely prohibitions ("NEVER", "do NOT", "CRITICAL"),
+# which pushed the model into stilted, defensive, claim-by-claim prose with a
+# citation tacked after every clause — exactly the "reads unnatural / robotic"
+# complaint reviewers raised about the generated PDFs. This block tells the writer
+# how prose SHOULD read (flowing, human-expert voice) and — crucially — how to
+# reconcile "cite as many distinct sources as possible" with natural flow: cite
+# BROADLY across the section but INTEGRATE the markers smoothly (one grouped
+# [n][m] per synthesized sentence, not one after every clause). Breadth of
+# citation and readability are complementary, not opposed.
+_VOICE_GUIDANCE = (
+    "VOICE & READABILITY: Write flowing, publication-quality academic prose in the confident, "
+    "measured voice of a human domain expert — the kind of writing found in a strong review "
+    "article, not a bulleted evidence dump. Open each paragraph with a topic sentence that states "
+    "an idea, then develop it; vary sentence length and structure; use connective transitions "
+    "(\"building on this\", \"in contrast\", \"a competing line of work\") so the argument reads as a "
+    "continuous narrative rather than a list of findings. Synthesize sources into claims IN YOUR OWN "
+    "WORDS instead of paraphrasing each packet in turn. INTEGRATE CITATIONS SMOOTHLY: attribute in "
+    "the prose (\"Busch et al. report\", \"several groups find\") and place the bracketed marker(s) at "
+    "the end of the clause or sentence they support, grouping multiple sources on one synthesized "
+    "sentence as [3][7][9] rather than fragmenting the sentence to attach a marker after every few "
+    "words. Citing broadly and reading naturally are BOTH required — achieve breadth through synthesis, "
+    "not through choppy one-source-per-sentence prose."
+)
+
+# _STYLE_EXEMPLAR pairs the abstract voice rules above with one concrete
+# before/after demonstration. Models imitate exemplars far more reliably than
+# they follow prohibitions, so this converts "avoid robotic prose" from an
+# instruction into a pattern. Kept generic (invented sources/numbers with
+# placeholder [n] markers) so it never leaks topical content into a manuscript.
+_STYLE_EXEMPLAR = (
+    "STYLE EXEMPLAR — the same evidence written two ways. NEVER write like the first; ALWAYS write "
+    "like the second.\n"
+    "Mechanical (wrong): \"One study found that retrieval improves accuracy [1]. Another study found "
+    "that retrieval reduces hallucination [2]. A third study found latency increased [3]. These "
+    "findings show retrieval is promising.\"\n"
+    "Natural (right): \"Across the reviewed evaluations, grounding generation in retrieved evidence "
+    "consistently improves factual accuracy and curbs hallucination [1][2], though this reliability "
+    "comes at a cost: the added retrieval step measurably increases response latency [3]. The "
+    "trade-off recurs throughout the literature and frames much of the subsequent design work.\"\n"
+    "Note what the natural version does: it states an idea first, groups corroborating sources on one "
+    "synthesized sentence, names the tension explicitly, and ends by connecting to the larger argument."
+)
+
+# Bracketed [n] in prior-section context uses that section's local packet list. Strip
+# those markers before showing drafted text to a later section so the model cannot
+# copy foreign indices as if they were global bibliography numbers.
+_PRIOR_SECTION_CITATION_PATTERN = re.compile(
+    r"\[\s*\d+(?:\s*[,;|]\s*\d+)*\s*\]|\[\s*evp_[^\]]+\]",
+    re.IGNORECASE,
+)
+_SECTION_LOCAL_CITATION_DIRECTIVE = (
+    "CITATION NUMBERING: bracketed [n] refers ONLY to the numbered claim-packet list "
+    "in THIS request (1 = first packet below). Numbers appearing in sections already "
+    "drafted above are NOT global reference numbers — cite ONLY using this section's "
+    "packet list."
+)
+
+
+def _strip_prior_section_citations(text: str) -> str:
+    """Replace prior-section citation markers with a neutral placeholder."""
+    if not text.strip():
+        return text
+    return _PRIOR_SECTION_CITATION_PATTERN.sub("(cited)", text)
+
+
+def _custom_instructions_block(custom_instructions: str) -> str:
+    """Render the caller's free-text custom instructions as a high-priority directive
+    block, or "" when none were supplied. These are user-authored steering instructions
+    (tone, emphasis, audience, terminology, things to include/avoid) and take precedence
+    over stylistic defaults — but NEVER over the grounding/attribution/no-fabrication
+    rules, which are non-negotiable (a user cannot instruct the writer to invent evidence)."""
+    text = (custom_instructions or "").strip()
+    if not text:
+        return ""
+    # Cap so a pathological paste cannot dominate the prompt / blow the budget.
+    text = text[:2000]
+    return (
+        "\n\nUSER CUSTOM INSTRUCTIONS (author-supplied; follow these for tone, emphasis, audience, "
+        "terminology, and structure — they OVERRIDE the default style guidance below, but NOT the "
+        "grounding, attribution, and no-fabrication rules, which always hold):\n"
+        f"{text}"
+    )
 
 # Section drafting is a background pipeline step, not an interactive request:
 # give the sidecar a full-length first attempt plus retry headroom. Full-length
@@ -29,7 +121,7 @@ logger = structlog.get_logger(__name__)
 # Section drafting runs at MAX reasoning with an uncapped (model-max) output
 # budget; latency is the sidecar's hard ceiling (90s, the clamp max).
 _SECTION_LATENCY_BUDGET_MS = 90_000
-_MAX_CLAIM_PACKETS = 40
+_MAX_CLAIM_PACKETS = 80
 _MAX_SNIPPETS_PER_PACKET = 3
 _MAX_SNIPPET_CHARS = 400
 _MAX_SECTION_TOKENS = 65536
@@ -61,6 +153,15 @@ class SectionGenerateRequest(BaseModel):
     # Optional minimum number of distinct sources the manuscript should cite (docGen
     # "minCitations"). >0 adds a breadth directive to the writer prompt.
     min_citations: int = Field(0, alias="minCitations", ge=0)
+    # Optional free-text author steering (tone, audience, emphasis, terminology,
+    # structure). Threaded from the Go pipeline's CustomInstructions. Overrides the
+    # default style guidance but never the grounding/attribution/no-fabrication rules.
+    custom_instructions: str = Field("", alias="customInstructions")
+    # Closing passage of the immediately preceding section, so this section can open
+    # with a natural transition instead of starting cold. Sections were previously
+    # generated independently, which made multi-section documents read like
+    # stitched-together summaries. Optional; empty for the first section.
+    previous_section_ending: str = Field("", alias="previousSectionEnding")
 
 
 class SectionRefineRequest(BaseModel):
@@ -71,6 +172,7 @@ class SectionRefineRequest(BaseModel):
     unresolved_issues: list[str] = Field(default_factory=list, alias="unresolvedIssues")
     claim_packets: list[dict[str, Any]] = Field(default_factory=list, alias="claimPackets")
     max_tokens: int = Field(16384, alias="maxTokens", ge=64, le=_MAX_SECTION_TOKENS)
+    custom_instructions: str = Field("", alias="customInstructions")
 
 
 class SectionReviseRequest(BaseModel):
@@ -83,6 +185,7 @@ class SectionReviseRequest(BaseModel):
     prior_sections: list[dict[str, Any]] = Field(default_factory=list, alias="priorSections")
     review_findings: list[str] = Field(default_factory=list, alias="reviewFindings")
     max_tokens: int = Field(16384, alias="maxTokens", ge=64, le=_MAX_SECTION_TOKENS)
+    custom_instructions: str = Field("", alias="customInstructions")
 
 
 class SectionContentResponse(BaseModel):
@@ -108,6 +211,11 @@ class ManuscriptReviewResponse(BaseModel):
     attribution_issues: list[str] = Field(default_factory=list)
     fabrication_risks: list[str] = Field(default_factory=list)
     redundancy: list[str] = Field(default_factory=list)
+    # Passages that read unnaturally — mechanical citation-after-every-clause,
+    # list-like prose, robotic phrasing, or missing narrative flow. Fed back into the
+    # revise loop so "reads unnatural" (the top reviewer complaint on generated PDFs)
+    # becomes a first-class, correctable finding rather than being invisible.
+    readability_issues: list[str] = Field(default_factory=list)
     recommendations: list[str] = Field(default_factory=list)
 
 
@@ -231,7 +339,7 @@ def _format_prior_sections(prior_sections: list[dict[str, Any]]) -> str:
         if not isinstance(sec, dict):
             continue
         title = str(sec.get("title") or sec.get("section_id") or sec.get("sectionId") or "").strip()
-        text = str(sec.get("text") or sec.get("summary") or "").strip()
+        text = _strip_prior_section_citations(str(sec.get("text") or sec.get("summary") or "").strip())
         if not text:
             continue
         lines.append(f"### {title or 'Section'}\n{text[:700]}")
@@ -246,7 +354,20 @@ def _manuscript_context_block(payload: "SectionGenerateRequest") -> str:
         blocks.append("Full section outline (in order): " + " -> ".join(str(s) for s in payload.section_outline))
     prior = _format_prior_sections(payload.prior_sections)
     if prior:
-        blocks.append("Sections already drafted (build on and cohere with these; do NOT repeat their content):\n" + prior)
+        blocks.append(
+            "Sections already drafted (build on and cohere with these; do NOT repeat their content; "
+            "(cited) placeholders replaced local [n] markers — do NOT copy those numbers):\n"
+            + prior
+        )
+        blocks.append(_SECTION_LOCAL_CITATION_DIRECTIVE)
+    prev_ending = getattr(payload, "previous_section_ending", "").strip()
+    if prev_ending:
+        blocks.append(
+            "FLOW: The immediately preceding section ends with the passage below. Open this section so it "
+            "reads as a natural continuation of that ending — pick up its thread with a connective opening "
+            "rather than a cold restart — WITHOUT repeating or summarizing the passage itself:\n"
+            + prev_ending[:1200]
+        )
     directive = getattr(payload, "ownership_directive", "").strip()
     if directive:
         blocks.append("EXCLUSIVE OWNERSHIP DIRECTIVE (a cross-section editor assigned which section develops which specifics):\n" + directive)
@@ -291,6 +412,7 @@ async def _generate_section_text(prompt: str, max_tokens: int, operation: str) -
     return content
 
 
+@log_route_stage("sidecar.manuscript", "section_generate")
 @router.post("/wisdev/manuscript/section/generate", response_model=SectionContentResponse)
 async def generate_manuscript_section(payload: SectionGenerateRequest) -> SectionContentResponse:
     source_titles = "\n".join(f"- {title}" for title in payload.source_titles[:30])
@@ -304,15 +426,17 @@ async def generate_manuscript_section(payload: SectionGenerateRequest) -> Sectio
         prompt = f"""You are writing the Abstract of a NARRATIVE LITERATURE REVIEW. Summarize the DRAFTED SECTIONS below into a single cohesive abstract.
 
 Research query: {payload.query}
-{context}
+{context}{_custom_instructions_block(payload.custom_instructions)}
 
 Reviewed literature — claim packets you may cite (the ONLY permissible evidence):
 {_format_claim_packets(payload.claim_packets)}
 
+{_VOICE_GUIDANCE}
+
 Instructions:
-1. Write a faithful 150-300 word abstract (one or two short paragraphs) summarizing the drafted sections above: the motivation, what the reviewed literature shows, the key methods and findings synthesized, and the takeaways.
+1. Write a faithful 150-300 word abstract (one or two short paragraphs) summarizing the drafted sections above: the motivation, what the reviewed literature shows, the key methods and findings synthesized, and the takeaways. It should read as fluent connected prose, not a list of one-sentence findings.
 2. Attribute to the literature; do NOT use first-person primary-research voice ("we conducted", "this study proposes").
-3. Ground statements in the claim packets above and cite them by bracketed number [n], drawing on a broad range of distinct sources; do not introduce any claim, statistic, or source beyond them or the drafted sections.
+3. Ground statements in the claim packets above and cite them by bracketed number [n], drawing on a broad range of distinct sources but keeping the abstract readable; do not introduce any claim, statistic, or source beyond them or the drafted sections. {_SECTION_LOCAL_CITATION_DIRECTIVE}
 4. Return only the abstract text — no headings, preamble, or commentary."""
         content = await _generate_section_text(
             prompt, payload.max_tokens, "manuscript_section_generate"
@@ -340,9 +464,14 @@ Instructions:
     )
 
     if payload.min_citations and payload.min_citations > 0:
+        # Phrased as coverage-through-synthesis rather than a per-sentence quota: a hard
+        # quota pushes the writer to sprinkle markers to hit the number, which is the
+        # single biggest source of robotic-sounding prose.
         citation_directive = (
-            f" The overall manuscript must cite at least {payload.min_citations} DISTINCT sources; in this "
-            "section cite as many distinct, relevant sources by their bracketed number [n] as the evidence supports."
+            f" The overall manuscript should draw on at least {payload.min_citations} DISTINCT sources; "
+            "contribute to that breadth by citing each relevant source where its evidence genuinely "
+            "supports a claim — via synthesized, multi-source sentences — never by adding markers to "
+            "meet a count."
         )
     else:
         citation_directive = ""
@@ -351,7 +480,7 @@ Instructions:
 
 Research query: {payload.query}
 
-Section goal: {payload.section_goal}{context}
+Section goal: {payload.section_goal}{context}{_custom_instructions_block(payload.custom_instructions)}
 
 Reviewed literature — claim packets (the ONLY permissible evidence; each is a finding from a published source):
 {_format_claim_packets(payload.claim_packets)}
@@ -359,12 +488,16 @@ Reviewed literature — claim packets (the ONLY permissible evidence; each is a 
 Source titles:
 {source_titles or '- (none provided)'}
 
+{_VOICE_GUIDANCE}
+
+{_STYLE_EXEMPLAR}
+
 Instructions:
 1. {length_directive}
-2. This is a SECONDARY synthesis of others' work. Attribute every finding to the source literature ("prior work shows", "one study reports", "several authors propose"). NEVER claim the described methods, frameworks, datasets, or results as this review's own. Do NOT use first-person primary-research voice: never write "we conducted", "we propose", "this study proposes", "our method", "we evaluated", or "we tested". STYLE: minimize em-dashes (—) — prefer commas, colons, parentheses, or separate sentences; do not use "—" as a connector.
+2. This is a SECONDARY synthesis of others' work. Attribute every finding to the source literature ("prior work shows", "one study reports", "several authors propose"). NEVER claim the described methods, frameworks, datasets, or results as this review's own. Do NOT use first-person primary-research voice: never write "we conducted", "we propose", "this study proposes", "our method", "we evaluated", or "we tested". STYLE: minimize em-dashes (—); prefer commas, colons, parentheses, or separate sentences.
 3. Do NOT fabricate methodology or quantitative substance. Do not claim a meta-analysis, PRISMA process, search protocol, database list, sample size, patient/vignette count, effect size, p-value, or other statistic unless it is explicitly present in a claim packet above — and when it is, attribute it to the specific source that reported it. Do not refer to tables or figures (none are provided).
    CRITICAL genre rule — this review applies NO protocol of its own: when a REVIEWED source used a systematic protocol (PRISMA, MMAT, a registered search) or reports a hard metric (a hallucination rate, latency, accuracy number), name that source as the actor — e.g. "the systematic review by [n] applied PRISMA 2020 to 30 studies", "one study reported a 2.6 s latency [n]" — and NEVER write a sentence in which THIS review appears to apply such a protocol, pool/screen studies, or own such a metric. Likewise, never present a source's taxonomy or framework (e.g. a naïve/advanced/modular categorization) as your own — attribute it to its source [n]. Every quantitative figure must carry the [n] of the single study that reported it.
-4. Ground every substantive statement in the claim packets above; do not invent evidence. Reference each supporting claim by its bracketed number, e.g. [1], at the end of the sentence it supports, using the number shown for that claim packet. Draw on a BROAD range of the provided sources — cite many distinct sources, not just two or three; aim to cite most of the provided claim packets at least once across the section.{citation_directive}
+4. CITE WHERE A CLAIM NEEDS SUPPORT: ground every substantive statement in the claim packets and reference the supporting packet by its bracketed number [n], placed at the end of the clause or sentence it supports — a citation belongs wherever a reader would ask "says who?", not after every clause. Draw on a BROAD range of the provided sources across the section, but achieve that breadth through SYNTHESIS: a sentence that combines findings from several sources should carry them grouped as [2][5][7], and you should NOT chop a paragraph into one-source-per-sentence fragments just to raise the citation count. Prefer one well-attributed synthesized sentence citing three sources over three thin sentences each citing one.{citation_directive} {_SECTION_LOCAL_CITATION_DIRECTIVE}
 5. Note unresolved contradictions between sources explicitly rather than smoothing over them.
 6. Write ONLY this section's distinct contribution. Assume the reader has read the other sections: do NOT re-explain background or definitions that belong elsewhere (e.g. do not re-define what RAG, hallucination, or zero-shot learning are if this is not the Introduction), and do not recycle points another section owns. If this is the Introduction, state the review's guiding questions; if this is the Results, synthesize concrete findings reported across the studies rather than re-describing the approach.
 7. Return only the section text — no headings, preamble, or commentary."""
@@ -381,11 +514,12 @@ Instructions:
     return SectionContentResponse(content=content)
 
 
+@log_route_stage("sidecar.manuscript", "section_refine")
 @router.post("/wisdev/manuscript/section/refine", response_model=SectionContentResponse)
 async def refine_manuscript_section(payload: SectionRefineRequest) -> SectionContentResponse:
     issues = "\n".join(f"- {issue}" for issue in payload.unresolved_issues[:20])
     prompt = f"""You are revising the "{payload.section_id or 'section'}" section of a NARRATIVE LITERATURE REVIEW to resolve reviewer issues. The claim packets are findings from OTHER published papers — the prior literature under review, not work performed by this review.
-
+{_custom_instructions_block(payload.custom_instructions)}
 Current section text:
 {payload.original_content}
 
@@ -395,12 +529,16 @@ Unresolved issues to fix:
 Reviewed literature — claim packets (the ONLY permissible evidence):
 {_format_claim_packets(payload.claim_packets)}
 
+{_VOICE_GUIDANCE}
+
+{_STYLE_EXEMPLAR}
+
 Instructions:
-1. Rewrite the section so each listed issue is addressed.
+1. Rewrite the section so each listed issue is addressed, and so the prose reads as fluent, natural review-article writing rather than a mechanical list of cited findings.
 2. Keep statements grounded in the claim packets; remove or qualify anything unsupported.
 3. Attribute every finding to the source literature; do NOT present reviewed methods, frameworks, or results as this review's own work, and never use first-person primary-research voice ("we conducted", "this study proposes", "our method"). Remove any such phrasing already in the text.
 4. Do NOT fabricate methodology or statistics (meta-analysis, PRISMA, sample sizes, effect sizes, database lists, tables, or figures) that are not present in the claim packets.
-5. Preserve numbered claim references like [1] where the evidence still supports them.
+5. Preserve numbered claim references like [1] where the evidence still supports them, integrating them smoothly (group multiple sources on a synthesized sentence rather than tacking one after every clause).
 6. Preserve the section's full length and depth (AT LEAST 800 words); expand and elaborate rather than condensing or shortening.
 7. Return only the revised section text — no headings, preamble, or commentary."""
     content = await _generate_section_text(
@@ -415,6 +553,7 @@ Instructions:
     return SectionContentResponse(content=content)
 
 
+@log_route_stage("sidecar.manuscript", "section_revise")
 @router.post("/wisdev/manuscript/section/revise", response_model=SectionContentResponse)
 async def revise_manuscript_section(payload: SectionReviseRequest) -> SectionContentResponse:
     """Aggressive, review-guided rewrite: cut cross-section repetition, raise
@@ -426,7 +565,7 @@ async def revise_manuscript_section(payload: SectionReviseRequest) -> SectionCon
     prompt = f"""You are aggressively revising the "{payload.section_id or 'section'}" section of a NARRATIVE LITERATURE REVIEW to raise it toward publishable quality. The claim packets below are findings from OTHER published papers.
 
 Overall thesis: {payload.thesis or '(none stated)'}
-
+{_custom_instructions_block(payload.custom_instructions)}
 Current section text:
 {payload.original_content}
 
@@ -439,12 +578,16 @@ Reviewer findings to fix:
 Reviewed literature — claim packets (the ONLY permissible evidence):
 {_format_claim_packets(payload.claim_packets)}
 
+{_VOICE_GUIDANCE}
+
+{_STYLE_EXEMPLAR}
+
 Instructions:
 1. CUT REPETITION hard: delete sentences that restate ideas already covered here or in the other sections (e.g. re-defining RAG/hallucination/zero-shot, "the field is fragmented", "promising but unvalidated"). Raise information density — every sentence must add something new.
    EXCLUSIVE OWNERSHIP of specifics: if a particular named study, statistic, dataset, or example (e.g. a "89 studies across 29 specialties / MMAT 2018" review, a specific latency or hallucination figure) ALREADY appears verbatim in one of the OTHER drafted sections shown above, do NOT restate it here. Either drop it, or refer to it with a one-clause back-reference that adds a NEW angle ("the same broad survey [n] also notes...") — never re-spell the full statistic in two sections. Each concrete figure/example should be developed in full in exactly ONE section.
 2. STRENGTHEN SYNTHESIS: compare and CONTRAST the cited studies (where they agree, disagree, or differ in method/population/finding) rather than listing them; surface a clear through-line tied to the thesis.
 3. Attribute every finding to the source literature; NEVER use first-person primary-research voice ("we conducted", "this study proposes", "our method").
-4. Keep every claim grounded in the claim packets and cite by bracketed number [n], drawing on a BROAD range of distinct sources.
+4. Keep every claim grounded in the claim packets and cite by bracketed number [n], drawing on a BROAD range of distinct sources. {_SECTION_LOCAL_CITATION_DIRECTIVE}
 5. Do NOT fabricate methodology, statistics, PRISMA, sample sizes, tables, or figures not present in the packets. CRITICAL: this review applies NO protocol of its own — whenever a reviewed source used a systematic protocol (PRISMA, MMAT, a registered search) or reports a hard metric (hallucination rate, latency, accuracy), name that source as the actor ("the systematic review by [n] applied PRISMA...", "one study reported 0% hallucination [n]") and rewrite any sentence in which THIS review appears to apply such a protocol, pool studies, or own such a metric. Attribute every taxonomy/framework and every quantitative figure to the [n] of the study that reported it.
 6. Return only the revised section text — no headings, preamble, or commentary."""
     content = await _generate_section_text(prompt, payload.max_tokens, "manuscript_section_revise_guided")
@@ -457,6 +600,7 @@ Instructions:
     return SectionContentResponse(content=content)
 
 
+@log_route_stage("sidecar.manuscript", "review")
 @router.post("/wisdev/manuscript/review", response_model=ManuscriptReviewResponse)
 async def review_manuscript(payload: ManuscriptReviewRequest) -> ManuscriptReviewResponse:
     """Adversarial LLM peer review of the drafted manuscript: flags misattribution,
@@ -522,8 +666,9 @@ Report as JSON:
 {attribution_rule}
 - fabrication_risks: claimed statistics, methodologies, PRISMA/meta-analysis processes, sample sizes, datasets, tables, or figures asserted but NOT supported by a citation or a listed source.
 - redundancy: ideas or definitions repeated across multiple sections.
+- readability_issues: passages that read UNNATURALLY for a published review — a citation tacked after nearly every clause, list-like or templated prose, robotic/monotone phrasing, choppy one-source-per-sentence runs, or an absence of narrative flow and transitions. Quote or locate the offending passage and say briefly why it reads mechanically. (This is the most common complaint on generated drafts, so surface it honestly even when attribution is fine.)
 - recommendations: concrete, actionable fixes.
-- content_score: a 0.0-1.0 score for how trustworthy, well-attributed, and non-redundant the manuscript reads (1.0 = excellent, 0.0 = unusable). Do not penalize correct, well-cited prose; reserve low scores for genuine attribution/fabrication problems.
+- content_score: a 0.0-1.0 score for how trustworthy, well-attributed, non-redundant, AND naturally readable the manuscript is (1.0 = excellent, 0.0 = unusable). Do not penalize correct, well-cited, fluent prose; lower the score for genuine attribution/fabrication problems and also for prose that reads as a mechanical list of citations rather than natural expert synthesis.
 Keep each list to the most important 5 items; be specific and terse."""
     try:
         result = await manuscript_llm().generate_json(
@@ -618,6 +763,7 @@ def _format_factcheck_packets(claim_packets: list[dict[str, Any]]) -> str:
     return "\n".join(lines) if lines else "(no claim packets provided)"
 
 
+@log_route_stage("sidecar.manuscript", "coordinate")
 @router.post("/wisdev/manuscript/coordinate", response_model=SectionCoordinationResponse)
 async def coordinate_manuscript(payload: SectionCoordinationRequest) -> SectionCoordinationResponse:
     """Concept-level cross-section coordination: assign each salient named statistic,
@@ -682,6 +828,7 @@ Return JSON: assignments:[{{concept_label, owning_section_id, packet_ids, ration
     return result
 
 
+@log_route_stage("sidecar.manuscript", "fact_check")
 @router.post("/wisdev/manuscript/fact-check", response_model=SectionFactCheckResponse)
 async def fact_check_section(payload: SectionFactCheckRequest) -> SectionFactCheckResponse:
     """Strict prose-vs-source entailment check: flag ONLY sentences whose concrete,
@@ -758,7 +905,11 @@ class CoordinatedDedupeRequest(BaseModel):
 
 
 class CoordinatedDedupeSectionOut(BaseModel):
-    section_id: str = Field("", alias="sectionId")
+    # Wire contract is snake_case section_id: the LLM returns it (see prompt),
+    # and both consumers — the Go orchestrator (json:"section_id") and the
+    # Python manuscript engine (rs["section_id"]) — read it that way. No
+    # camelCase alias here, or the id is dropped on parse and mis-serialized.
+    section_id: str = ""
     text: str = ""
 
 
@@ -766,6 +917,7 @@ class CoordinatedDedupeResponse(BaseModel):
     sections: list[CoordinatedDedupeSectionOut] = Field(default_factory=list)
 
 
+@log_route_stage("sidecar.manuscript", "coordinate_dedupe")
 @router.post("/wisdev/manuscript/coordinate-dedupe", response_model=CoordinatedDedupeResponse)
 async def coordinate_dedupe(payload: CoordinatedDedupeRequest) -> CoordinatedDedupeResponse:
     """Whole-manuscript coordinated revision (#9): one pass sees ALL sections at once

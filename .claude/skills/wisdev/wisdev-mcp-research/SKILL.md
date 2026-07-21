@@ -16,16 +16,25 @@ description: "Use when WisDev is wired in as an MCP server and you need to searc
 ## Setup (once)
 
 ```bash
-claude mcp add wisdev -- wisdev mcp
+# Skills (Claude Code + Cursor)
+./scripts/install-skills.sh
+
+# MCP — Cursor (merges into existing mcpServers)
+wisdev setup --write ~/.cursor/mcp.json --binary
+
+# MCP — Claude Code
+claude mcp add wisdev -- "$(command -v wisdev)" mcp
 ```
 
-Or `wisdev setup --write .cursor/mcp.json` for Cursor; see `docs/examples/cursor-mcp.json`. Claude Desktop/Code config:
+Or hand-write config (absolute binary path preferred):
 
 ```json
-{"mcpServers": {"wisdev": {"command": "/absolute/path/to/wisdev-arc/wisdev", "args": ["mcp"]}}}
+{"mcpServers": {"wisdev": {"command": "/absolute/path/to/wisdev", "args": ["mcp", "--provider", "openalex,arxiv"]}}}
 ```
 
 The stdio server keeps stdout protocol-clean; logs go to stderr. Optional flags: `--provider openalex,arxiv`, `--offline`.
+On `initialize`, the server returns routing **instructions** plus prompts
+(`wisdev_literature_search`, `wisdev_evidence_check`, `wisdev_docgen`).
 
 ## Tools
 

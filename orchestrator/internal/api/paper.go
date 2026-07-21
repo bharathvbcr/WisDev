@@ -34,6 +34,9 @@ type PaperHandler struct {
 	pythonBaseURL string
 	httpClient    HTTPClient
 
+	// extractFullTextFromURL is an optional test seam; production uses extractPDFTextFromURL.
+	extractFullTextFromURL func(ctx context.Context, pdfURL string) (string, error)
+
 	paperCountMu            sync.Mutex
 	paperCountCache         map[string]paperCountCacheEntry
 	paperCountBackoffUntil  time.Time
@@ -562,4 +565,99 @@ func (h *PaperHandler) HandleGetNetwork(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+// extractPDFTextFromURL fetches a PDF by URL and extracts its text through the
+// sidecar path, falling back to local extraction when the sidecar is unreachable.
+// Used by /paper/full-text/resolve.
+func (h *PaperHandler) extractPDFTextFromURL(ctx context.Context, pdfURL string) (string, error) {
+	fetchCtx, fetchCancel := paperExternalContext(ctx)
+	defer fetchCancel()
+	fetchReq, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, pdfURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("invalid pdf url: %w", err)
+	}
+	resp, err := h.httpClient.Do(fetchReq)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch pdf: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("pdf fetch returned status %d", resp.StatusCode)
+	}
+	pdfData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read pdf body: %w", err)
+	}
+
+	result, status, pyErr := h.extractPDFViaSidecar(ctx, "paper.pdf", pdfData)
+	if pyErr != nil {
+		if status == 0 {
+			text, fallbackErr := paper.ExtractPDFText(bytes.NewReader(pdfData), int64(len(pdfData)))
+			if fallbackErr != nil {
+				return "", fmt.Errorf("pdf extraction failed: %v (local fallback: %v)", pyErr, fallbackErr)
+			}
+			return text, nil
+		}
+		return "", pyErr
+	}
+	text := firstNonEmptyExtraction(result, "text", "fullText", "full_text")
+	if text == "" {
+		return "", fmt.Errorf("pdf extraction returned no text")
+	}
+	return text, nil
+}
+
+func (h *PaperHandler) extractPDFViaSidecar(ctx context.Context, fileName string, pdfData []byte) (map[string]any, int, error) {
+	pythonURL := h.pythonBaseURL + "/extract-pdf"
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("file", fileName)
+	if err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to build extraction request: %w", err)
+	}
+	if _, err := part.Write(pdfData); err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to build extraction request: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to finalize extraction request: %w", err)
+	}
+
+	pyCtx, pyCancel := paperExternalContext(ctx)
+	defer pyCancel()
+	pyReq, _ := http.NewRequestWithContext(pyCtx, "POST", pythonURL, body)
+	pyReq.Header.Set("Content-Type", writer.FormDataContentType())
+	if key := stackconfig.ResolveInternalServiceKey(); key != "" {
+		pyReq.Header.Set("X-Internal-Service-Key", key)
+	}
+
+	pyResp, pyErr := h.httpClient.Do(pyReq)
+	if pyErr != nil {
+		return nil, 0, pyErr
+	}
+	defer pyResp.Body.Close()
+
+	if pyResp.StatusCode != http.StatusOK {
+		snippetBytes, _ := io.ReadAll(io.LimitReader(pyResp.Body, 512))
+		return nil, pyResp.StatusCode, fmt.Errorf("python sidecar returned status %d: %s", pyResp.StatusCode, strings.TrimSpace(string(snippetBytes)))
+	}
+
+	var result map[string]any
+	if err := json.NewDecoder(pyResp.Body).Decode(&result); err != nil {
+		return nil, pyResp.StatusCode, fmt.Errorf("failed to decode python response: %w", err)
+	}
+	return result, pyResp.StatusCode, nil
+}
+
+func firstNonEmptyExtraction(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := m[key]; ok {
+			if s, ok := v.(string); ok {
+				if trimmed := strings.TrimSpace(s); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+	}
+	return ""
 }

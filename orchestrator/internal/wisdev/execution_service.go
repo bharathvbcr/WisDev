@@ -413,7 +413,7 @@ func executeSessionRun(ctx context.Context, gateway *AgentGateway, sessionID str
 					Payload: map[string]any{
 						"error":             err.Error(),
 						"adkRunnerExecuted": true,
-						"adkRuntime":        "google.golang.org/adk",
+						"adkRuntime":        "google.golang.org/adk/v2",
 					},
 				}
 				select {

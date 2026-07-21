@@ -9,32 +9,31 @@
 [![MCP](https://img.shields.io/badge/MCP-Tool%20Server-purple)](https://modelcontextprotocol.io/)
 
 **Open-source autonomous research agent** — Google ADK + MCP + Gemini on GCP.  
-Built for the [Google for Startups AI Agents Challenge](https://googleforstartupsaiagents.devpost.com/) · Live product: [ScholarLM](https://scholarlm-vbcr.web.app)
+Live product: [ScholarLM](https://scholarlm-vbc.web.app)
 
-WisDev ARC (Agent Research Core) is the open-source WisDev YOLO research agent runtime and the public project identity for this extracted runtime. It is a terminal-first agent stack for planning, executing, and synthesizing evidence-grounded research tasks across academic sources.
+WisDev ARC (Agent Research Core) is the open-source WisDev YOLO research agent runtime and public project identity. It is a high-performance, terminal-first agent stack for planning, executing, and synthesizing evidence-grounded research tasks across academic sources.
 
-### Judge / hackathon quickstart (60 seconds)
+### Quickstart (60 seconds)
 
-```powershell
+```bash
 git clone https://github.com/bharathvbcr/WisDev.git
 cd wisdev-arc
-.\wisdev.cmd check
-.\wisdev.cmd "What evidence supports RAG for scientific literature?"
+make check
+wisdev "What evidence supports RAG for scientific literature?"
 ```
 
-Full submission package: [`docs/hackathon/SUBMISSION.md`](docs/hackathon/SUBMISSION.md) · [Demo script](docs/hackathon/DEMO_SCRIPT.md) · [Architecture](docs/hackathon/ARCHITECTURE.md) · [Judge access](docs/hackathon/JUDGE_ACCESS.md)
+Documentation: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/CLI.md`](docs/CLI.md) · [`docs/MCP_CLIENTS.md`](docs/MCP_CLIENTS.md) · [`docs/COMMANDS.md`](docs/COMMANDS.md)
 
 ```text
-Query -> Plan -> Search -> Analyze -> Synthesize -> Report
+Query -> Plan -> Search -> Analyze -> Synthesize -> Report -> DocGen (optional)
 ```
 
-This repository is the net-new WisDev agent core built for the challenge: a fresh Go + ADK + MCP runtime for autonomous, evidence-grounded research. It is developed in the open and evolves alongside ScholarLM, our prototype research platform, with private parent-app integrations kept behind clean adapter boundaries.
+WisDev ARC is a modular Go + ADK + MCP runtime for autonomous, evidence-grounded research. It evolves alongside ScholarLM with private parent-app integrations kept behind clean adapter boundaries.
 
-The runtime target is Go plus optional Python only:
+The runtime architecture uses Go and optional Python worker services:
 
-- Go owns the agent, API, CLI, orchestration, search, RAG, evidence, policy, persistence, telemetry, and local validation paths.
-- Python is optional and limited to ML, LLM, embedding, PDF, and document-processing primitives.
-- Rust is intentionally excluded from this open-source project.
+- **Go** owns the core agent runtime, API, CLI, orchestration, search registry, RAG pipelines, evidence scoring, policy execution, persistence, telemetry, and local validation.
+- **Python** is optional and handles ML primitives, LLM gateways, embeddings, PDF parsing, and document-processing workers.
 
 ## Contents
 
@@ -43,6 +42,7 @@ The runtime target is Go plus optional Python only:
 - [Install](#install)
 - [Quick Start](#quick-start)
 - [CLI Reference](#cli-reference)
+- [DocGen (ScholarDoc)](#docgen-scholardoc)
 - [Configuration](#configuration)
 - [Search Providers](#search-providers)
 - [Embedding API](#embedding-api)
@@ -101,38 +101,39 @@ WisDev YOLO runs a bounded research loop:
 
 1. Normalize the task and infer research intent.
 2. Plan search terms and evidence targets.
-3. Retrieve papers through selected providers.
-4. Analyze and rank evidence.
-5. Synthesize a provisional answer.
+3. Retrieve papers through selected search providers.
+4. Analyze and rank evidence based on relevance and quality.
+5. Synthesize a provisional answer with inline citations.
 6. Evaluate coverage gaps and contradictions.
-7. Iterate until the budget is exhausted or enough evidence is available.
-8. Emit a final report, trace events, and optional persisted state.
+7. Iterate until target budget is reached or evidence converges.
+8. Emit a final structured report, trace events, and optional persisted state.
 
-`--offline` keeps the loop local and avoids external search providers, which is useful for smoke tests and CI.
+`--offline` keeps execution strictly local with synthetic mock providers, ideal for offline tests and CI.
 
 ## Repository Layout
 
 ```text
-orchestrator/                     Go-owned runtime and API
+orchestrator/                     Go-owned runtime, API, and CLI
 orchestrator/cmd/wisdev/          CLI entrypoint
 orchestrator/cmd/server/          HTTP/gRPC server entrypoint
 orchestrator/pkg/wisdev/          Public Go embedding API
-orchestrator/internal/wisdev/     YOLO, guided planning, execution, memory
-orchestrator/internal/search/     Academic providers, routing, fan-out
-orchestrator/internal/rag/        Retrieval, BM25, RAPTOR, evidence helpers
-orchestrator/internal/evidence/   Citation and evidence utilities
-orchestrator/internal/policy/     Go-local policy and validation
-orchestrator/proto/               Go protobuf contracts
+orchestrator/internal/wisdev/     YOLO agent, guided planning, execution, memory
+orchestrator/internal/search/     Academic provider registry, domain routing, fan-out
+orchestrator/internal/rag/        Retrieval, BM25, RAPTOR, evidence synthesis
+orchestrator/internal/evidence/   Citation scoring and bibliography formatters
+orchestrator/internal/docgen/     ScholarDoc document generator (report, litreview, fullpaper)
+orchestrator/internal/policy/     Go-local policy gates and budget enforcement
+orchestrator/proto/               Protobuf contracts
 sidecar/                          Optional Python ML/LLM worker
-config/                           Open-source config templates
-adapters/scholarlm/               Private parent-app adapter notes only
-docs/                             Migration status and release checklist
-scripts/                          Local verification helpers
+config/                           Open-source configuration templates
+adapters/scholarlm/               Private parent-app adapter notes
+docs/                             Architecture guides, CLI reference, and migration status
+scripts/                          Build and local verification scripts
 ```
 
 ## Install
 
-One-line install (downloads the latest release binary when available, otherwise builds from source with Go 1.25+):
+One-line installation (downloads the latest release binary or builds from source with Go 1.25+):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bharathvbcr/WisDev/main/scripts/install.sh | bash
@@ -142,7 +143,7 @@ curl -fsSL https://raw.githubusercontent.com/bharathvbcr/WisDev/main/scripts/ins
 irm https://raw.githubusercontent.com/bharathvbcr/WisDev/main/scripts/install.ps1 | iex
 ```
 
-From a checkout, `scripts/install.sh` / `scripts\install.ps1` (or `make install-cli`) do the same with a source-build fallback. Release binaries for linux/macOS/windows (amd64 + arm64) are published from tags by `.github/workflows/release.yml`. Overrides: `WISDEV_VERSION` (tag), `WISDEV_INSTALL_DIR`, `WISDEV_FROM_SOURCE=1`.
+From a checkout, `make install-cli` builds and installs the `wisdev` binary to `$GOPATH/bin`.
 
 Then verify and run:
 
@@ -157,13 +158,18 @@ wisdev "What evidence supports RAG for scientific literature?"
 claude mcp add wisdev -- wisdev mcp
 ```
 
-Exposes search tools (`wisdevSearchPapers`, `wisdevPaperLookup`, `wisdevEvidenceSearch`,
-`wisdevAuthorSearch`) plus **DocGen** (`wisdevGenerateManuscript` — drafts a grounded
-manuscript with `words`, `minCitations`, and `flow` controls). See
-[`docs/MCP_CLIENTS.md`](docs/MCP_CLIENTS.md) for Cursor and Claude Desktop configs.
-MCP stdio keeps stdout protocol-clean; logs go to stderr.
+Exposes search tools (`wisdevSearchPapers`, `wisdevPaperLookup`, `wisdevEvidenceSearch`, `wisdevAuthorSearch`) plus **DocGen** (`wisdevGenerateManuscript` — headless ScholarDoc document generation). See [`docs/MCP_CLIENTS.md`](docs/MCP_CLIENTS.md) for Cursor and Claude Desktop configuration details.
 
 ## Quick Start
+
+### Unix-like Shell
+
+```bash
+cd wisdev-arc
+cp .env.example .env
+make test-all
+make cli-help
+```
 
 ### Windows / PowerShell
 
@@ -177,69 +183,28 @@ copy .env.example .env
 make install-cli
 ```
 
-### Unix-like Shell
+### Run an Offline Local YOLO Smoke
 
 ```bash
-cd wisdev-arc
-cp .env.example .env
-make test-all
-make cli-help
-```
-
-### Run a Local Offline YOLO Smoke
-
-```powershell
-cd wisdev-arc
-.\scripts\verify.ps1 -SmokeLocal
-```
-
-Equivalent direct command:
-
-```powershell
-cd wisdev-arc
 wisdev search --offline --max-iterations 1 "map retrieval augmented research agent evidence"
 ```
 
-### Run the Go Server
+### Run the Orchestrator Server
 
-```powershell
-cd wisdev-arc\orchestrator
+```bash
+cd orchestrator
 go run ./cmd/server
-```
-
-### Call an Already-running Orchestrator
-
-```powershell
-cd wisdev-arc
-.\wisdev.cmd --remote "map the evidence for retrieval augmented research agents"
-```
-
-### Run Local Mode With Selected Providers
-
-```powershell
-wisdev search "map retrieval augmented research agent evidence"
-```
-
-The shorthand above runs the embedded Go agent locally and defaults to
-`openalex,arxiv`, so it replaces the longer form:
-
-```powershell
-cd wisdev-arc
-.\wisdev.cmd "map retrieval augmented research agent evidence"
 ```
 
 ## CLI Reference
 
-Current extracted CLI:
-
 ```text
 wisdev "question"
 wisdev max "question"
-wisdev docgen [--words N] [--min-citations N] [--flow a,b,c] "topic"
-wisdev yolo --docgen [--doc-words N] [--doc-min-citations N] [--doc-flow a,b,c] "question"
+wisdev docgen [--intent report|litreview|fullpaper] [--citation-style apa|mla|…] [--format md|latex|html|docx|json] "topic"
+wisdev yolo --docgen [--doc-intent …] [--doc-citation-style …] [--doc-format …] "question"
 wisdev check
 wisdev tui
-wisdev demo [--offline]
 wisdev mcp
 wisdev setup --write .cursor/mcp.json
 wisdev serve
@@ -247,30 +212,39 @@ wisdev update [--check]
 wisdev guide
 ```
 
-See [`docs/COMMANDS.md`](docs/COMMANDS.md) for the full flag set and [`docs/CLI.md`](docs/CLI.md) for DocGen controls.
+Full CLI reference: [`docs/CLI.md`](docs/CLI.md) and [`docs/COMMANDS.md`](docs/COMMANDS.md).
 
-Full CLI reference: [`docs/CLI.md`](docs/CLI.md).  
-MCP stdio for Cursor, Claude Code, and Codex: [`docs/MCP_CLIENTS.md`](docs/MCP_CLIENTS.md).
+## DocGen (ScholarDoc)
 
-Environment:
+WisDev ARC generates ScholarDoc documents **fully headless** (Go + optional Python sidecar). Three document **intents** share one canonical pipeline (`internal/docgen`):
 
-| Variable | Description | Default |
+| Intent | Flag | What it produces |
 | --- | --- | --- |
-| `WISDEV_ORCHESTRATOR_URL` | HTTP base URL used by non-local CLI mode | `http://127.0.0.1:8081` |
-| `WISDEV_CONFIG` | Agent config path | `config/wisdev.example.yaml` |
-| `SCHOLAR_MODELS_CONFIG` | Canonical ScholarLM model config path | `../scholar_models.json` |
-| `WISDEV_STATE_DIR` | Local state directory | `.wisdev/state` |
-| `WISDEV_JOURNAL_PATH` | Local runtime journal path | `.wisdev/wisdev_journal.jsonl` |
-| `WISDEV_LLM_BASE_URL` | OpenAI-compatible model endpoint | `http://127.0.0.1:11434/v1` |
-| `WISDEV_LLM_MODEL` | Default model ID for local compatible endpoints | `llama3.1` |
-| `WISDEV_LLM_API_KEY` | Optional model API key | empty |
-| `PYTHON_SIDECAR_HTTP_URL` | Optional sidecar HTTP URL | `http://127.0.0.1:8090` |
-| `PYTHON_SIDECAR_GRPC_ADDR` | Optional sidecar gRPC address | `127.0.0.1:50052` |
-| `TEMPORAL_ENABLED` | Optional durable execution backend toggle | `false` |
+| `fullpaper` (default) | `--intent fullpaper` | Grounded manuscript: plan → draft → review → fact-check → references |
+| `report` | `--intent report` | Quick Report — fast thematic synthesis from retrieved papers |
+| `litreview` | `--intent litreview` | Thematic literature review with grounded citations |
+
+**Citation styles:** `apa` (default), `mla`, `chicago`, `vancouver`, `ieee`, `harvard`, `nature`.
+
+**Export formats:** `markdown` (default), `latex`, `html`, `json`, `docx` (CLI only; requires `pandoc` on PATH).
+
+```powershell
+# Quick report, offline scaffold
+wisdev docgen --offline --intent report --citation-style ieee "clinical RAG"
+
+# Literature review as HTML
+wisdev docgen --intent litreview --format html --offline "graph neural networks"
+
+# Full manuscript with citation floor and custom sections
+wisdev docgen --intent fullpaper --min-citations 10 --flow introduction,methods,results,discussion "battery anodes"
+
+# Research + document in one run
+wisdev yolo --docgen --doc-intent fullpaper --doc-citation-style apa "topic"
+```
 
 ## Configuration
 
-Main config template:
+Main config template (`config/wisdev.example.yaml`):
 
 ```yaml
 agent:
@@ -306,13 +280,23 @@ observability:
   redact_prompts: true
 ```
 
-Model tier defaults come from the ScholarLM root `scholar_models.json`.
-When running this nested tree outside the parent checkout, set
-`SCHOLAR_MODELS_CONFIG` to the canonical model config path.
+Environment Variables:
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `WISDEV_ORCHESTRATOR_URL` | HTTP base URL used by non-local CLI mode | `http://127.0.0.1:8081` |
+| `WISDEV_CONFIG` | Agent config path | `config/wisdev.example.yaml` |
+| `WISDEV_STATE_DIR` | Local state directory | `.wisdev/state` |
+| `WISDEV_JOURNAL_PATH` | Local runtime journal path | `.wisdev/wisdev_journal.jsonl` |
+| `WISDEV_LLM_BASE_URL` | OpenAI-compatible model endpoint | `http://127.0.0.1:11434/v1` |
+| `WISDEV_LLM_MODEL` | Default model ID for local compatible endpoints | `llama3.1` |
+| `WISDEV_LLM_API_KEY` | Optional model API key | empty |
+| `PYTHON_SIDECAR_HTTP_URL` | Optional sidecar HTTP URL | `http://127.0.0.1:8090` |
+| `PYTHON_SIDECAR_GRPC_ADDR` | Optional sidecar gRPC address | `127.0.0.1:50052` |
 
 ## Search Providers
 
-The Go orchestrator includes academic search provider implementations and domain routing. Common providers include:
+The Go orchestrator includes academic search provider implementations and domain routing:
 
 | Provider | Domain Fit |
 | --- | --- |
@@ -331,21 +315,15 @@ The Go orchestrator includes academic search provider implementations and domain
 | `nasa_ads` | Astronomy and astrophysics |
 | `papers_with_code` | Machine learning papers and code links |
 
-Local CLI provider selection:
+Select providers via CLI:
 
 ```powershell
-wisdev search "query"
-```
-
-For no-provider smoke tests:
-
-```powershell
-wisdev search --offline "query"
+wisdev search --provider openalex,arxiv "query"
 ```
 
 ## Embedding API
 
-The public Go facade lets downstream applications embed WisDev without importing internal packages:
+The public Go facade (`pkg/wisdev`) allows embedding WisDev into Go applications:
 
 ```go
 package main
@@ -369,77 +347,38 @@ func main() {
 }
 ```
 
-Custom search providers can be injected through `wisdev.WithSearchProviders(myProvider)`.
-
 ## API Surface
 
-The Go server exposes unversioned route families:
+The Go server exposes unversioned HTTP/gRPC route families:
 
 | Route Family | Purpose |
 | --- | --- |
 | `/health`, `/healthz`, `/readiness`, `/metrics` | Health, readiness, Prometheus metrics |
-| `/search/*` | Parallel, hybrid, batch, query expansion, and tool search |
-| `/wisdev/*` | Planning, sessions, guided/yolo execution, research, policy, traces |
-| `/agent/yolo/*` | YOLO execute/status/stream/cancel compatibility surface |
+| `/search/*` | Parallel, hybrid, batch, and query expansion search |
+| `/wisdev/*` | Planning, sessions, guided/yolo execution, policy, traces |
 | `/rag/*` | RAG answer, section context, BM25, RAPTOR, hybrid retrieval |
-| `/paper/*`, `/papers/*` | PDF extraction, paper profile, count, related, network |
-| `/export/*` | Markdown, HTML, LaTeX export helpers |
-| `/full-paper/*`, `/drafting/*`, `/manuscript/*`, `/reviewer/*` | Long-form writing and review helpers |
-| `/vector/*`, `/query/*`, `/summarization/*`, `/source/*`, `/topic-tree/*` | Utility primitives |
-| `/internal/*` | Service-to-service operational hooks |
+| `/paper/*`, `/papers/*` | PDF extraction, paper profile, network mapping |
+| `/export/*` | Markdown, HTML, LaTeX, and DOCX export helpers |
+| `/full-paper/*`, `/drafting/*` | Long-form manuscript writing and review synthesis |
 
-Sidecar route families include:
+Sidecar HTTP/gRPC routes:
 
 | Route Family | Purpose |
 | --- | --- |
 | `/ml/pdf` | PDF text extraction |
 | `/ml/embed` | Embedding generation |
-| `/ml/bm25/*` | Local BM25 helper surface |
 | `/llm/generate`, `/llm/generate/stream` | LLM generation |
-| `/llm/structured-output` | Schema-backed generation |
-| `/llm/embed`, `/llm/embed/batch` | Remote embedding helpers |
-| `/wisdev/deep-agents/*` | Internal sidecar helpers retained for Go-owned orchestration |
-| `gRPC :50052` | LLM service for local/container overlays |
+| `/llm/structured-output` | Schema-backed JSON output |
 
 ## Observability
 
-WisDev emits structured logs and supports OpenTelemetry exporters. Useful trace fields include:
+WisDev emits structured `slog` logs and supports OpenTelemetry trace propagation. Standard log context fields:
 
-- `service`
-- `runtime`
-- `component`
-- `operation`
-- `stage`
-- `trace_id`
-- `request_id`
-- `session_id`
-- `provider`
-- `latency_ms`
-- `result`
-- `error_code`
-
-The default local config keeps OTel disabled. Enable it with config/env once you have a collector available.
+`service`, `runtime`, `component`, `operation`, `stage`, `trace_id`, `request_id`, `session_id`, `provider`, `latency_ms`, `result`, `error_code`.
 
 ## Development
 
-Prerequisites:
-
-| Tool | Purpose |
-| --- | --- |
-| Go 1.25+ | Orchestrator, CLI, tests |
-| Python 3.11+ | Optional sidecar and Python tests |
-| Docker | Optional container validation |
-
-Common commands:
-
-```powershell
-.\scripts\verify.ps1 -StaticRelease
-.\scripts\verify.ps1 -Go
-.\scripts\verify.ps1 -PythonContract
-.\scripts\verify.ps1 -SmokeLocal
-```
-
-Unix-like equivalents:
+Prerequisites: Go 1.25+, Python 3.11+ (optional sidecar).
 
 ```bash
 make test-go
@@ -447,81 +386,48 @@ make test-python-contract
 make smoke-local
 ```
 
-Python sidecar setup:
+PowerShell verification script:
 
 ```powershell
-cd sidecar
-python -m venv .venv
-.\.venv\Scripts\python -m pip install -r requirements.txt
-python -m pytest -q tests/unit/test_stack_contract.py
+.\scripts\verify.ps1 -StaticRelease
+.\scripts\verify.ps1 -Go
+.\scripts\verify.ps1 -PythonContract
 ```
 
-`langextract` is optional. PDF metadata extraction falls back to regex-only behavior when it is absent.
+## GitNexus Index
 
-### GitNexus Index
-
-Initialize or refresh the GitNexus index for this sub-repo:
-
-```powershell
-.\scripts\gitnexus.ps1 index
-.\scripts\gitnexus.ps1 status
-```
-
-On Unix shells with `make`, you can also use:
+Initialize or refresh the local GitNexus code index:
 
 ```bash
 make gitnexus-index
 make gitnexus-status
 ```
 
-Useful lookup:
-
-```powershell
-gitnexus list
-gitnexus context -r wisdev-arc -u "Property:orchestrator/internal/wisdev/workflow_agent.go:WisDevWorkflowAgent.executor"
-```
-
-The index is stored in `.gitnexus/` and refreshed with `.\scripts\gitnexus.ps1 index` after code edits.
-
 ## Docker
 
-Start both services:
+Run orchestrator and sidecar via Docker Compose:
 
 ```bash
 docker compose up --build
 ```
 
-Services:
-
-| Service | Ports | Notes |
-| --- | --- | --- |
-| `orchestrator` | `8081`, `50053` | Go API and internal gRPC |
-| `sidecar` | `8090`, `50052` | Optional Python HTTP/gRPC worker |
-
-Docker contexts have `.dockerignore` files to avoid copying `.env`, journals, caches, credentials, and local build artifacts into images.
-
 ## Release Readiness
 
-Before publishing, run:
+Before tagging or releasing:
 
-```powershell
-.\scripts\verify.ps1 -StaticRelease
-.\scripts\verify.ps1 -Go
-.\scripts\verify.ps1 -PythonContract
-.\scripts\verify.ps1 -SmokeLocal
+```bash
+make test-all
+make smoke-local
 ```
 
-Then follow `docs/RELEASE_CHECKLIST.md`.
-
-Known local-machine limitation in this checkout: Docker validation cannot run unless Docker is installed.
+Refer to [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md) for full release procedures.
 
 ## Compatibility
 
-- `adapters/scholarlm/` is documentation-only for the private parent app boundary.
-- `wisdevSearchPapers` is the canonical MCP tool name; legacy `scholarlmSearchPapers` aliases remain accepted on `tools/call`.
-- Migration provenance is tracked in `docs/MIGRATION_STATUS.md`.
-- Private app integrations, frontend auth assumptions, commerce routes, document-app routes, and Rust gateway code are not part of this open-source runtime.
+- `adapters/scholarlm/` documents private parent-app adapter boundaries.
+- `wisdevSearchPapers` is the canonical MCP tool name; legacy aliases are supported for backwards compatibility.
+- Provenance details are documented in [`docs/MIGRATION_STATUS.md`](docs/MIGRATION_STATUS.md).
 
 ## License
 
-Apache-2.0. See `LICENSE` and `NOTICE`.
+Apache-2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).

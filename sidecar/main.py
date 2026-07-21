@@ -23,6 +23,14 @@ from pathlib import Path
 from typing import Any, AsyncGenerator
 from uuid import uuid4
 
+# ── gRPC log hygiene (MUST precede any grpc / google-cloud import) ────────────
+# The gRPC C-core emits an INFO line ("Other threads are currently calling into
+# gRPC, skipping fork() handlers") on every fork() while channels are open,
+# flooding the sidecar stderr log with thousands of benign lines. Pin the C-core
+# verbosity to ERROR so real failures still surface but the fork chatter does
+# not. setdefault keeps an explicit operator override authoritative.
+os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
+
 # ── Observability bootstrap (MUST precede all other imports that log/trace) ───
 # configure_telemetry() registers the OTel TracerProvider and reconfigures
 # structlog with GCP trace correlation before any request handling begins.
@@ -932,10 +940,28 @@ def _http_bind_port() -> int:
     raw_port = str(
         os.environ.get("PORT", "") or resolve_listen_port("python_sidecar", "http")
     ).strip()
+    if raw_port.lower() in {"", "auto", "0"}:
+        preferred = resolve_listen_port("python_sidecar", "http")
+        return _pick_listen_port(preferred)
     try:
         return int(raw_port)
     except ValueError as exc:
         raise SystemExit(f"Invalid PORT value: {raw_port!r}") from exc
+
+
+def _pick_listen_port(preferred: int) -> int:
+    import socket
+
+    if preferred > 0:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("127.0.0.1", preferred))
+                return preferred
+            except OSError:
+                pass
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 if __name__ == "__main__":

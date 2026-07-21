@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/citations"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/docgen"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/envload"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/telemetry"
@@ -26,6 +28,7 @@ const defaultRunProviders = "openalex,arxiv"
 
 func Run(args []string, stdout, stderr io.Writer) error {
 	envload.LoadDotEnvFiles()
+	ensureDocGenWired()
 	if len(args) == 0 {
 		printUsage(stdout)
 		return nil
@@ -56,6 +59,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return runDocGen(args[1:], stdout, stderr)
 	case "serve":
 		return runServe(stdout, stderr)
+	case "stack":
+		return runStack(args[1:], stdout, stderr)
 	case "mcp":
 		return runMCP(args[1:], stdout, stderr)
 	case "mcp-config":
@@ -64,8 +69,6 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return runDoctor(args[1:], stdout)
 	case "providers":
 		return runProviders(args[1:], stdout)
-	case "demo":
-		return runDemo(args[1:], stdout, stderr)
 	case "tui":
 		return runTUI(args[1:], stdout, stderr)
 	case "update":
@@ -176,7 +179,9 @@ func runYOLO(args []string, stdout, stderr io.Writer) error {
 	longForm := fs.Bool("long-form", false, "synthesize extended Introduction and Background sections")
 	stages := fs.Bool("stages", false, "stream research loop stage events to stderr during local runs")
 	docGen := fs.Bool("docgen", false, "after research, generate a grounded manuscript from the retrieved papers (same engine as `wisdev docgen`)")
-	docFormat := fs.String("doc-format", "markdown", "manuscript format when --docgen is set: markdown|latex|json")
+	docFormat := fs.String("doc-format", "markdown", "manuscript format when --docgen is set: markdown|latex|html|docx|json")
+	docIntent := fs.String("doc-intent", "", "document type when --docgen is set: report|litreview|fullpaper (default: fullpaper)")
+	docCitationStyle := fs.String("doc-citation-style", "", "bibliography citation style when --docgen is set: apa|mla|chicago|vancouver|ieee|harvard|nature (default: apa)")
 	docOutput := fs.String("doc-output", "", "write the generated manuscript to this file instead of stdout (implies --docgen)")
 	docWords := fs.Int("doc-words", 0, "target total word count for the --docgen manuscript (0 = model default)")
 	docMinCitations := fs.Int("doc-min-citations", 0, "minimum distinct sources the --docgen manuscript should cite (0 = no minimum)")
@@ -199,12 +204,43 @@ func runYOLO(args []string, stdout, stderr io.Writer) error {
 	// invalid value fails fast before the research loop runs.
 	withDocGen := *docGen || strings.TrimSpace(*docOutput) != ""
 	resolvedDocFormat := "markdown"
+	resolvedDocIntent := ""
+	resolvedDocStyle := ""
 	if withDocGen {
 		var fmtErr error
 		resolvedDocFormat, fmtErr = resolveDocGenFormat(*docFormat, *docOutput, false)
 		if fmtErr != nil {
 			return fmtErr
 		}
+		parsedDocIntent, intentErr := docgen.ParseIntent(*docIntent)
+		if intentErr != nil {
+			return intentErr
+		}
+		resolvedDocIntent = string(parsedDocIntent)
+		parsedDocStyle, styleErr := citations.ParseStyle(*docCitationStyle)
+		if styleErr != nil {
+			return styleErr
+		}
+		resolvedDocStyle = string(parsedDocStyle)
+	}
+
+	// Smart default: apply a sane citation floor when --docgen is on and the
+	// caller passed no --doc-min-citations. The explicit flag always wins.
+	autoDocMin := false
+	if withDocGen && *docMinCitations == 0 {
+		*docMinCitations = smartDocGenMinCitations
+		autoDocMin = true
+	}
+
+	// Smart default: without --doc-output the manuscript would be appended to the
+	// research report on stdout, where it is easy to lose. Auto-save it to a
+	// slugged filename instead (suppressed for --json, whose payload embeds the
+	// manuscript). --doc-output always wins.
+	docOutputPath := strings.TrimSpace(*docOutput)
+	autoDocOutput := false
+	if withDocGen && docOutputPath == "" && !*jsonOut {
+		docOutputPath = docGenDefaultFilename(task, resolvedDocFormat, time.Now())
+		autoDocOutput = true
 	}
 
 	// Retrieve at least as many papers as the requested docGen citation floor so the
@@ -237,12 +273,16 @@ func runYOLO(args []string, stdout, stderr io.Writer) error {
 			longFormReport:      *longForm,
 			withDocGen:          withDocGen,
 			docFormat:           resolvedDocFormat,
-			docOutputPath:       strings.TrimSpace(*docOutput),
+			docIntent:           resolvedDocIntent,
+			docCitationStyle:    resolvedDocStyle,
+			docOutputPath:       docOutputPath,
 			docTargetWords:      *docWords,
 			docMinCitations:     *docMinCitations,
 			docSectionFlow:      splitCSV(*docFlow),
 			docReviewRounds:     *docReviewRounds,
 			docGenre:            strings.TrimSpace(*docGenre),
+			autoDocMinCitations: autoDocMin,
+			autoDocOutput:       autoDocOutput,
 		})
 	}
 
@@ -317,12 +357,16 @@ type localYOLOOptions struct {
 	longFormReport      bool
 	withDocGen          bool
 	docFormat           string
+	docIntent           string
+	docCitationStyle    string
 	docOutputPath       string
 	docTargetWords      int
 	docMinCitations     int
 	docSectionFlow      []string
 	docReviewRounds     int
 	docGenre            string
+	autoDocMinCitations bool // docMinCitations came from the smart default, not a flag
+	autoDocOutput       bool // docOutputPath was derived (no --doc-output given)
 }
 
 func runLocalYOLO(stdout, stderr io.Writer, opts localYOLOOptions) error {
@@ -341,6 +385,12 @@ func runLocalYOLO(stdout, stderr io.Writer, opts localYOLOOptions) error {
 		}
 		if opts.withDocGen {
 			note(stderr, "  docgen: on (manuscript format: %s)", opts.docFormat)
+			if opts.autoDocOutput {
+				note(stderr, "  docgen output: %s (auto — override with --doc-output)", opts.docOutputPath)
+			}
+			if opts.autoDocMinCitations {
+				note(stderr, "  docgen citations: auto floor of %d distinct sources (override with --doc-min-citations)", opts.docMinCitations)
+			}
 		}
 		if opts.showStages {
 			printSection(stderr, "Stages")
@@ -407,7 +457,7 @@ func runLocalYOLO(stdout, stderr io.Writer, opts localYOLOOptions) error {
 	if opts.withDocGen {
 		ctx2, cancel2 := context.WithTimeout(context.Background(), opts.timeout)
 		defer cancel2()
-		rendered, _, docErr := generateManuscriptFromResearch(ctx2, stderr, opts.task, result, opts.docFormat, "", opts.offline, manuscriptControls{
+		rendered, _, docErr := generateManuscriptFromResearch(ctx2, stderr, opts.task, result, opts.docIntent, opts.docFormat, opts.docCitationStyle, "", opts.offline, manuscriptControls{
 			targetWords:  opts.docTargetWords,
 			minCitations: opts.docMinCitations,
 			sectionFlow:  opts.docSectionFlow,
@@ -446,7 +496,7 @@ func runLocalYOLO(stdout, stderr io.Writer, opts localYOLOOptions) error {
 			if werr := os.WriteFile(opts.docOutputPath, []byte(manuscript), 0o644); werr != nil {
 				return fmt.Errorf("failed to write manuscript to %s: %w", opts.docOutputPath, werr)
 			}
-			note(stderr, "  manuscript (%s) written to %s", opts.docFormat, opts.docOutputPath)
+			note(stderr, "  manuscript (%s) saved → %s", opts.docFormat, absPathOrSelf(opts.docOutputPath))
 		} else {
 			if !opts.quiet {
 				printSection(stderr, "DocuGen manuscript")

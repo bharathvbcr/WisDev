@@ -184,6 +184,184 @@ def _normalize_title(file_name: str) -> str:
     return title
 
 
+def _cell_to_string(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _element_page(element: Any) -> int:
+    try:
+        prov = getattr(element, "prov", None)
+        if not prov:
+            return 0
+        first = prov[0] if isinstance(prov, (list, tuple)) else prov
+        page = getattr(first, "page_no", None)
+        if page is None:
+            page = getattr(first, "page", None)
+        if page is not None:
+            return int(page)
+    except Exception:
+        pass
+    return 0
+
+
+def _table_from_dataframe(df: Any) -> tuple[list[str], list[list[str]]]:
+    headers = [_cell_to_string(col) for col in df.columns.tolist()]
+    rows = [
+        [_cell_to_string(value) for value in row]
+        for row in df.values.tolist()
+    ]
+    return headers, rows
+
+
+def _table_from_grid(data: Any) -> tuple[list[str], list[list[str]]]:
+    if not data:
+        return [], []
+    grid = [
+        [_cell_to_string(cell) for cell in row]
+        for row in data
+        if isinstance(row, (list, tuple))
+    ]
+    if not grid:
+        return [], []
+    if len(grid) == 1:
+        return grid[0], []
+    return grid[0], grid[1:]
+
+
+def _is_docling_table_element(element: Any) -> bool:
+    label = getattr(element, "label", None)
+    elem_type = getattr(element, "type", None) or getattr(element, "element_type", None)
+    label_str = str(label).lower() if label is not None else ""
+    type_str = str(elem_type).lower() if elem_type is not None else ""
+    return "table" in label_str or type_str == "table" or type_str.endswith(".table")
+
+
+def _extract_table_from_docling_element(element: Any) -> dict[str, Any] | None:
+    if not _is_docling_table_element(element):
+        return None
+
+    try:
+        headers: list[str] = []
+        rows: list[list[str]] = []
+
+        export_df = getattr(element, "export_to_dataframe", None)
+        if callable(export_df):
+            headers, rows = _table_from_dataframe(export_df())
+        elif hasattr(element, "data") and getattr(element, "data") is not None:
+            headers, rows = _table_from_grid(getattr(element, "data"))
+        elif hasattr(element, "num_rows") and hasattr(element, "num_cols"):
+            num_rows = int(getattr(element, "num_rows", 0) or 0)
+            num_cols = int(getattr(element, "num_cols", 0) or 0)
+            grid: list[list[str]] = []
+            for row_idx in range(num_rows):
+                row_cells: list[str] = []
+                for col_idx in range(num_cols):
+                    cell = None
+                    if hasattr(element, "get_cell"):
+                        cell = element.get_cell(row_idx, col_idx)
+                    elif hasattr(element, "cell_at"):
+                        cell = element.cell_at(row_idx, col_idx)
+                    row_cells.append(_cell_to_string(cell))
+                grid.append(row_cells)
+            headers, rows = _table_from_grid(grid)
+
+        if not headers and not rows:
+            return None
+
+        title = (
+            getattr(element, "caption", None)
+            or getattr(element, "title", None)
+            or getattr(element, "text", None)
+            or getattr(element, "label", None)
+        )
+        title_str = _cell_to_string(title) or "Table"
+
+        return {
+            "type": "table",
+            "label": title_str,
+            "title": title_str,
+            "headers": headers,
+            "rows": rows,
+            "page": _element_page(element),
+            "bbox": None,
+        }
+    except Exception:
+        return None
+
+
+def _is_markdown_table_row(line: str) -> bool:
+    stripped = line.strip()
+    return "|" in stripped and stripped.count("|") >= 2
+
+
+def _is_markdown_separator_row(line: str) -> bool:
+    stripped = line.strip().strip("|")
+    if not stripped:
+        return False
+    cells = [cell.strip() for cell in stripped.split("|")]
+    return all(re.fullmatch(r":?-{3,}:?", cell or "-") for cell in cells)
+
+
+def _parse_markdown_table_row(line: str) -> list[str]:
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def _parse_markdown_table_block(block: list[str]) -> dict[str, Any] | None:
+    if len(block) < 2 or not _is_markdown_separator_row(block[1]):
+        return None
+
+    headers = _parse_markdown_table_row(block[0])
+    rows = [_parse_markdown_table_row(line) for line in block[2:]]
+    rows = [row for row in rows if any(cell for cell in row)]
+    if not headers and not rows:
+        return None
+
+    return {
+        "type": "table",
+        "label": headers[0] if headers else "Table",
+        "title": headers[0] if headers else "Table",
+        "headers": headers,
+        "rows": rows,
+        "page": 0,
+        "bbox": None,
+    }
+
+
+def _extract_markdown_tables(full_text: str) -> list[dict[str, Any]]:
+    if not full_text:
+        return []
+
+    tables: list[dict[str, Any]] = []
+    lines = full_text.splitlines()
+    index = 0
+    while index < len(lines):
+        if not _is_markdown_table_row(lines[index]):
+            index += 1
+            continue
+
+        block = [lines[index]]
+        next_index = index + 1
+        while next_index < len(lines) and _is_markdown_table_row(lines[next_index]):
+            block.append(lines[next_index])
+            next_index += 1
+
+        if len(block) >= 2 and _is_markdown_separator_row(block[1]):
+            parsed = _parse_markdown_table_block(block)
+            if parsed:
+                tables.append(parsed)
+
+        index = next_index if next_index > index + 1 else index + 1
+
+    return tables
+
+
 def _extract_pdf_text(file_bytes: bytes) -> tuple[str, str, int, list[dict[str, Any]], bool]:
     text_content = ""
     first_page_text = ""
@@ -280,19 +458,29 @@ def _docling_extract(file_bytes: bytes, file_name: str) -> dict[str, Any] | None
 
         # Export to markdown for the "full text" to preserve structure/tables
         full_text = doc.export_to_markdown()
-        
+
         # Build structure map from docling's hierarchy
-        structure_map = []
-        for element, level in doc.iterate_items():
-            if hasattr(element, "label") and element.label in ["heading", "title"]:
-                # Accessing text directly if it exists, or via some other attribute
+        structure_map: list[dict[str, Any]] = []
+        for element, _level in doc.iterate_items():
+            label = getattr(element, "label", None)
+            if label in ["heading", "title"]:
                 text = getattr(element, "text", "")
                 if text:
-                    structure_map.append({
-                        "label": text[:50],
-                        "page": 0, # Simplified for now as Prov might be complex
-                        "bbox": None,
-                    })
+                    structure_map.append(
+                        {
+                            "label": text[:50],
+                            "page": _element_page(element),
+                            "bbox": None,
+                        }
+                    )
+                continue
+
+            table_entry = _extract_table_from_docling_element(element)
+            if table_entry:
+                structure_map.append(table_entry)
+
+        if not any(item.get("type") == "table" for item in structure_map):
+            structure_map.extend(_extract_markdown_tables(full_text))
 
         return {
             "full_text": full_text,
@@ -312,13 +500,13 @@ def extract_pdf_content(file_bytes: bytes, file_name: str) -> dict[str, Any]:
     """
     # 1. Try Docling first (Modern High-Fidelity path)
     docling_res = _docling_extract(file_bytes, file_name)
-    
+
     text_content, first_page_text, pages_count, blocks, used_pymupdf = _extract_pdf_text(file_bytes)
-    
+
     # Merge docling results if available
     used_docling = False
     structure_map: list[dict[str, Any]] = []
-    
+
     if docling_res:
         text_content = docling_res["full_text"]
         structure_map = docling_res["structure_map"]

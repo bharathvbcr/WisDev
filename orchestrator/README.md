@@ -8,6 +8,7 @@ The primary logic layer for the open-source WisDev agent. Coordinated research f
 - **RAG Engine:** High-performance retrieval-augmented generation using RAPTOR, BM25, and semantic re-ranking.
 - **Search:** Executes parallel academic search across the registered provider set.
 - **Evidence Gate:** Verifies synthesized claims against sources using AI extraction and token-overlap heuristics.
+- **DocGen:** Headless ScholarDoc document generation (`internal/docgen`) with three intents (`report`, `litreview`, `fullpaper`), seven-style bibliographies (`internal/citations`), and multi-format export.
 - **Persistence:** Manages persistent research sessions, policy, and user-tier state in PostgreSQL.
 
 ## Architecture
@@ -33,6 +34,19 @@ The primary logic layer for the open-source WisDev agent. Coordinated research f
 - `/rag/*`: Retrieval, RAPTOR, BM25, answer generation, and evidence grounding.
 - `/paper/*` and `/papers/*`: PDF processing, paper metadata, and related/network views.
 - `/full-paper/*`, `/drafting/*`, `/manuscript/*`, `/reviewer/*`: Long-form generation surfaces.
+- `/export/*`: Citation-style-aware Markdown, HTML, LaTeX, and DOCX export.
+
+## DocGen packages
+
+| Package | Role |
+|---------|------|
+| `internal/docgen` | Canonical `Document` envelope, intent dispatch (`report` / `litreview` / `fullpaper`), rendering (md/latex/html/json/docx) |
+| `internal/citations` | Seven-style bibliography formatter (APA, MLA, Chicago, Vancouver, IEEE, Harvard, Nature) |
+| `pkg/wisdev` (`GenerateDocument`) | Public embedding API for headless document generation (additive) |
+
+CLI (`wisdev docgen`), TUI (DocGen toggle), and MCP (`wisdevGenerateManuscript`) all
+route through `internal/docgen.Generate` + `Render`. See `docs/CLI.md` and
+`docs/MCP_CLIENTS.md`.
 - `/vector/*`, `/query/*`, `/summarization/*`, `/source/*`, `/topic-tree/*`: Helper primitives.
 - `/internal/*`: Service-to-service operational hooks such as account deletion audit.
 

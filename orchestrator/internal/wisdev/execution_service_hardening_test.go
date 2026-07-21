@@ -10,9 +10,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/adk/agent"
-	adkrunner "google.golang.org/adk/runner"
-	adksession "google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	adkrunner "google.golang.org/adk/v2/runner"
+	adksession "google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
 )
 
@@ -165,7 +165,7 @@ func TestExecuteSessionRunUsesOfficialADKRunnerWhenAvailable(t *testing.T) {
 		Description: "test ADK workflow",
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*adksession.Event, error] {
 			return func(yield func(*adksession.Event, error) bool) {
-				event := adksession.NewEvent(ctx.InvocationID())
+				event := adksession.NewEvent(ctx, ctx.InvocationID())
 				event.Author = "wisdev-workflow"
 				event.Content = genai.NewContentFromText("ADK completed", genai.RoleModel)
 				event.CustomMetadata = map[string]any{
@@ -223,7 +223,7 @@ func TestExecuteSessionRunUsesOfficialADKRunnerWhenAvailable(t *testing.T) {
 	last := entries[len(entries)-1]
 	assert.Equal(t, string(EventCompleted), last.EventType)
 	assert.Equal(t, true, last.Payload["adkRunnerExecuted"])
-	assert.Equal(t, "google.golang.org/adk", last.Payload["adkRuntime"])
+	assert.Equal(t, "google.golang.org/adk/v2", last.Payload["adkRuntime"])
 	assert.Equal(t, "wisdev-workflow", last.Payload["adkEventAuthor"])
 	assert.NotEmpty(t, last.Payload["adkInvocationId"])
 }

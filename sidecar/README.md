@@ -64,7 +64,7 @@ Specialized ML worker service for heavy compute primitives. Stateless and optimi
 - `POST /ml/bm25/index`, `POST /ml/bm25/search`, `DELETE /ml/bm25`: Local BM25 helper surface.
 - `POST /llm/generate`, `POST /llm/generate/stream`, `POST /llm/structured-output`: Canonical LLM generation HTTP surface.
 - `POST /llm/embed`, `POST /llm/embed/batch`, `GET /llm/health`: Canonical remote LLM helper surface.
-- `POST /wisdev/manuscript/section/generate`, `/section/refine`, `/section/revise`, `/review`, `/coordinate`, `/coordinate-dedupe`, `/fact-check`: Manuscript drafting/review/coordination routes consumed by the orchestrator's manuscript pipeline; backend selected via `manuscript_llm()` (Gemini/Vertex or local, see `MANUSCRIPT_LLM_PROVIDER` above). `manuscript_app.py` is a slim ASGI entrypoint for a manuscript-only deployment that skips `ml_router`/numpy.
+- `POST /wisdev/manuscript/section/generate`, `/section/refine`, `/section/revise`, `/review`, `/coordinate`, `/coordinate-dedupe`, `/fact-check`: Manuscript drafting/review/coordination routes consumed by the orchestrator's `ManuscriptPipeline` (`fullpaper` DocGen intent); backend selected via `manuscript_llm()` (Gemini/Vertex or local, see `MANUSCRIPT_LLM_PROVIDER` above). `report` and `litreview` intents use the Go LLM client directly. `manuscript_app.py` is a slim ASGI entrypoint for a manuscript-only deployment that skips `ml_router`/numpy.
 - `GET /wisdev/agent/card`, `GET /wisdev/deep-agents/capabilities`, `POST /wisdev/deep-agents/execute`: internal sidecar helpers retained for Go-owned orchestration and migration compatibility.
 - `POST /skills/register`: Dynamic skill registration.
 - `gRPC :50052`: LLM service implementation for local/container overlays.

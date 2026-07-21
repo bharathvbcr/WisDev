@@ -13,12 +13,16 @@ import pytest
 from pydantic import BaseModel
 
 from services.gemini_service import (
+    GEMINI_STANDARD_MODEL,
     GEMINI_EMBED_STANDARD_MODEL,
     GeminiService,
+    _clear_sticky_embedding_model_override,
     _cosine_similarity,
     _gemini_runtime_source,
     _gemini_runtime_unavailable_detail,
+    _is_google_auth_transport_error,
     _resolve_thinking_budget,
+    _resolve_thinking_level,
     get_gemini_runtime_diagnostics,
     _normalize_service_tier,
     _service_tier_for_wisdev,
@@ -26,9 +30,28 @@ from services.gemini_service import (
     _vertex_location,
 )
 
+TEST_GEMINI_25_PRO_MODEL = "gemini-2.5-pro"
+TEST_GEMINI_25_FLASH_LITE_MODEL = "gemini-2.5-flash-lite"
+TEST_GEMINI_25_FLASH_MODEL = "gemini-2.5-flash"
+TEST_GEMINI_3_FLASH_MODEL = "gemini-3-flash"
+TEST_GEMINI_3_PRO_MODEL = "gemini-3-pro"
+
+
+@pytest.fixture(autouse=True)
+def reset_sticky_embedding_override():
+    _clear_sticky_embedding_model_override()
+    yield
+    _clear_sticky_embedding_model_override()
+
 
 class _ResponseModel(BaseModel):
     value: str
+
+
+class _SDKStructuredEnvelope(BaseModel):
+    sdk_http_response: dict[str, object] | None = None
+    parsed: dict[str, object] | None = None
+    text: str = ""
 
 
 def _install_fake_google_modules(monkeypatch) -> None:
@@ -136,23 +159,165 @@ def test_service_tier_for_wisdev(mode, interactive, expected):
 
 def test_resolve_thinking_budget_clamps_and_defaults_from_latency_budget():
     assert _resolve_thinking_budget(
-        "gemini-2.5-pro",
+        TEST_GEMINI_25_PRO_MODEL,
         0,
         latency_budget_ms=20_000,
         structured=True,
     ) == 128
     assert _resolve_thinking_budget(
-        "gemini-2.5-flash-lite",
+        TEST_GEMINI_25_FLASH_LITE_MODEL,
         None,
         latency_budget_ms=10_000,
         structured=True,
     ) == 0
     assert _resolve_thinking_budget(
-        "gemini-2.5-flash",
+        TEST_GEMINI_25_FLASH_MODEL,
         99_999,
         latency_budget_ms=40_000,
         structured=True,
     ) == 24_576
+    assert _resolve_thinking_budget(
+        TEST_GEMINI_25_FLASH_MODEL,
+        -1,
+        latency_budget_ms=40_000,
+        structured=True,
+        max_output_tokens=64,
+    ) == 0
+    assert _resolve_thinking_budget(
+        TEST_GEMINI_25_FLASH_MODEL,
+        -1,
+        latency_budget_ms=40_000,
+        structured=True,
+        max_output_tokens=512,
+    ) == -1
+    assert _resolve_thinking_budget(
+        TEST_GEMINI_25_FLASH_MODEL,
+        1024,
+        latency_budget_ms=40_000,
+        structured=True,
+        max_output_tokens=64,
+    ) == 1024
+
+
+def test_resolve_thinking_budget_keeps_lite_models_non_thinking_by_default():
+    # Flash-lite ships with thinking disabled by default (Gemini docs); a high
+    # latency budget must not silently enable dynamic thinking on lite models.
+    assert _resolve_thinking_budget(
+        TEST_GEMINI_25_FLASH_LITE_MODEL,
+        None,
+        latency_budget_ms=45_000,
+        structured=True,
+    ) == 0
+    assert _resolve_thinking_budget(
+        TEST_GEMINI_25_FLASH_LITE_MODEL,
+        -1,
+        latency_budget_ms=45_000,
+        structured=True,
+        max_output_tokens=2048,
+    ) == 0
+    # An explicit positive budget still enables thinking, clamped to limits.
+    assert _resolve_thinking_budget(
+        TEST_GEMINI_25_FLASH_LITE_MODEL,
+        2_048,
+        latency_budget_ms=45_000,
+        structured=True,
+    ) == 2_048
+    # Non-lite flash keeps the latency-driven dynamic default.
+    assert _resolve_thinking_budget(
+        TEST_GEMINI_25_FLASH_MODEL,
+        None,
+        latency_budget_ms=45_000,
+        structured=True,
+        max_output_tokens=2048,
+    ) == -1
+
+
+def test_resolve_thinking_level_keeps_lite_models_minimal_by_default():
+    lite_gemini3_model = "gemini-3.1-flash-lite"
+    assert (
+        _resolve_thinking_level(
+            lite_gemini3_model,
+            None,
+            latency_budget_ms=45_000,
+            structured=True,
+            max_output_tokens=2048,
+        )
+        == "MINIMAL"
+    )
+    assert (
+        _resolve_thinking_level(
+            lite_gemini3_model,
+            -1,
+            latency_budget_ms=45_000,
+            structured=False,
+            max_output_tokens=2048,
+        )
+        == "MINIMAL"
+    )
+    # An explicit positive budget still maps to the matching level.
+    assert (
+        _resolve_thinking_level(
+            lite_gemini3_model,
+            1024,
+            latency_budget_ms=45_000,
+            structured=True,
+            max_output_tokens=2048,
+        )
+        == "LOW"
+    )
+
+
+def test_resolve_thinking_level_minimizes_tiny_structured_dynamic_budget():
+    assert (
+        _resolve_thinking_level(
+            TEST_GEMINI_3_FLASH_MODEL,
+            -1,
+            latency_budget_ms=40_000,
+            structured=True,
+            max_output_tokens=64,
+        )
+        == "MINIMAL"
+    )
+    assert (
+        _resolve_thinking_level(
+            TEST_GEMINI_3_FLASH_MODEL,
+            None,
+            latency_budget_ms=40_000,
+            structured=True,
+            max_output_tokens=64,
+        )
+        == "MINIMAL"
+    )
+    assert (
+        _resolve_thinking_level(
+            TEST_GEMINI_3_FLASH_MODEL,
+            -1,
+            latency_budget_ms=40_000,
+            structured=True,
+            max_output_tokens=512,
+        )
+        == "HIGH"
+    )
+    assert (
+        _resolve_thinking_level(
+            TEST_GEMINI_3_FLASH_MODEL,
+            1024,
+            latency_budget_ms=40_000,
+            structured=True,
+            max_output_tokens=64,
+        )
+        == "LOW"
+    )
+    assert (
+        _resolve_thinking_level(
+            TEST_GEMINI_3_FLASH_MODEL,
+            -1,
+            latency_budget_ms=40_000,
+            structured=False,
+            max_output_tokens=64,
+        )
+        == "HIGH"
+    )
 
 
 def test_cosine_similarity_mismatched_lengths():
@@ -223,6 +388,32 @@ async def test_generate_text_native_retries_on_empty_value(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_generate_text_with_usage_reads_native_usage_metadata(monkeypatch):
+    _install_fake_google_modules(monkeypatch)
+
+    svc = GeminiService.__new__(GeminiService)
+    svc.model = "test-model"
+    svc._client = MagicMock()
+
+    runner = AsyncMock(
+        return_value=SimpleNamespace(
+            text="generated",
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=29,
+                candidates_token_count=8,
+            ),
+        )
+    )
+
+    with patch("services.gemini_service._run_sync_with_timeout", runner):
+        result = await svc.generate_text_with_usage("prompt", 0.5, 32, 0.1, None)
+
+    assert result.text == "generated"
+    assert result.input_tokens == 29
+    assert result.output_tokens == 8
+
+
+@pytest.mark.asyncio
 async def test_generate_structured_retries_on_empty_json_text(monkeypatch):
     _install_fake_google_modules(monkeypatch)
 
@@ -242,6 +433,32 @@ async def test_generate_structured_retries_on_empty_json_text(monkeypatch):
             result = await svc.generate_structured("prompt", {"type": "object"})
 
     assert result == '{"value":"ok"}'
+
+
+@pytest.mark.asyncio
+async def test_generate_structured_with_usage_reads_native_usage_metadata(monkeypatch):
+    _install_fake_google_modules(monkeypatch)
+
+    svc = GeminiService.__new__(GeminiService)
+    svc.model = "test-model"
+    svc._client = MagicMock()
+
+    runner = AsyncMock(
+        return_value=SimpleNamespace(
+            text='{"value":"ok"}',
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=31,
+                candidates_token_count=9,
+            ),
+        )
+    )
+
+    with patch("services.gemini_service._run_sync_with_timeout", runner):
+        result = await svc.generate_structured_with_usage("prompt", {"type": "object"})
+
+    assert result.text == '{"value":"ok"}'
+    assert result.input_tokens == 31
+    assert result.output_tokens == 9
 
 
 @pytest.mark.asyncio
@@ -330,6 +547,57 @@ async def test_generate_structured_uses_sdk_parsed_payload_when_text_empty(monke
 
 
 @pytest.mark.asyncio
+async def test_generate_structured_prefers_sdk_parsed_payload_over_envelope(monkeypatch):
+    _install_fake_google_modules(monkeypatch)
+
+    svc = GeminiService.__new__(GeminiService)
+    svc.model = "test-model"
+    svc._client = MagicMock()
+
+    runner = AsyncMock(
+        return_value=_SDKStructuredEnvelope(
+            sdk_http_response={"headers": {"content-type": "application/json"}},
+            parsed={"value": "parsed"},
+        )
+    )
+
+    with patch("services.gemini_service._run_sync_with_timeout", runner):
+        result = await svc.generate_structured("prompt", {"type": "object"})
+
+    assert result == '{"value":"parsed"}'
+    assert "sdk_http_response" not in result
+    assert runner.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_structured_retries_invalid_sdk_envelope_without_emitting_it(monkeypatch):
+    _install_fake_google_modules(monkeypatch)
+
+    svc = GeminiService.__new__(GeminiService)
+    svc.model = "test-model"
+    svc._client = MagicMock()
+
+    runner = AsyncMock(
+        side_effect=[
+            _SDKStructuredEnvelope(
+                sdk_http_response={"headers": {"content-type": "application/json"}},
+                parsed=None,
+                text="Here is the",
+            ),
+            SimpleNamespace(text='{"value":"ok"}'),
+        ]
+    )
+
+    with patch("services.gemini_service._run_sync_with_timeout", runner):
+        with patch("services.gemini_service.asyncio.sleep", AsyncMock()):
+            result = await svc.generate_structured("prompt", {"type": "object"})
+
+    assert result == '{"value":"ok"}'
+    assert "sdk_http_response" not in result
+    assert runner.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_generate_structured_uses_candidate_part_text_when_text_empty(monkeypatch):
     _install_fake_google_modules(monkeypatch)
 
@@ -373,7 +641,7 @@ async def test_generate_structured_ignores_incompatible_thinking_config(monkeypa
         return SimpleNamespace(text='{"value":"ok"}')
 
     svc = GeminiService.__new__(GeminiService)
-    svc.model = "gemini-3-pro"
+    svc.model = TEST_GEMINI_3_PRO_MODEL
     svc._client = SimpleNamespace(
         models=SimpleNamespace(generate_content=MagicMock(side_effect=fake_generate_content))
     )
@@ -389,7 +657,7 @@ async def test_generate_structured_ignores_incompatible_thinking_config(monkeypa
         )
 
     assert result == '{"value":"ok"}'
-    assert captured["model"] == "gemini-3-pro"
+    assert captured["model"] == TEST_GEMINI_3_PRO_MODEL
     assert captured["contents"] == "prompt"
     assert "thinking_config" not in getattr(captured["config"], "kwargs", {})
 
@@ -789,6 +1057,28 @@ async def test_generate_with_thinking_omits_unsupported_native_service_tier(monk
 
 
 @pytest.mark.asyncio
+async def test_generate_with_thinking_passes_thinking_level_for_gemini3(monkeypatch):
+    _install_fake_google_modules(monkeypatch)
+
+    svc = GeminiService.__new__(GeminiService)
+    svc.model = TEST_GEMINI_3_PRO_MODEL
+    svc._client = MagicMock()
+
+    runner = AsyncMock(return_value=SimpleNamespace(text='{"value":"thought"}'))
+    with patch("services.gemini_service._run_sync_with_timeout", runner):
+        result = await svc.generate_with_thinking(
+            "prompt",
+            _ResponseModel,
+            thinking_budget=2048,
+        )
+
+    assert result.value == "thought"
+    thinking_config = runner.await_args.kwargs["config"].kwargs["thinking_config"]
+    assert thinking_config.kwargs["thinking_level"] == "MEDIUM"
+    assert "thinking_budget" not in thinking_config.kwargs
+
+
+@pytest.mark.asyncio
 async def test_generate_stream_without_client_splits_text_chunks():
     svc = GeminiService.__new__(GeminiService)
     svc.model = "test-model"
@@ -886,7 +1176,7 @@ async def test_generate_structured_passes_thinking_budget_for_gemini_25(monkeypa
     _install_fake_google_modules(monkeypatch)
 
     svc = GeminiService.__new__(GeminiService)
-    svc.model = "gemini-2.5-flash"
+    svc.model = TEST_GEMINI_25_FLASH_MODEL
     svc._client = MagicMock()
 
     runner = AsyncMock(return_value=SimpleNamespace(text='{"ok":true}'))
@@ -902,6 +1192,51 @@ async def test_generate_structured_passes_thinking_budget_for_gemini_25(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_generate_structured_disables_auto_thinking_for_tiny_output_budget(monkeypatch):
+    _install_fake_google_modules(monkeypatch)
+
+    svc = GeminiService.__new__(GeminiService)
+    svc.model = TEST_GEMINI_25_FLASH_MODEL
+    svc._client = MagicMock()
+
+    runner = AsyncMock(return_value=SimpleNamespace(text='{"ok":true}'))
+    with patch("services.gemini_service._run_sync_with_timeout", runner):
+        result = await svc.generate_structured(
+            "prompt",
+            {"type": "object"},
+            max_tokens=64,
+            thinking_budget=-1,
+        )
+
+    assert result == '{"ok":true}'
+    thinking_config = runner.await_args.kwargs["config"].kwargs["thinking_config"]
+    assert thinking_config.kwargs["thinking_budget"] == 0
+
+
+@pytest.mark.asyncio
+async def test_generate_structured_minimizes_gemini3_dynamic_thinking_for_tiny_output_budget(monkeypatch):
+    _install_fake_google_modules(monkeypatch)
+
+    svc = GeminiService.__new__(GeminiService)
+    svc.model = TEST_GEMINI_3_FLASH_MODEL
+    svc._client = MagicMock()
+
+    runner = AsyncMock(return_value=SimpleNamespace(text='{"ok":true}'))
+    with patch("services.gemini_service._run_sync_with_timeout", runner):
+        result = await svc.generate_structured(
+            "prompt",
+            {"type": "object"},
+            max_tokens=64,
+            thinking_budget=-1,
+        )
+
+    assert result == '{"ok":true}'
+    thinking_config = runner.await_args.kwargs["config"].kwargs["thinking_config"]
+    assert thinking_config.kwargs["thinking_level"] == "MINIMAL"
+    assert "thinking_budget" not in thinking_config.kwargs
+
+
+@pytest.mark.asyncio
 async def test_generate_structured_raises_on_last_failure(monkeypatch):
     _install_fake_google_modules(monkeypatch)
 
@@ -913,6 +1248,34 @@ async def test_generate_structured_raises_on_last_failure(monkeypatch):
         with patch("services.gemini_service.asyncio.sleep", AsyncMock()):
             with pytest.raises(RuntimeError, match="boom"):
                 await svc.generate_structured("prompt", {"type": "object"})
+
+
+@pytest.mark.asyncio
+async def test_generate_structured_fast_fails_google_auth_transport(monkeypatch):
+    _install_fake_google_modules(monkeypatch)
+
+    class TransportError(RuntimeError):
+        pass
+
+    TransportError.__module__ = "google.auth.exceptions"
+    exc = TransportError(
+        "HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): "
+        "Max retries exceeded with url: /token "
+        "(Caused by SSLEOFError(8, 'UNEXPECTED_EOF_WHILE_READING'))"
+    )
+
+    svc = GeminiService.__new__(GeminiService)
+    svc.model = "test-model"
+    svc._client = MagicMock()
+
+    assert _is_google_auth_transport_error(exc)
+    with patch("services.gemini_service._run_sync_with_timeout", AsyncMock(side_effect=exc)) as runner:
+        with patch("services.gemini_service.asyncio.sleep", AsyncMock()) as sleeper:
+            with pytest.raises(TransportError):
+                await svc.generate_structured("prompt", {"type": "object"})
+
+    assert runner.await_count == 1
+    sleeper.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -987,6 +1350,34 @@ async def test_generate_text_native_omits_unsupported_native_service_tier(monkey
 
 
 @pytest.mark.asyncio
+async def test_generate_text_native_fast_fails_google_auth_transport(monkeypatch):
+    _install_fake_google_modules(monkeypatch)
+
+    class TransportError(RuntimeError):
+        pass
+
+    TransportError.__module__ = "google.auth.exceptions"
+    exc = TransportError(
+        "HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): "
+        "Max retries exceeded with url: /token "
+        "(Caused by SSLEOFError(8, 'UNEXPECTED_EOF_WHILE_READING'))"
+    )
+
+    svc = GeminiService.__new__(GeminiService)
+    svc.model = "test-model"
+    svc._client = MagicMock()
+
+    assert _is_google_auth_transport_error(exc)
+    with patch("services.gemini_service._run_sync_with_timeout", AsyncMock(side_effect=exc)) as runner:
+        with patch("services.gemini_service.asyncio.sleep", AsyncMock()) as sleeper:
+            with pytest.raises(TransportError):
+                await svc._generate_text_native("prompt", 0.2, 32, 0.5, None)
+
+    assert runner.await_count == 1
+    sleeper.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_generate_text_native_returns_empty_when_retries_disabled(monkeypatch):
     _install_fake_google_modules(monkeypatch)
 
@@ -1009,7 +1400,7 @@ async def test_generate_via_vertex_proxy_passes_service_tier(monkeypatch):
 
     response = MagicMock()
     response.raise_for_status = MagicMock()
-    response.json.return_value = {"value": "proxy"}
+    response.json.return_value = {"text": '{"value":"proxy"}'}
 
     with patch("httpx.AsyncClient") as mock_cls:
         client = AsyncMock()
@@ -1021,7 +1412,51 @@ async def test_generate_via_vertex_proxy_passes_service_tier(monkeypatch):
         result = await svc._generate_via_vertex_proxy("prompt", _ResponseModel, 0.3, 32, "flex")
 
     assert result.value == "proxy"
-    assert client.post.await_args.kwargs["json"]["service_tier"] == "flex"
+    assert client.post.await_args.args[0] == "https://proxy.test/generate"
+    payload = client.post.await_args.kwargs["json"]
+    assert payload["serviceTier"] == "flex"
+    assert payload["maxTokens"] == 32
+    assert payload["responseFormat"] == "json_object"
+    assert payload["jsonSchema"]["type"] == "object"
+    assert payload["retryProfile"] == "strict_json"
+    assert payload["routingIntent"]["latencyBudgetMs"] > 0
+    assert "service_tier" not in payload
+    assert "max_tokens" not in payload
+    assert "response_schema" not in payload
+
+
+@pytest.mark.asyncio
+async def test_generate_via_vertex_proxy_omits_provider_only_thinking_level(monkeypatch):
+    monkeypatch.setenv("VERTEX_PROXY_URL", "https://proxy.test")
+    svc = GeminiService.__new__(GeminiService)
+    svc.model = TEST_GEMINI_3_FLASH_MODEL
+    svc._client = None
+
+    response = MagicMock()
+    response.raise_for_status = MagicMock()
+    response.json.return_value = {"text": '{"value":"proxy"}'}
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        client = AsyncMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        client.post = AsyncMock(return_value=response)
+        mock_cls.return_value = client
+
+        result = await svc._generate_via_vertex_proxy(
+            "prompt",
+            _ResponseModel,
+            0.3,
+            32,
+            None,
+            thinking_budget=2048,
+        )
+
+    assert result.value == "proxy"
+    payload = client.post.await_args.kwargs["json"]
+    assert payload["tier"] == "standard"
+    assert "thinkingLevel" not in payload
+    assert "thinkingBudget" not in payload
 
 
 @pytest.mark.asyncio
@@ -1069,7 +1504,7 @@ async def test_embed_returns_embedding_values(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_embed_omits_unsupported_task_type_when_sdk_rejects_it(monkeypatch):
+async def test_embed_omits_unsupported_task_type_and_keeps_output_dimension(monkeypatch):
     _install_fake_google_modules(monkeypatch)
 
     class StrictEmbedContentConfig:
@@ -1096,8 +1531,12 @@ async def test_embed_omits_unsupported_task_type_when_sdk_rejects_it(monkeypatch
         )
     )
 
-    assert await svc.embed("hello") == [0.9, 1.0]
-    assert captured["model"] == GEMINI_EMBED_STANDARD_MODEL
+    # Pin the model to gemini-embedding-2 so this test exercises the
+    # embedding-2 code path (proactive task_type omission + task-prefixed
+    # content) deterministically, independent of whatever the "standard"
+    # embedding tier resolves to in scholar_models.json.
+    assert await svc.embed("hello", model="gemini-embedding-2") == [0.9, 1.0]
+    assert captured["model"] == "gemini-embedding-2"
     # embed() now delegates to embed_batch(), so contents arrive as a
     # one-element batch.
     assert captured["contents"] == ["task:search query | text: hello"]
@@ -1154,7 +1593,10 @@ async def test_embed_batch_uses_api_key_client_for_gemini_embedding_2(monkeypatc
 
     svc = GeminiService(model="test-model")
     assert calls[0]["location"] == "global"
-    assert await svc.embed_batch(["a"]) == [[0.7]]
+    # Pin the model to gemini-embedding-2 so embed_batch takes the
+    # api-key-client branch deterministically, independent of the
+    # configured "standard" embedding tier in scholar_models.json.
+    assert await svc.embed_batch(["a"], model="gemini-embedding-2") == [[0.7]]
     assert calls[1]["api_key"] == "key"
     assert "location" not in calls[1]
 
@@ -1226,3 +1668,4 @@ async def test_generate_diverse_hypotheses_token_fallback_breaks_once_target_cou
             hypotheses = await svc.generate_diverse_hypotheses("query", n=1)
 
     assert hypotheses == ["deep learning"]
+

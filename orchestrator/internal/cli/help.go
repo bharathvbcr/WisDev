@@ -20,17 +20,23 @@ Aliases: ask`,
 Local by default. AI structured query preparation (grammar, domain, seeds) is on unless --no-enhance.
 --long-form synthesizes extended Introduction and Background sections.
 --docgen also generates a grounded manuscript from the retrieved papers (same
-engine as ` + "`wisdev docgen`" + `); pair with --doc-format markdown|latex|json,
---doc-output FILE, --doc-words N, --doc-min-citations N, --doc-flow LIST,
+engine as ` + "`wisdev docgen`" + `). Zero-config: the manuscript auto-saves to
+manuscript-<topic>-<timestamp>.md (override with --doc-output FILE) with an
+auto citation floor of 10 distinct sources (override with --doc-min-citations N).
+Optional: --doc-format markdown|latex|json, --doc-words N, --doc-flow LIST,
 --doc-review-rounds N (agentic generate→review→revise loop), and --doc-genre STR.
 Local mode only.
 Use --remote for the HTTP orchestrator.`,
 	"mcp": `Usage: wisdev mcp [--provider openalex,arxiv]
 
 MCP stdio server for Cursor, Claude Code, and Codex.`,
-	"mcp-config": `Usage: wisdev setup [--write .cursor/mcp.json] [--binary]
+	"mcp-config": `Usage: wisdev setup [--write .cursor/mcp.json] [--binary] [--replace]
+       wisdev setup --write ~/.cursor/mcp.json --binary
 
-Writes MCP client config. Alias: setup`,
+Writes (or merges) an MCP client config for Cursor / Claude Code / Claude Desktop.
+  --binary   use the absolute path to this wisdev binary (recommended)
+  --replace  overwrite the whole mcpServers map (default merges the "wisdev" entry)
+Alias: setup`,
 	"setup": `Alias for wisdev mcp-config.`,
 	"serve": `Usage: wisdev serve
 
@@ -64,6 +70,9 @@ pipeline (the same engine behind the /full-paper route) to produce a grounded
 manuscript draft: ordered sections, visuals, a peer-review critique, and a
 reference list. Section prose is enriched by the Python sidecar when one is
 reachable and falls back to grounded scaffolds otherwise (so --offline works).
+Zero-config by default: with no flags it targets an auto citation floor of 10
+distinct sources and streams live stage progress (drafting, review rounds,
+fact-check) to stderr while it runs.
 
   -o, --output PATH   Write the manuscript to a file (format inferred from extension)
   -f, --format FMT    Output format: markdown | latex | json (default: from -o, else markdown)
@@ -108,18 +117,14 @@ Environment Variables:
 
 Alias: upgrade`,
 	"upgrade": `Alias for wisdev update.`,
-	"demo": `Usage: wisdev demo [--offline] ["question"]
+	"tui": `Usage: wisdev tui [--offline] [--autostart] [--query "question"] [--output path.md]
 
-Hackathon demo: check + narrated local research.`,
-	"tui": `Usage: wisdev tui [--offline] [--demo] [--autostart] [--query "question"] [--output path.md]
-
-Interactive terminal UI for research questions, provider selection, and live run logs.
---demo pre-fills the hackathon query, enables offline mode, and autostarts. Alias: ui
+Interactive terminal UI for research questions, provider selection, and live run logs. Alias: ui
 
 Environment Variables:
   WISDEV_THEME  Set color theme (scholarlm, default, high-contrast, monochrome)
 
-ScholarLM (https://scholarlm-vbcr.web.app) — full research UI, cloud sync, and team workflows.`,
+ScholarLM (https://scholarlm-vbc.web.app) — full research UI, cloud sync, and team workflows.`,
 	"ui": `Alias for wisdev tui.`,
 }
 

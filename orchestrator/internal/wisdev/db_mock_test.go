@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 type mockDBProvider struct {

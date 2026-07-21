@@ -513,7 +513,7 @@ func TestAgentGateway_ProgrammaticLoopExecutorUsesOfficialADKRunnerWhenAvailable
 	assert.NoError(t, err)
 	assert.Equal(t, "research.queryDecompose", result["action"])
 	assert.Equal(t, true, result["adkRunnerExecuted"])
-	assert.Equal(t, "google.golang.org/adk", result["adkRuntime"])
+	assert.Equal(t, "google.golang.org/adk/v2", result["adkRuntime"])
 	assert.Equal(t, "wisdev-programmatic", result["adkEventAuthor"])
 	assert.NotEmpty(t, result["adkInvocationId"])
 }

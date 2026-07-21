@@ -11,6 +11,7 @@ import (
 
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/rag"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/resilience"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
 
@@ -258,6 +259,148 @@ func NewUnifiedResearchRuntime(
 	return rt
 }
 
+// defaultResearchTokenBudget is the generous per-request token allocation used
+// when WISDEV_RESEARCH_TOKEN_BUDGET is unset, zero, or invalid. Unset or zero
+// still enforces this default so the research loop is never unbounded.
+const defaultResearchTokenBudget = 400000
+
+// researchTokenBudgetEnvVar overrides the default per-request token budget.
+const researchTokenBudgetEnvVar = "WISDEV_RESEARCH_TOKEN_BUDGET"
+
+// researchRuntimeMaxBudgetPasses bounds how many budgeted research passes
+// (specialist worker fan-out, base autonomous loop, verifier revision loops)
+// one RunLoop invocation may record; the token budget is the primary limiter.
+const researchRuntimeMaxBudgetPasses = 8
+
+// researchTokenBudgetPassCost is the fixed accounting overhead charged per
+// research pass on top of the estimated output usage. It stands in for prompt
+// scaffolding, planning, and critique calls whose real token counts are not
+// surfaced to this layer.
+const researchTokenBudgetPassCost = 2000
+
+const researchStopReasonTokenBudgetExhausted = "token_budget_exhausted"
+
+type researchTokenBudgetContextKey struct{}
+
+// contextWithResearchTokenBudget attaches the shared per-request token budget
+// so nested RunLoop invocations (for example RunAnswer -> RunLoop, or plane
+// runtimes that re-enter the loop) inherit the same allocation instead of
+// minting a fresh one.
+func contextWithResearchTokenBudget(ctx context.Context, budget *resilience.TokenBudget) context.Context {
+	if budget == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, researchTokenBudgetContextKey{}, budget)
+}
+
+func researchTokenBudgetFromContext(ctx context.Context) *resilience.TokenBudget {
+	if ctx == nil {
+		return nil
+	}
+	budget, _ := ctx.Value(researchTokenBudgetContextKey{}).(*resilience.TokenBudget)
+	return budget
+}
+
+// resolveResearchTokenBudgetTokens resolves the per-request token allocation
+// from WISDEV_RESEARCH_TOKEN_BUDGET, falling back to a generous default when
+// the env var is unset, zero, or negative so budgets are never unlimited. A
+// larger request-profile allocation raises the ceiling but can never shrink
+// it below the configured floor.
+func resolveResearchTokenBudgetTokens(requestedTokens int) int {
+	allocated := EnvInt(researchTokenBudgetEnvVar, defaultResearchTokenBudget)
+	if allocated <= 0 {
+		allocated = defaultResearchTokenBudget
+	}
+	return maxInt(allocated, requestedTokens)
+}
+
+// estimateLoopResultTokens approximates the LLM tokens consumed by a research
+// pass. Real per-call usage exists at the llm layer (vertex UsageMetadata) but
+// is not plumbed into LoopResult, so this uses the standard ~4 chars/token
+// heuristic over the generated answer, evidence spans, reasoning trace, and
+// executed queries.
+func estimateLoopResultTokens(loopResult *LoopResult) int {
+	if loopResult == nil {
+		return 0
+	}
+	chars := len(loopResult.FinalAnswer)
+	for _, finding := range loopResult.Evidence {
+		chars += len(finding.Claim) + len(finding.Snippet)
+	}
+	for _, entry := range loopResult.ReasoningTrace {
+		chars += len(entry.Decision) + len(entry.Reasoning)
+	}
+	for _, query := range loopResult.ExecutedQueries {
+		chars += len(query)
+	}
+	return chars / 4
+}
+
+// estimateResearchWorkerTokens approximates the tokens consumed by the
+// specialist worker pass using the same ~4 chars/token heuristic, since
+// worker search and planning calls do not surface real usage counts here.
+func estimateResearchWorkerTokens(workers []ResearchWorkerState) int {
+	chars := 0
+	for _, worker := range workers {
+		for _, finding := range worker.Evidence {
+			chars += len(finding.Claim) + len(finding.Snippet)
+		}
+		for _, query := range worker.ExecutedQueries {
+			chars += len(query)
+		}
+	}
+	return chars / 4
+}
+
+// recordResearchTokenPass records one budgeted research pass plus its
+// estimated token usage. Exhaustion is not an error here: the next
+// CanIterate gate converts it into a clean partial-result stop.
+func recordResearchTokenPass(budgetLoop *resilience.BudgetAwareAgentLoop, estimatedTokens int) {
+	if budgetLoop == nil || budgetLoop.Budget() == nil {
+		return
+	}
+	_ = budgetLoop.RecordIteration() // an error only signals exhaustion; the next gate handles it
+	budgetLoop.Budget().ConsumeUsage("research_pass", estimatedTokens)
+}
+
+// reportResearchTokenBudgetExhausted emits the streaming lifecycle event and
+// the structured warning for a budget-exhausted stop. The runtime returns
+// partial results instead of an error, so this is the primary diagnostic.
+func reportResearchTokenBudgetExhausted(
+	emit func(PlanExecutionEvent),
+	state *ResearchSessionState,
+	budgetLoop *resilience.BudgetAwareAgentLoop,
+	budgetStage string,
+) {
+	if budgetLoop == nil || budgetLoop.Budget() == nil {
+		return
+	}
+	budget := budgetLoop.Budget()
+	sessionID := ""
+	if state != nil {
+		sessionID = strings.TrimSpace(state.SessionID)
+	}
+	slog.Warn("research token budget exhausted; stopping with partial results",
+		"component", "wisdev.unified_research_runtime",
+		"operation", "run_loop",
+		"stage", budgetStage,
+		"result", "partial_results",
+		"error_code", researchStopReasonTokenBudgetExhausted,
+		"session_id", sessionID,
+		"iterations", budgetLoop.IterationCount(),
+		"tokens_used", budget.Usage(),
+		"tokens_allocated", budget.Allocated(),
+	)
+	emitRuntimeLifecycleEvent(emit, state, "token_budget_exhausted", "research token budget exhausted; returning partial results", map[string]any{
+		"stopReason":            researchStopReasonTokenBudgetExhausted,
+		"budgetStage":           budgetStage,
+		"iterations":            budgetLoop.IterationCount(),
+		"tokensUsed":            budget.Usage(),
+		"tokensAllocated":       budget.Allocated(),
+		"reachedIterationLimit": budgetLoop.ReachedIterationLimit(),
+	}, 0.4)
+}
+
 func (rt *UnifiedResearchRuntime) RunLoop(
 	ctx context.Context,
 	req LoopRequest,
@@ -301,12 +444,26 @@ func (rt *UnifiedResearchRuntime) RunLoop(
 		MemoryTiers:    &MemoryTierState{},
 	}
 
+	// Enforce a per-request token budget across every research pass. Nested
+	// RunLoop invocations inherit the shared budget through the context so a
+	// recursive entry can never mint a fresh allocation.
+	tokenBudget := researchTokenBudgetFromContext(ctx)
+	if tokenBudget == nil {
+		tokenBudget = resilience.NewTokenBudget(state.SessionID, strings.TrimSpace(req.ProjectID), resolveResearchTokenBudgetTokens(req.AllocatedTokens))
+		ctx = contextWithResearchTokenBudget(ctx, tokenBudget)
+	}
+	budgetLoop := resilience.NewBudgetAwareAgentLoop(tokenBudget, researchRuntimeMaxBudgetPasses, researchTokenBudgetPassCost)
+
 	seedQueries := normalizeLoopQueries(query, req.SeedQueries)
 	emitRuntimeLifecycleEvent(onEvent, state, "runtime_started", "unified research runtime started", map[string]any{
 		"plane":            plane,
 		"budget":           state.Budget,
 		"seedQueries":      seedQueries,
 		"reasoningRuntime": BuildResearchReasoningRuntimeMetadata(req, plane, state.Budget),
+		"tokenBudget": map[string]any{
+			"allocatedTokens": tokenBudget.Allocated(),
+			"usedTokens":      tokenBudget.Usage(),
+		},
 	}, 0.62)
 	if state.DurableJob != nil {
 		emitRuntimeLifecycleEvent(onEvent, state, "research_job_started", "durable research job started", map[string]any{
@@ -319,7 +476,30 @@ func (rt *UnifiedResearchRuntime) RunLoop(
 			}, 0.28)
 		}
 	}
+	if !budgetLoop.CanIterate() {
+		// An inherited budget arrived already exhausted: stop before any
+		// specialist or loop work and return empty partial results cleanly
+		// instead of erroring the whole request.
+		reportResearchTokenBudgetExhausted(onEvent, state, budgetLoop, "runtime_preflight")
+		state.Blackboard = buildResearchBlackboard(state.Workers)
+		state.StopReason = researchStopReasonTokenBudgetExhausted
+		loopResult := &LoopResult{StopReason: researchStopReasonTokenBudgetExhausted}
+		completeResearchDurableJob(state.DurableJob, state, loopResult)
+		if err := rt.persistResearchDurableJob(state, "research_job_completed"); err != nil {
+			emitRuntimeLifecycleEvent(onEvent, state, "research_job_persist_failed", "durable research job completion could not be persisted", map[string]any{
+				"jobId": state.DurableJob.JobID,
+				"error": err.Error(),
+			}, 0.28)
+		}
+		return &UnifiedResearchResult{
+			LoopResult: loopResult,
+			State:      state,
+		}, nil
+	}
 	workerQueries := rt.executeResearchWorkers(ctx, state, session, query, req.Domain, req.Mode, !req.DisableProgrammaticPlanning, state.Budget.WorkerSearchBudget, req.BypassSearchCache, onEvent)
+	// The specialist worker fan-out is one budgeted pass; provider responses
+	// do not surface real token counts to this layer, so usage is estimated.
+	recordResearchTokenPass(budgetLoop, estimateResearchWorkerTokens(state.Workers))
 	blackboard := buildResearchBlackboard(state.Workers)
 	state.Blackboard = blackboard
 	seedQueries = normalizeLoopQueries(query, append(seedQueries, workerQueries...))
@@ -335,16 +515,32 @@ func (rt *UnifiedResearchRuntime) RunLoop(
 	loopReq.InitialExecutedQueries = append([]string(nil), blackboard.ExecutedQueries...)
 	loopReq.InitialQueryCoverage = blackboardQueryCoverage(state.Workers)
 	loopReq.SteeringJournal = rt.journal
-	loopResult, err := rt.loop.Run(ctx, loopReq, onEvent)
-	if err != nil {
-		failResearchDurableJob(state.DurableJob, err, ctx.Err() != nil)
-		if persistErr := rt.persistResearchDurableJob(state, "research_job_failed"); persistErr != nil {
-			emitRuntimeLifecycleEvent(onEvent, state, "research_job_persist_failed", "durable research job failure could not be persisted", map[string]any{
-				"jobId": state.DurableJob.JobID,
-				"error": persistErr.Error(),
-			}, 0.28)
+	var loopResult *LoopResult
+	if budgetLoop.CanIterate() {
+		var err error
+		loopResult, err = rt.loop.Run(ctx, loopReq, onEvent)
+		if err != nil {
+			failResearchDurableJob(state.DurableJob, err, ctx.Err() != nil)
+			if persistErr := rt.persistResearchDurableJob(state, "research_job_failed"); persistErr != nil {
+				emitRuntimeLifecycleEvent(onEvent, state, "research_job_persist_failed", "durable research job failure could not be persisted", map[string]any{
+					"jobId": state.DurableJob.JobID,
+					"error": persistErr.Error(),
+				}, 0.28)
+			}
+			return nil, err
 		}
-		return nil, err
+		recordResearchTokenPass(budgetLoop, estimateLoopResultTokens(loopResult))
+	} else {
+		// The token budget was exhausted by the specialist pass: keep the
+		// worker-gathered material as partial results instead of erroring.
+		reportResearchTokenBudgetExhausted(onEvent, state, budgetLoop, "pre_autonomous_loop")
+		loopResult = &LoopResult{
+			Papers:          blackboardPapers(state.Workers),
+			Evidence:        append([]EvidenceFinding(nil), blackboard.Evidence...),
+			ExecutedQueries: append([]string(nil), blackboard.ExecutedQueries...),
+			QueryCoverage:   blackboardQueryCoverage(state.Workers),
+			StopReason:      researchStopReasonTokenBudgetExhausted,
+		}
 	}
 	loopResult.WorkerReports = append([]ResearchWorkerState(nil), state.Workers...)
 	loopResult.Evidence = mergeEvidenceFindings(loopResult.Evidence, blackboard.Evidence)
@@ -355,7 +551,7 @@ func (rt *UnifiedResearchRuntime) RunLoop(
 	state.SourceAcquisition = buildResearchSourceAcquisitionPlan(query, loopResult.Papers)
 	loopResult.GapAnalysis = mergeSourceAcquisitionPlanIntoGap(query, loopResult.GapAnalysis, state.SourceAcquisition)
 
-	if err := rt.finalizeLoopResultWithVerifier(ctx, loopReq, state, loopResult, blackboard, onEvent); err != nil {
+	if err := rt.finalizeLoopResultWithVerifier(ctx, loopReq, state, loopResult, blackboard, budgetLoop, onEvent); err != nil {
 		failResearchDurableJob(state.DurableJob, err, ctx.Err() != nil)
 		if persistErr := rt.persistResearchDurableJob(state, "research_job_failed"); persistErr != nil {
 			emitRuntimeLifecycleEvent(onEvent, state, "research_job_persist_failed", "durable research job failure could not be persisted", map[string]any{
@@ -379,6 +575,7 @@ func (rt *UnifiedResearchRuntime) finalizeLoopResultWithVerifier(
 	state *ResearchSessionState,
 	loopResult *LoopResult,
 	specialistBlackboard *ResearchBlackboard,
+	budgetLoop *resilience.BudgetAwareAgentLoop,
 	emit func(PlanExecutionEvent),
 ) error {
 	if state == nil || loopResult == nil {
@@ -391,7 +588,17 @@ func (rt *UnifiedResearchRuntime) finalizeLoopResultWithVerifier(
 	finalizeResearchBudgetDecision(state.Budget, loopResult.GapAnalysis, state.ClaimVerification)
 
 	followUpQueries := buildVerifierControlledFollowUpQueries(query, state.VerifierDecision, state.ClaimVerification, loopResult.GapAnalysis, state.BranchEvaluations, state.Budget)
-	if verifierBlocksFinalAnswer(state.VerifierDecision) && len(followUpQueries) > 0 && rt != nil && rt.loop != nil {
+	needsRevisionPass := verifierBlocksFinalAnswer(state.VerifierDecision) && len(followUpQueries) > 0 && rt != nil && rt.loop != nil
+	if needsRevisionPass && budgetLoop != nil && !budgetLoop.CanIterate() {
+		// The shared research token budget cannot fund another revision pass:
+		// keep the provisional answer as a partial result instead of erroring.
+		reportResearchTokenBudgetExhausted(emit, state, budgetLoop, "verifier_revision")
+		if state.VerifierDecision != nil {
+			state.VerifierDecision.RevisionReasons = dedupeTrimmedStrings(append(state.VerifierDecision.RevisionReasons, "verifier revision skipped: research token budget exhausted"))
+		}
+		needsRevisionPass = false
+	}
+	if needsRevisionPass {
 		emitRuntimeLifecycleEvent(emit, state, "verifier_revision_started", "independent verifier forced a pre-final revision pass", map[string]any{
 			"verdict":         state.VerifierDecision.Verdict,
 			"stopReason":      state.VerifierDecision.StopReason,
@@ -400,6 +607,7 @@ func (rt *UnifiedResearchRuntime) finalizeLoopResultWithVerifier(
 
 		revisionReq := buildVerifierRevisionLoopRequest(baseReq, loopResult, followUpQueries, state.Budget)
 		revised, err := rt.loop.Run(ctx, revisionReq, emit)
+		recordResearchTokenPass(budgetLoop, estimateLoopResultTokens(revised))
 		if err != nil {
 			if ctx.Err() != nil && !loopResultHasResearchMaterial(loopResult) {
 				return err

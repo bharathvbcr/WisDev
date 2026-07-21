@@ -98,16 +98,21 @@ non-trivial edits, rather than grepping blind.
 
 Installable Claude Code skills documenting how to *use* WisDev ARC (CLI, MCP tools,
 the YOLO research loop, DocGen, and the Go embedding/HTTP API) live in
-`.claude/skills/wisdev/`. They ship with the repo so any Claude Code session that has
-this checkout open — or that adds `wisdev mcp` as an MCP server elsewhere — picks them
-up automatically:
+`.claude/skills/wisdev/`. Install them for Claude Code + Cursor with:
+
+```bash
+./scripts/install-skills.sh
+```
+
+They also ship with the repo so any Claude Code session that has this checkout open
+picks them up automatically:
 
 | Skill | Covers |
 |-------|--------|
-| `wisdev-cli` | Install, `check`/`doctor`, `tui`, `demo`, `serve`, provider listing |
+| `wisdev-cli` | Install, `check`/`doctor`, `tui`, `serve`, provider listing |
 | `wisdev-mcp-research` | The MCP search/evidence/author tools and tuning knobs |
 | `wisdev-yolo` | The autonomous multi-iteration research loop (`search`/`yolo`/`max`) |
-| `wisdev-docgen` | Manuscript generation via CLI `docgen` and `wisdevGenerateManuscript` |
+| `wisdev-docgen` | Headless ScholarDoc generation: CLI `docgen`, TUI DocGen toggle, MCP `wisdevGenerateManuscript`, `pkg/wisdev.GenerateDocument` — intents (`report`/`litreview`/`fullpaper`), citation styles, export formats |
 | `wisdev-embed` | Embedding the Go agent, the HTTP/gRPC API, custom search providers |
 
 These are distinct from the GitNexus skills above: GitNexus skills are for agents

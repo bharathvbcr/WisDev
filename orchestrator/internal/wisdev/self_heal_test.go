@@ -54,7 +54,7 @@ func TestSelfHealer_Execute_UsesOfficialADKRunnerWhenAvailable(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Len(t, result["sources"], 1)
 	assert.Equal(t, true, result["adkRunnerExecuted"])
-	assert.Equal(t, "google.golang.org/adk", result["adkRuntime"])
+	assert.Equal(t, "google.golang.org/adk/v2", result["adkRuntime"])
 	assert.Equal(t, "wisdev-self-healer", result["adkEventAuthor"])
 	assert.Equal(t, "adk_self_heal", result["resultOrigin"])
 	assert.NotEmpty(t, result["adkInvocationId"])

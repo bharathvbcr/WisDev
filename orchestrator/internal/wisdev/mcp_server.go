@@ -10,11 +10,11 @@
 // Canonical protocol spec: https://modelcontextprotocol.io/spec
 //
 // Supported MCP methods:
-//   - initialize
+//   - initialize            (returns agent instructions + tool/resource/prompt caps)
 //   - tools/list
 //   - tools/call
 //   - resources/list, resources/read  (wisdev://config, providers, capabilities)
-//   - prompts/list
+//   - prompts/list, prompts/get
 //   - ping
 //
 // Exposed action tools:
@@ -95,15 +95,17 @@ type mcpTool struct {
 
 func mcpSearchPapersTool() mcpTool {
 	return mcpTool{
-		Name:        MCPToolSearchPapers,
-		Description: "Search academic papers across 15+ providers (OpenAlex, arXiv, Semantic Scholar, PubMed, Europe PMC, Crossref, DBLP, etc.). Returns ranked papers with titles, abstracts, authors, years, DOIs, and citation counts. Use this to find evidence-grounded sources for research questions.",
+		Name: MCPToolSearchPapers,
+		Description: "PRIMARY literature search for Claude Code / Cursor agents. Fan-out across 15+ academic providers (OpenAlex, arXiv, Semantic Scholar, PubMed, Europe PMC, Crossref, DBLP, …) and return ranked papers (title, abstract, authors, year, DOI, citations). " +
+			"Use for open-ended topic searches and source gathering. Prefer wisdevPaperLookup when you already have a DOI/arXiv ID; prefer wisdevEvidenceSearch for claim-grounded quotable snippets; prefer wisdevGenerateManuscript when the user wants a drafted document. " +
+			"Legacy alias on tools/call: scholarlmSearchPapers.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"query":        map[string]any{"type": "string", "description": "Academic search query", "minLength": 1},
+				"query":        map[string]any{"type": "string", "description": "Academic search query (natural language or keyword)", "minLength": 1},
 				"limit":        map[string]any{"type": "integer", "description": "Max results (1-50, default 10)", "minimum": 1, "maximum": 50},
-				"sources":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Provider hints: openalex, arxiv, semantic_scholar, pubmed, europe_pmc, crossref, dblp, etc."},
-				"domain":       map[string]any{"type": "string", "description": "Research domain hint for provider routing"},
+				"sources":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Provider hints: openalex, arxiv, semantic_scholar, pubmed, europe_pmc, crossref, dblp, etc. Call wisdevListProviders if unsure."},
+				"domain":       map[string]any{"type": "string", "description": "Research domain hint for provider routing (e.g. biomed, cs, physics)"},
 				"yearFrom":     map[string]any{"type": "integer", "description": "Start year filter (inclusive)"},
 				"yearTo":       map[string]any{"type": "integer", "description": "End year filter (inclusive)"},
 				"minCitations": map[string]any{"type": "integer", "description": "Only return papers with at least this many citations (quality filter). 0 = no minimum.", "minimum": 0},
@@ -116,8 +118,9 @@ func mcpSearchPapersTool() mcpTool {
 
 func mcpPaperLookupTool() mcpTool {
 	return mcpTool{
-		Name:        MCPToolPaperLookup,
-		Description: "Fetch full metadata for a single paper by its provider-specific ID (e.g. arXiv ID like '2310.07862', DOI, or Semantic Scholar corpusId). Returns title, abstract, authors, year, venue, citation count, and open-access PDF URL.",
+		Name: MCPToolPaperLookup,
+		Description: "Fetch full metadata for ONE known paper by ID (arXiv like '2310.07862', DOI, or provider corpusId). Returns title, abstract, authors, year, venue, citation count, and open-access PDF URL when available. " +
+			"Use when the user pastes a DOI/arXiv link or you already have an ID from a prior search. Not for open topic search — use wisdevSearchPapers. Legacy alias: scholarlmPaperLookup.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -130,8 +133,9 @@ func mcpPaperLookupTool() mcpTool {
 
 func mcpEvidenceSearchTool() mcpTool {
 	return mcpTool{
-		Name:        MCPToolEvidenceSearch,
-		Description: "RAG-grounded evidence retrieval: searches for papers, extracts relevant passages, and returns evidence snippets with citations. Ideal for claim verification, hypothesis grounding, or finding supporting/contradicting evidence for a specific assertion.",
+		Name: MCPToolEvidenceSearch,
+		Description: "Claim-grounded evidence retrieval for agents that need citable snippets. Searches papers, extracts relevant passages, and returns evidence with citations. " +
+			"Best for 'what supports/contradicts X?', hypothesis grounding, and verification — not for drafting a full manuscript (use wisdevGenerateManuscript) or browsing a topic list (use wisdevSearchPapers). Legacy alias: scholarlmEvidenceSearch.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -146,21 +150,27 @@ func mcpEvidenceSearchTool() mcpTool {
 
 func mcpGenerateManuscriptTool() mcpTool {
 	return mcpTool{
-		Name:        MCPToolGenerateManuscript,
-		Description: "Generate a grounded, citation-backed manuscript (literature-review style) for a research question. Retrieves papers across providers, then runs the WisDev DocGen manuscript pipeline (plan → write → blind-verify → peer-review) and returns the drafted sections as Markdown (or raw JSON). This is the docGen capability — use wisdevSearchPapers instead for research-only retrieval without a manuscript.",
+		Name: MCPToolGenerateManuscript,
+		Description: "DocGen: retrieve papers then generate a grounded ScholarDoc-style document. Intents: fullpaper (default; plan→write→verify→peer-review), report (fast thematic synthesis), litreview (thematic literature review). " +
+			"Citation styles: apa|mla|chicago|vancouver|ieee|harvard|nature. Formats: markdown|json|latex|html (docx is CLI-only via `wisdev docgen`). " +
+			"Use when the user wants a drafted paper/report/review — not for search-only answers (wisdevSearchPapers) or the multi-iteration YOLO loop (CLI: wisdev \"question\"). " +
+			"Aliases on tools/call: scholarlmGenerateManuscript, wisdevDocGen.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"query":        map[string]any{"type": "string", "description": "Research question / manuscript topic", "minLength": 1},
 				"maxPapers":    map[string]any{"type": "integer", "description": "Max papers to ground the manuscript on (1-80, default 30)", "minimum": 1, "maximum": 80},
 				"words":        map[string]any{"type": "integer", "description": "Target total word count for the manuscript (split across sections). 0 or omitted lets the model choose length.", "minimum": 0, "maximum": 20000},
-				"minCitations": map[string]any{"type": "integer", "description": "Minimum number of distinct sources the manuscript should cite. Raises the retrieval floor and instructs the writers to cite broadly. 0 = no minimum.", "minimum": 0, "maximum": 200},
-				"reviewRounds": map[string]any{"type": "integer", "description": "Max rounds of the agentic generate→review→revise loop (each round re-reviews and rewrites flagged sections, stopping early when it converges). 0 = default (2). Max 5.", "minimum": 0, "maximum": 5},
-				"genre":        map[string]any{"type": "string", "description": "Manuscript genre, e.g. 'narrative literature review' (default) or 'research paper'. Controls the writers' voice and how the reviewer grades it (a research paper's first-person voice is not penalized)."},
-				"flow":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Ordered section flow for the draft, e.g. [\"abstract\",\"introduction\",\"methods\",\"results\",\"discussion\",\"conclusion\"]. Known ids reuse the tuned section briefs; unknown ids become generic synthesis sections in the given order. Omit for the default plan."},
+				"minCitations": map[string]any{"type": "integer", "description": "Minimum number of distinct sources the manuscript should cite. Raises the retrieval floor and instructs the writers to cite broadly. Omit for the default floor of 10; pass an explicit 0 for no minimum.", "minimum": 0, "maximum": 200},
+				"reviewRounds": map[string]any{"type": "integer", "description": "Max rounds of the agentic generate→review→revise loop (each round re-reviews and rewrites flagged sections, stopping early when it converges). 0 = default (2). Max 5. Ignored for report/litreview.", "minimum": 0, "maximum": 5},
+				"genre":        map[string]any{"type": "string", "description": "Manuscript genre for fullpaper, e.g. 'narrative literature review' (default) or 'research paper'. Controls voice and reviewer grading."},
+				"instructions": map[string]any{"type": "string", "description": "Free-text author steering applied to every section (tone, target audience, emphasis, terminology, structural preferences). Overrides default style guidance but never grounding/attribution/no-fabrication rules."},
+				"flow":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Ordered section flow for fullpaper, e.g. [\"abstract\",\"introduction\",\"methods\",\"results\",\"discussion\",\"conclusion\"]. Known ids reuse tuned briefs; unknown ids become generic synthesis sections. Omit for default plan."},
 				"sources":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Provider hints: openalex, arxiv, semantic_scholar, pubmed, europe_pmc, crossref, dblp, etc."},
 				"domain":       map[string]any{"type": "string", "description": "Research domain hint for provider routing"},
-				"format":       map[string]any{"type": "string", "description": "Output format: 'markdown' (default) or 'json'", "enum": []string{"markdown", "json"}},
+				"intent":        map[string]any{"type": "string", "description": "Document type: 'fullpaper' (default), 'report' (fast synthesis), or 'litreview'. report/litreview ignore fullpaper-only knobs (flow, reviewRounds, genre).", "enum": []string{"fullpaper", "report", "litreview"}},
+				"citationStyle": map[string]any{"type": "string", "description": "Bibliography citation style (default 'apa').", "enum": []string{"apa", "mla", "chicago", "vancouver", "ieee", "harvard", "nature"}},
+				"format":        map[string]any{"type": "string", "description": "Output format: 'markdown' (default), 'json', 'latex', or 'html'. fullpaper+json returns raw ManuscriptPipelineResult; other intents return the Document envelope.", "enum": []string{"markdown", "json", "latex", "html"}},
 			},
 			"required": []string{"query"},
 		},
@@ -169,8 +179,8 @@ func mcpGenerateManuscriptTool() mcpTool {
 
 func mcpAuthorSearchTool() mcpTool {
 	return mcpTool{
-		Name:        MCPToolAuthorSearch,
-		Description: "Retrieve papers by a specific author using their provider-specific author ID. Returns a list of that author's papers with metadata.",
+		Name: MCPToolAuthorSearch,
+		Description: "List papers by a provider author ID (Semantic Scholar authorId or OpenAlex author ID). Use after you already have an authorId from a prior paper result — not for name-string search. Legacy alias: scholarlmAuthorSearch.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -184,12 +194,12 @@ func mcpAuthorSearchTool() mcpTool {
 
 func mcpGetConfigTool() mcpTool {
 	return mcpTool{
-		Name:        MCPToolGetConfig,
-		Description: "Inspect the WisDev runtime's tunable configuration. Returns every tunable knob with its type, allowed range/enum, default, current value, and a description of what it controls. Call this first to discover what wisdevTuneConfig can change. Optionally pass 'keys' to fetch only specific knobs.",
+		Name: MCPToolGetConfig,
+		Description: "Discover and read every runtime knob (type, range/enum, default, current value). Call before wisdevTuneConfig. Groups: search.*, evidence.*, author.*, manuscript.*, server.*. Also available as resource wisdev://config.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"keys": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional subset of knob keys to return (e.g. ['search.limit','manuscript.genre']). Omit for all knobs."},
+				"keys": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional subset of knob keys (e.g. ['search.limit','manuscript.genre']). Omit for all knobs."},
 			},
 		},
 	}
@@ -197,12 +207,12 @@ func mcpGetConfigTool() mcpTool {
 
 func mcpTuneConfigTool() mcpTool {
 	return mcpTool{
-		Name:        MCPToolTuneConfig,
-		Description: "Tune the WisDev runtime. Pass a 'settings' object of knob-key → value to change runtime defaults that subsequent search/evidence/author/manuscript calls inherit. Values are validated against each knob's type and range/enum (discover them via wisdevGetConfig). Unknown keys or out-of-range values are reported and rejected; valid updates in the same call still apply. Returns the applied changes and the full updated config.",
+		Name: MCPToolTuneConfig,
+		Description: "Change runtime defaults that subsequent search/evidence/author/manuscript calls in this MCP session inherit (no restart). Validate keys via wisdevGetConfig first. Unknown/out-of-range keys are rejected; valid keys in the same call still apply.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"settings": map[string]any{"type": "object", "description": "Map of knob key → new value, e.g. {\"search.limit\": 25, \"search.defaultSources\": [\"openalex\",\"arxiv\"], \"manuscript.genre\": \"research paper\"}."},
+				"settings": map[string]any{"type": "object", "description": "Map of knob key → new value, e.g. {\"search.limit\": 25, \"search.defaultSources\": [\"openalex\",\"arxiv\"], \"manuscript.genre\": \"research paper\", \"manuscript.intent\": \"report\"}."},
 			},
 			"required": []string{"settings"},
 		},
@@ -212,7 +222,7 @@ func mcpTuneConfigTool() mcpTool {
 func mcpResetConfigTool() mcpTool {
 	return mcpTool{
 		Name:        MCPToolResetConfig,
-		Description: "Reset WisDev runtime knobs back to their built-in defaults. Pass 'keys' to reset a subset, or omit to reset everything. Returns the resulting config.",
+		Description: "Reset WisDev runtime knobs to built-in defaults. Pass 'keys' for a subset, or omit to reset everything. Use after exploratory tuning.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -225,7 +235,7 @@ func mcpResetConfigTool() mcpTool {
 func mcpListProvidersTool() mcpTool {
 	return mcpTool{
 		Name:        MCPToolListProviders,
-		Description: "List the academic search providers registered in this runtime, with their canonical name, specialised domains, and current health. Use this to discover valid values for the 'sources' argument and the 'search.defaultSources' knob.",
+		Description: "List registered academic search providers (canonical name, domains, health). Call once per session to learn valid 'sources' / search.defaultSources values before searching.",
 		InputSchema: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
@@ -236,13 +246,110 @@ func mcpListProvidersTool() mcpTool {
 func mcpCapabilitiesTool() mcpTool {
 	return mcpTool{
 		Name:        MCPToolCapabilities,
-		Description: "Describe everything this WisDev MCP runtime can do: the callable tools, the tunable configuration groups, and the introspectable resources. Use this for a one-shot overview of the full control surface.",
+		Description: "One-shot overview of this MCP control surface: tools, tunable config groups, and resources (wisdev://config|providers|capabilities). Prefer this at session start if unsure which tool to call.",
 		InputSchema: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
 		},
 	}
 }
+
+// mcpServerInstructions is returned on initialize so Claude Code / Cursor agents
+// get routing guidance without reading external docs.
+const mcpServerInstructions = `WisDev academic research MCP (stdio). Prefer wisdev* tool names; scholarlm* aliases still work on tools/call.
+
+Tool routing:
+- Topic / literature search → wisdevSearchPapers
+- Known DOI / arXiv / paper ID → wisdevPaperLookup
+- Claim verification / quotable snippets → wisdevEvidenceSearch
+- Author publication list (by authorId) → wisdevAuthorSearch
+- Draft a paper / report / lit review → wisdevGenerateManuscript (DocGen; intents fullpaper|report|litreview)
+- Discover providers / knobs → wisdevListProviders, wisdevCapabilities, wisdevGetConfig / wisdevTuneConfig
+
+Resources: wisdev://config, wisdev://providers, wisdev://capabilities.
+This is NOT the multi-iteration YOLO research loop — for that use the CLI: wisdev "question".
+Do not invent citations; quote IDs/DOIs returned by tools.`
+
+type mcpPrompt struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Arguments   []mcpPromptArg `json:"arguments,omitempty"`
+}
+
+type mcpPromptArg struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+}
+
+func mcpPrompts() []mcpPrompt {
+	return []mcpPrompt{
+		{
+			Name:        "wisdev_literature_search",
+			Description: "Search academic literature on a topic and summarize grounded findings with citations.",
+			Arguments: []mcpPromptArg{
+				{Name: "query", Description: "Research topic or question", Required: true},
+				{Name: "minCitations", Description: "Optional citation floor for quality filtering", Required: false},
+			},
+		},
+		{
+			Name:        "wisdev_evidence_check",
+			Description: "Find claim-grounded evidence snippets for or against an assertion.",
+			Arguments: []mcpPromptArg{
+				{Name: "claim", Description: "Claim or hypothesis to verify", Required: true},
+			},
+		},
+		{
+			Name:        "wisdev_docgen",
+			Description: "Generate a grounded document (fullpaper, report, or litreview) via wisdevGenerateManuscript.",
+			Arguments: []mcpPromptArg{
+				{Name: "query", Description: "Manuscript topic / research question", Required: true},
+				{Name: "intent", Description: "fullpaper | report | litreview (default fullpaper)", Required: false},
+				{Name: "citationStyle", Description: "apa | mla | chicago | vancouver | ieee | harvard | nature", Required: false},
+			},
+		},
+	}
+}
+
+// ──────────────────────────────────────────────
+// Manuscript generation injection
+// ──────────────────────────────────────────────
+//
+// internal/docgen imports internal/wisdev (it drives the manuscript pipeline),
+// so internal/wisdev cannot import internal/docgen without a cycle. To give the
+// MCP manuscript tool the full DocGen surface (report / litreview intents,
+// citation styles, latex/html rendering) we accept an injected generator that a
+// higher layer able to import internal/docgen (the CLI) wires up via
+// SetMCPManuscriptGenerator. When no generator is injected the tool falls back
+// to the built-in full-paper pipeline path, so library consumers and tests keep
+// working unchanged.
+
+// MCPManuscriptOptions carries the resolved inputs for the injected generator.
+type MCPManuscriptOptions struct {
+	Query         string
+	Intent        string
+	CitationStyle string
+	Format        string
+	Papers        []search.Paper
+	PythonURL     string
+	TargetWords   int
+	MinCitations  int
+	SectionFlow   []string
+	ReviewRounds  int
+	Genre         string
+	// Instructions is free-text author steering (tone, audience, emphasis).
+	// Applied to the built-in pipeline as CustomInstructions and to DocGen as VoiceInstructions.
+	Instructions string
+}
+
+// MCPManuscriptGenerator generates and renders a document for the MCP tool.
+type MCPManuscriptGenerator func(ctx context.Context, opts MCPManuscriptOptions) (rendered string, pipeline ManuscriptPipelineResult, err error)
+
+var mcpManuscriptGenerator MCPManuscriptGenerator
+
+// SetMCPManuscriptGenerator injects the DocGen-backed manuscript generator. It
+// is called once from a layer that can import internal/docgen (e.g. the CLI).
+func SetMCPManuscriptGenerator(fn MCPManuscriptGenerator) { mcpManuscriptGenerator = fn }
 
 // ──────────────────────────────────────────────
 // MCPServer
@@ -267,7 +374,7 @@ func NewMCPServer(registry *search.ProviderRegistry) *MCPServer {
 	return &MCPServer{
 		SearchRegistry: registry,
 		ServerName:     MCPServerName,
-		ServerVersion:  "1.1.0",
+		ServerVersion:  "1.2.0",
 		timeout:        30 * time.Second,
 		Config:         NewRuntimeConfig(),
 	}
@@ -351,7 +458,9 @@ func (s *MCPServer) dispatch(ctx context.Context, req mcpRequest) (any, *mcpErro
 	case "resources/read":
 		return s.handleResourcesRead(req.Params)
 	case "prompts/list":
-		return map[string]any{"prompts": []any{}}, nil
+		return s.handlePromptsList()
+	case "prompts/get":
+		return s.handlePromptsGet(req.Params)
 	case "ping":
 		return map[string]any{}, nil
 	default:
@@ -375,11 +484,94 @@ func (s *MCPServer) handleInitialize(raw json.RawMessage) (any, *mcpError) {
 	return map[string]any{
 		"protocolVersion": mcpProtocolVersion,
 		"capabilities": map[string]any{
-			"tools": map[string]any{"listChanged": false},
+			"tools":     map[string]any{"listChanged": false},
+			"resources": map[string]any{"listChanged": false},
+			"prompts":   map[string]any{"listChanged": false},
 		},
 		"serverInfo": map[string]any{
 			"name":    s.ServerName,
 			"version": s.ServerVersion,
+		},
+		"instructions": mcpServerInstructions,
+	}, nil
+}
+
+func (s *MCPServer) handlePromptsList() (any, *mcpError) {
+	return map[string]any{"prompts": mcpPrompts()}, nil
+}
+
+type mcpPromptGetParams struct {
+	Name      string            `json:"name"`
+	Arguments map[string]string `json:"arguments"`
+}
+
+func (s *MCPServer) handlePromptsGet(raw json.RawMessage) (any, *mcpError) {
+	var params mcpPromptGetParams
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return nil, &mcpError{Code: mcpErrInvalidParams, Message: "invalid prompts/get params: " + err.Error()}
+		}
+	}
+	name := strings.TrimSpace(params.Name)
+	args := params.Arguments
+	if args == nil {
+		args = map[string]string{}
+	}
+
+	var text string
+	switch name {
+	case "wisdev_literature_search":
+		query := strings.TrimSpace(args["query"])
+		if query == "" {
+			return nil, &mcpError{Code: mcpErrInvalidParams, Message: "argument 'query' is required"}
+		}
+		minCit := strings.TrimSpace(args["minCitations"])
+		text = "Use WisDev MCP tools to research: " + query + "\n" +
+			"1. Optionally call wisdevListProviders or wisdevCapabilities once.\n" +
+			"2. Call wisdevSearchPapers with query=\"" + query + "\""
+		if minCit != "" {
+			text += " and minCitations=" + minCit
+		}
+		text += ".\n3. Summarize findings and cite returned DOIs/IDs only — do not invent citations."
+	case "wisdev_evidence_check":
+		claim := strings.TrimSpace(args["claim"])
+		if claim == "" {
+			return nil, &mcpError{Code: mcpErrInvalidParams, Message: "argument 'claim' is required"}
+		}
+		text = "Verify this claim with WisDev evidence tools: " + claim + "\n" +
+			"1. Call wisdevEvidenceSearch with claim=\"" + claim + "\".\n" +
+			"2. Optionally follow up with wisdevPaperLookup on the strongest sources.\n" +
+			"3. Report supporting vs contradicting snippets with citations from tool results only."
+	case "wisdev_docgen":
+		query := strings.TrimSpace(args["query"])
+		if query == "" {
+			return nil, &mcpError{Code: mcpErrInvalidParams, Message: "argument 'query' is required"}
+		}
+		intent := strings.TrimSpace(args["intent"])
+		if intent == "" {
+			intent = "fullpaper"
+		}
+		style := strings.TrimSpace(args["citationStyle"])
+		if style == "" {
+			style = "apa"
+		}
+		text = "Generate a grounded document with wisdevGenerateManuscript.\n" +
+			"query=\"" + query + "\", intent=\"" + intent + "\", citationStyle=\"" + style + "\", format=\"markdown\".\n" +
+			"Return the rendered document; do not invent bibliography entries beyond tool output."
+	default:
+		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "unknown prompt: " + name}
+	}
+
+	return map[string]any{
+		"description": "WisDev MCP prompt: " + name,
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": map[string]any{
+					"type": "text",
+					"text": text,
+				},
+			},
 		},
 	}, nil
 }
@@ -695,8 +887,6 @@ func (s *MCPServer) callGenerateManuscript(ctx context.Context, args map[string]
 	if minCitations < 0 {
 		minCitations = 0
 	}
-	// Retrieve at least as many papers as the requested citation floor (capped) so
-	// the manuscript can actually cite that many distinct sources.
 	if minCitations > maxPapers {
 		maxPapers = minCitations
 		if maxPapers > 80 {
@@ -715,14 +905,6 @@ func (s *MCPServer) callGenerateManuscript(ctx context.Context, args map[string]
 	if domain == "" {
 		domain = c.String(CfgSearchDefaultDomain)
 	}
-
-	sr := search.ParallelSearch(ctx, s.SearchRegistry, query, search.SearchOpts{
-		Limit:       maxPapers,
-		Domain:      domain,
-		Sources:     sources,
-		QualitySort: true,
-	})
-
 	reviewRounds := mcpIntArg(args, "reviewRounds", c.Int(CfgManuscriptReviewRounds))
 	if reviewRounds < 0 {
 		reviewRounds = 0
@@ -731,23 +913,75 @@ func (s *MCPServer) callGenerateManuscript(ctx context.Context, args map[string]
 	if genre == "" {
 		genre = c.String(CfgManuscriptGenre)
 	}
+	intent := strings.TrimSpace(mcpStringArg(args, "intent"))
+	if intent == "" {
+		intent = c.String(CfgManuscriptIntent)
+	}
+	if intent == "" {
+		intent = "fullpaper"
+	}
+	citationStyle := strings.TrimSpace(mcpStringArg(args, "citationStyle"))
+	if citationStyle == "" {
+		citationStyle = c.String(CfgManuscriptCitationStyle)
+	}
+	if citationStyle == "" {
+		citationStyle = "apa"
+	}
+	format := strings.TrimSpace(mcpStringArg(args, "format"))
+	if format == "" {
+		format = c.String(CfgManuscriptFormat)
+	}
+	if format == "" {
+		format = "markdown"
+	}
+	customInstructions := strings.TrimSpace(mcpStringArg(args, "instructions"))
 
+	sr := search.ParallelSearch(ctx, s.SearchRegistry, query, search.SearchOpts{
+		Limit:       maxPapers,
+		Domain:      domain,
+		Sources:     sources,
+		QualitySort: true,
+	})
+
+	// When a DocGen-backed generator is injected (wired from the CLI), use it
+	// for the full intent/format/citation-style surface. Otherwise fall back to
+	// the built-in full-paper pipeline path so library consumers keep working.
+	if mcpManuscriptGenerator != nil {
+		rendered, _, err := mcpManuscriptGenerator(ctx, MCPManuscriptOptions{
+			Query:         query,
+			Intent:        intent,
+			CitationStyle: citationStyle,
+			Format:        format,
+			Papers:        sr.Papers,
+			PythonURL:     ResolvePythonBase(),
+			TargetWords:   targetWords,
+			MinCitations:  minCitations,
+			SectionFlow:   sectionFlow,
+			ReviewRounds:  reviewRounds,
+			Genre:         genre,
+			Instructions:  customInstructions,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("manuscript generation failed: %w", err)
+		}
+		return &mcpToolResult{Content: []mcpContent{{Type: "text", Text: rendered}}}, nil
+	}
+
+	// Built-in fallback: full-paper pipeline only (no report/litreview intents).
 	pipeline := NewManuscriptPipeline(ResolvePythonBase())
+	pipeline.Checkpoints = NewFileCheckpointStore("")
 	pipeline.TargetWords = targetWords
 	pipeline.MinCitations = minCitations
 	pipeline.SectionFlow = sectionFlow
 	pipeline.ReviewRounds = reviewRounds
 	pipeline.Genre = genre
+	pipeline.CustomInstructions = customInstructions
 	jobID := fmt.Sprintf("mcp_docgen_%d", time.Now().UnixMilli())
 	result, err := pipeline.Run(ctx, jobID, query, sr.Papers)
 	if err != nil {
 		return nil, fmt.Errorf("manuscript generation failed: %w", err)
 	}
 
-	format := strings.TrimSpace(mcpStringArg(args, "format"))
-	if format == "" {
-		format = c.String(CfgManuscriptFormat)
-	}
 	if strings.EqualFold(format, "json") {
 		encoded, encErr := json.MarshalIndent(result, "", "  ")
 		if encErr != nil {
@@ -776,7 +1010,7 @@ func (s *MCPServer) callGenerateManuscript(ctx context.Context, args map[string]
 		}
 		fmt.Fprintf(&b, "## %s\n\n%s\n\n", title, strings.TrimSpace(section.Content))
 	}
-	return &mcpToolResult{Content: []mcpContent{{Type: "text", Text: strings.TrimSpace(b.String())}}}, nil
+	return &mcpToolResult{Content: []mcpContent{{Type: "text", Text: strings.TrimRight(b.String(), "\n")}}}, nil
 }
 
 // ──────────────────────────────────────────────

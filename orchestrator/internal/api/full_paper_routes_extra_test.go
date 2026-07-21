@@ -286,6 +286,7 @@ func TestFullPaperRoutes_MethodGuards(t *testing.T) {
 		{name: "control", path: "/full-paper/control"},
 		{name: "rewrite section", path: "/full-paper/rewrite-section"},
 		{name: "regenerate visual", path: "/full-paper/regenerate-visual"},
+		{name: "citation integrity", path: "/full-paper/citation-integrity"},
 		{name: "sandbox action", path: "/full-paper/sandbox-action"},
 	}
 
@@ -363,26 +364,136 @@ func TestFullPaperActionHelpers(t *testing.T) {
 	})
 }
 
+func TestRegenerateFullPaperVisualRebuildsFromRawMaterials(t *testing.T) {
+	job := map[string]any{
+		"rawMaterialSet": map[string]any{
+			"claimPackets": []any{
+				map[string]any{"packetId": "p1", "claimText": "Finding one", "confidence": 0.8, "evidenceSpans": []any{map[string]any{"sourceCanonicalId": "s1"}}},
+			},
+			"canonicalSources": []any{
+				map[string]any{"canonicalId": "s1", "title": "Source One"},
+			},
+			"sourceClusters": []any{
+				map[string]any{"clusterId": "c1", "label": "Theme A", "packetIds": []any{"p1"}},
+			},
+		},
+		"workspace": map[string]any{
+			"visualArtifacts": []any{
+				map[string]any{
+					"artifactId":      "visual_artifact_1_table",
+					"title":           "Evidence Summary",
+					"kind":            "table_summary",
+					"specType":        "table",
+					"spec":            map[string]any{"headers": []any{"Theme"}, "rows": []any{}},
+					"caption":         "Old caption",
+					"sourcePacketIds": []any{"p1"},
+					"version":         1,
+				},
+			},
+			"latestVisualArtifact": map[string]any{
+				"artifactId": "visual_bundle_1",
+				"type":       "visual_bundle",
+				"content":    map[string]any{},
+			},
+			"artifacts": []any{},
+		},
+	}
+
+	result, err := regenerateFullPaperVisual(job, "visual_artifact_1_table", "Refresh summary")
+	require.NoError(t, err)
+	regenerated := mapAny(result["visualArtifact"])
+	assert.Equal(t, "ready_for_review", regenerated["reviewStatus"])
+	assert.Equal(t, 2, regenerated["version"])
+	assert.Equal(t, "table", regenerated["specType"])
+	spec, ok := regenerated["spec"].(wisdev.ManuscriptTableSpec)
+	require.True(t, ok)
+	assert.NotEmpty(t, spec.Headers)
+	assert.NotEmpty(t, spec.Rows)
+}
+
 func TestFullPaperSerializationHelpers(t *testing.T) {
 	t.Run("buildSourceBundleSources", func(t *testing.T) {
 		result := wisdev.ManuscriptPipelineResult{
 			RawMaterials: evidence.ManuscriptRawMaterialSet{
 				CanonicalSources: []evidence.CanonicalCitationRecord{
-					{CanonicalID: "c1", Title: "Canonical Source", Abstract: "Canonical source abstract. More text.", Year: 2024, LandingURL: "https://example.com/canonical"},
+					{
+						CanonicalID:   "doi:10.1000/canonical",
+						Title:         "Canonical Source",
+						Abstract:      "Canonical source abstract. More text.",
+						Year:          2024,
+						LandingURL:    "https://example.com/canonical",
+						CitationCount: 87,
+						SourceIDs:     evidence.CanonicalIDs{DOI: "10.1000/canonical"},
+					},
 				},
 			},
 		}
-		paperSources := buildSourceBundleSources(result, []search.Paper{
-			{Title: "Search Paper", Abstract: "Search paper abstract. More text.", Year: 2025, CitationCount: 12, Link: "https://example.com/paper"},
+		paperOnlyResult := wisdev.ManuscriptPipelineResult{
+			RawMaterials: evidence.ManuscriptRawMaterialSet{},
+		}
+		paperSources := buildSourceBundleSources(paperOnlyResult, []search.Paper{
+			{
+				ID:            "s2:abc123",
+				Title:         "Search Paper",
+				Abstract:      "Search paper abstract. More text.",
+				Year:          2025,
+				CitationCount: 12,
+				Link:          "https://example.com/paper",
+				DOI:           "10.1000/search",
+				Authors:       []string{"Ada Lovelace", "Alan Turing"},
+				Venue:         "Nature Methods",
+			},
 		})
 		require.Len(t, paperSources, 1)
 		assert.Equal(t, "Search Paper", paperSources[0]["title"])
 		assert.Equal(t, "https://example.com/paper", paperSources[0]["link"])
+		assert.Equal(t, "doi:10.1000/search", paperSources[0]["canonicalId"])
+		assert.Equal(t, "s2:abc123", paperSources[0]["paperId"])
+		assert.Equal(t, "10.1000/search", paperSources[0]["doi"])
+		assert.Equal(t, "Nature Methods", paperSources[0]["publication"])
+		assert.Equal(t, 12, paperSources[0]["citationCount"])
+		authors, ok := paperSources[0]["authors"].([]map[string]any)
+		require.True(t, ok)
+		require.Len(t, authors, 2)
+		assert.Equal(t, "Ada Lovelace", authors[0]["name"])
 
 		fallbackSources := buildSourceBundleSources(result, nil)
 		require.Len(t, fallbackSources, 1)
 		assert.Equal(t, "Canonical Source", fallbackSources[0]["title"])
 		assert.Equal(t, "https://example.com/canonical", fallbackSources[0]["link"])
+		assert.Equal(t, "doi:10.1000/canonical", fallbackSources[0]["canonicalId"])
+		assert.Equal(t, "doi:10.1000/canonical", fallbackSources[0]["paperId"])
+		assert.Equal(t, 87, fallbackSources[0]["citationCount"])
+
+		preferredSources := buildSourceBundleSources(result, []search.Paper{
+			{ID: "ignored", Title: "Ignored Paper"},
+		})
+		require.Len(t, preferredSources, 1)
+		assert.Equal(t, "Canonical Source", preferredSources[0]["title"])
+		assert.Equal(t, 87, preferredSources[0]["citationCount"])
+
+		legacyCanonical := wisdev.ManuscriptPipelineResult{
+			RawMaterials: evidence.ManuscriptRawMaterialSet{
+				CanonicalSources: []evidence.CanonicalCitationRecord{
+					{
+						CanonicalID: "doi:10.1000/legacy",
+						Title:       "Legacy Source Without Count",
+						Year:        2023,
+						LandingURL:  "https://example.com/legacy",
+						SourceIDs:   evidence.CanonicalIDs{DOI: "10.1000/legacy"},
+					},
+				},
+			},
+		}
+		enrichedSources := buildSourceBundleSources(legacyCanonical, []search.Paper{
+			{
+				Title:         "Legacy Source Without Count",
+				DOI:           "10.1000/legacy",
+				CitationCount: 42,
+			},
+		})
+		require.Len(t, enrichedSources, 1)
+		assert.Equal(t, 42, enrichedSources[0]["citationCount"])
 	})
 
 	t.Run("decode and convert helpers", func(t *testing.T) {

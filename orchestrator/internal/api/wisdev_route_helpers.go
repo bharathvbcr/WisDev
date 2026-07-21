@@ -120,6 +120,17 @@ func logWisdevRouteLifecycle(r *http.Request, operation string, stage string, qu
 	telemetry.FromCtx(r.Context()).InfoContext(r.Context(), "wisdev route lifecycle", args...)
 }
 
+// logAPIRouteLifecycle records structured stage logs for generic API routes (config,
+// policy, synthesis, relevance, provider lookups) with trace correlation when available.
+func logAPIRouteLifecycle(r *http.Request, component string, operation string, stage string, query string, attrs ...any) {
+	args := buildRouteStageLogArgs(r, component, operation, stage, query, "", attrs...)
+	if r != nil && r.Context() != nil {
+		telemetry.FromCtx(r.Context()).InfoContext(r.Context(), "api route lifecycle", args...)
+		return
+	}
+	slog.Info("api route lifecycle", args...)
+}
+
 func classifyAnalyzeQueryFallbackReason(err error) string {
 	if err == nil {
 		return ""
@@ -976,10 +987,6 @@ func buildEvidenceGatePayload(claims []map[string]any, contradictionCount int) m
 	}
 }
 
-func normalizeSectionID(label string) string {
-	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(label), " ", "_"))
-}
-
 func uniqueStrings(values []string) []string {
 	seen := map[string]struct{}{}
 	out := make([]string, 0, len(values))
@@ -995,113 +1002,6 @@ func uniqueStrings(values []string) []string {
 		out = append(out, value)
 	}
 	return out
-}
-
-func inferDraftSections(title string, customSections []string) []string {
-	titleLower := strings.ToLower(strings.TrimSpace(title))
-	sections := []string{"Introduction", "Approach", "Evidence", "Discussion"}
-	if strings.Contains(titleLower, "benchmark") || strings.Contains(titleLower, "evaluation") || strings.Contains(titleLower, "compare") {
-		sections = []string{"Introduction", "Evaluation Setup", "Comparative Findings", "Limitations", "Recommendations"}
-	} else if strings.Contains(titleLower, "survey") || strings.Contains(titleLower, "review") {
-		sections = []string{"Introduction", "Landscape", "Methods", "Open Problems", "Recommendations"}
-	} else if strings.Contains(titleLower, "system") || strings.Contains(titleLower, "architecture") || strings.Contains(titleLower, "platform") {
-		sections = []string{"Problem Framing", "Architecture", "Operational Risks", "Implementation Plan", "Decision Summary"}
-	}
-	sections = append(sections, customSections...)
-	return uniqueStrings(sections)
-}
-
-func buildDraftOutlinePayload(documentID string, title string, targetWordCount int, customSections []string) map[string]any {
-	if targetWordCount <= 0 {
-		targetWordCount = 1600
-	}
-	sectionTitles := inferDraftSections(title, customSections)
-	items := make([]map[string]any, 0, len(sectionTitles))
-	remainingWords := targetWordCount
-	for index, sectionTitle := range sectionTitles {
-		target := wisdev.MaxInt(120, targetWordCount/wisdev.MaxInt(1, len(sectionTitles)))
-		if index == 0 {
-			target = wisdev.MaxInt(target, 180)
-		}
-		if index == len(sectionTitles)-1 {
-			target = wisdev.MaxInt(target-30, 120)
-		}
-		remainingWords -= target
-		items = append(items, map[string]any{
-			"id":          normalizeSectionID(sectionTitle),
-			"title":       sectionTitle,
-			"level":       1,
-			"targetWords": target,
-			"order":       index + 1,
-			"purpose":     fmt.Sprintf("Explain how %s contributes to the overall argument.", strings.ToLower(sectionTitle)),
-			"evidenceExpectation": map[string]any{
-				"minSources":           wisdev.MinInt(4, wisdev.MaxInt(2, index+2)),
-				"requiresCounterpoint": index >= 2,
-			},
-		})
-	}
-	if remainingWords > 0 && len(items) > 0 {
-		last := items[len(items)-1]
-		last["targetWords"] = wisdev.IntValue(last["targetWords"]) + remainingWords
-		items[len(items)-1] = last
-	}
-	return map[string]any{
-		"documentId":       documentID,
-		"title":            title,
-		"totalTargetWords": targetWordCount,
-		"items":            items,
-		"narrativeArc": []string{
-			"Frame the problem and decision context.",
-			"Present the strongest supporting evidence before tradeoffs.",
-			"Close with operational implications and explicit uncertainty.",
-		},
-		"generatedAt": time.Now().UnixMilli(),
-		"model":       "go_outline",
-	}
-}
-
-func buildDraftSectionPayload(documentID string, sectionID string, title string, targetWords int, papers []map[string]any) map[string]any {
-	if targetWords <= 0 {
-		targetWords = 220
-	}
-	citations := make([]string, 0, wisdev.MinInt(4, len(papers)))
-	keyFindings := make([]string, 0, wisdev.MinInt(4, len(papers)))
-	paragraphs := make([]string, 0, wisdev.MinInt(4, len(papers))+1)
-	paragraphs = append(paragraphs, fmt.Sprintf("%s frames the highest-signal evidence relevant to the draft objective and separates supported claims from remaining uncertainty.", title))
-	for _, paper := range papers {
-		citation := strings.TrimSpace(fmt.Sprintf("%v", paper["title"]))
-		if citation != "" && len(citations) < 4 {
-			citations = append(citations, citation)
-		}
-		summary := strings.TrimSpace(fmt.Sprintf("%v", paper["summary"]))
-		if summary == "" {
-			summary = strings.TrimSpace(fmt.Sprintf("%v", paper["abstract"]))
-		}
-		if summary == "" {
-			continue
-		}
-		score := wisdev.ClampFloat(wisdev.AsFloat(paper["score"]), 0.55, 0.95)
-		paragraphs = append(paragraphs, fmt.Sprintf("%s This source contributes %.0f%% confidence toward the section argument and should be cited where the claim is asserted.", summary, score*100))
-		keyFindings = append(keyFindings, fmt.Sprintf("%s supports the section with a %.0f%% relevance score.", citation, score*100))
-		if len(paragraphs) >= 4 {
-			break
-		}
-	}
-	if len(paragraphs) == 1 {
-		paragraphs = append(paragraphs, "Retrieved evidence is limited, so this section should remain provisional until stronger source grounding is added.")
-	}
-	content := strings.Join(paragraphs, "\n\n")
-	return map[string]any{
-		"documentId":  documentID,
-		"sectionId":   sectionID,
-		"title":       title,
-		"content":     content,
-		"actualWords": wisdev.MaxInt(110, targetWords-(targetWords/6)),
-		"citations":   uniqueStrings(citations),
-		"keyFindings": uniqueStrings(keyFindings),
-		"summary":     "Go drafting generated a section with explicit evidence weighting and citation placement guidance.",
-		"generatedAt": time.Now().UnixMilli(),
-	}
 }
 
 func mapAny(value any) map[string]any {
@@ -1604,55 +1504,6 @@ func makeAgentAnswerIdempotencyKey(sessionID string, questionID string, values [
 	)
 }
 
-func makeDraftOutlineIdempotencyKey(documentID string, title string, targetWordCount int, customSections []string, expectedUpdatedAt int64) string {
-	payload := map[string]any{
-		"documentId":      strings.TrimSpace(documentID),
-		"title":           strings.TrimSpace(title),
-		"targetWordCount": targetWordCount,
-		"customSections":  normalizedStringSet(customSections),
-	}
-	if expectedUpdatedAt > 0 {
-		payload["expectedUpdatedAt"] = expectedUpdatedAt
-	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Sprintf(
-			"wisdev_drafting_outline:%s:%d:%s:%v",
-			strings.TrimSpace(documentID),
-			expectedUpdatedAt,
-			strings.TrimSpace(title),
-			normalizedStringSet(customSections),
-		)
-	}
-	sum := sha256.Sum256(data)
-	return fmt.Sprintf("wisdev_drafting_outline:%s:%x", strings.TrimSpace(documentID), sum)
-}
-
-func makeDraftSectionIdempotencyKey(documentID string, sectionID string, sectionTitle string, targetWords int, papers []map[string]any, expectedUpdatedAt int64) string {
-	payload := map[string]any{
-		"documentId":   strings.TrimSpace(documentID),
-		"sectionId":    strings.TrimSpace(sectionID),
-		"sectionTitle": strings.TrimSpace(sectionTitle),
-		"targetWords":  targetWords,
-		"papers":       papers,
-	}
-	if expectedUpdatedAt > 0 {
-		payload["expectedUpdatedAt"] = expectedUpdatedAt
-	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Sprintf(
-			"wisdev_drafting_section:%s:%s:%d:%s",
-			strings.TrimSpace(documentID),
-			strings.TrimSpace(sectionID),
-			expectedUpdatedAt,
-			strings.TrimSpace(sectionTitle),
-		)
-	}
-	sum := sha256.Sum256(data)
-	return fmt.Sprintf("wisdev_drafting_section:%s:%s:%x", strings.TrimSpace(documentID), strings.TrimSpace(sectionID), sum)
-}
-
 func loadFullPaperJobState(agentGateway *wisdev.AgentGateway, documentID string) (map[string]any, error) {
 	if agentGateway == nil || agentGateway.StateStore == nil {
 		return nil, fmt.Errorf("state store unavailable")
@@ -1762,62 +1613,6 @@ func assertExpectedUpdatedAt(w http.ResponseWriter, expected int64, state map[st
 func fullPaperHasTerminalStatus(status string) bool {
 	s := strings.ToLower(strings.TrimSpace(status))
 	return s == "completed" || s == "failed" || s == "cancelled"
-}
-
-func upsertDraftingState(agentGateway *wisdev.AgentGateway, documentID string, outline map[string]any, sectionID string, section map[string]any) error {
-	if agentGateway == nil || agentGateway.StateStore == nil {
-		return fmt.Errorf("state store unavailable")
-	}
-	job, err := agentGateway.StateStore.LoadFullPaperJob(documentID)
-	if err != nil {
-		return fmt.Errorf("failed to load job: %w", err)
-	}
-
-	workspace := mapAny(job["workspace"])
-	drafting := mapAny(workspace["drafting"])
-
-	if outline != nil {
-		drafting["outline"] = outline
-		var order []string
-		if items, ok := outline["items"].([]any); ok {
-			for _, item := range items {
-				if m, ok := item.(map[string]any); ok {
-					order = append(order, wisdev.AsOptionalString(m["id"]))
-				}
-			}
-		}
-		drafting["sectionOrder"] = order
-	}
-
-	if sectionID != "" && section != nil {
-		sections := mapAny(drafting["sections"])
-		sections[sectionID] = section
-		drafting["sections"] = sections
-
-		existingSectionArtifacts := append(sliceStrings(drafting["sectionArtifactIds"]), sectionID)
-		drafting["sectionArtifactIds"] = uniqueStrings(existingSectionArtifacts)
-
-		claimIDs := append([]string{}, sliceStrings(drafting["claimPacketIds"])...)
-		claimIDs = append(claimIDs, sliceStrings(section["claimPacketIds"])...)
-		claimIDs = append(claimIDs, sliceStrings(section["claimPacketId"])...)
-		claimIDs = append(claimIDs, wisdev.AsOptionalString(section["claimPacketId"]))
-		claimIDs = append(claimIDs, sliceStrings(section["evidencePacketIds"])...)
-		claimIDs = append(claimIDs, wisdev.AsOptionalString(section["evidencePacketId"]))
-		drafting["claimPacketIds"] = uniqueStrings(claimIDs)
-	}
-
-	if _, ok := drafting["sectionArtifactIds"]; !ok {
-		drafting["sectionArtifactIds"] = []string{}
-	}
-	if _, ok := drafting["claimPacketIds"]; !ok {
-		drafting["claimPacketIds"] = []string{}
-	}
-
-	workspace["drafting"] = drafting
-	job["workspace"] = workspace
-	bumpUpdatedAt(job)
-
-	return agentGateway.StateStore.SaveFullPaperJob(documentID, job)
 }
 
 func boundedInt(val int, def int, min int, max int) int {

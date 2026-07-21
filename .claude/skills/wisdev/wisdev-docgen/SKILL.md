@@ -1,62 +1,93 @@
----
-name: wisdev-docgen
-description: "Use when the user wants a citation-backed manuscript or literature-review draft generated from research — not just a search result. Covers both the wisdev docgen CLI command and the wisdevGenerateManuscript MCP tool. Examples: \"draft a literature review on X\", \"generate a manuscript with citations\", \"write a research paper draft grounded in real papers\""
----
+# wisdev-docgen
 
-# Generating Manuscripts with WisDev DocGen
+Generate ScholarDoc-equivalent documents headless via the WisDev ARC CLI, TUI, or MCP.
 
-## When to Use
+## When to use
 
-- The user wants a structured, multi-section document (Abstract through Conclusion) grounded in retrieved papers, not just a synthesized answer.
-- "Write a literature review", "draft a paper on X with citations", "generate a manuscript".
-- Choose CLI `docgen` for a one-shot terminal run; choose the MCP tool `wisdevGenerateManuscript` when already driving WisDev as an MCP server (see [[wisdev-mcp-research]]); use `yolo --docgen` when you want the full research loop *and* a manuscript from the same run (see [[wisdev-yolo]]).
+- User wants a grounded manuscript, quick report, or literature review from the terminal
+- User asks for `wisdev docgen`, document generation, or `wisdevGenerateManuscript`
+- User needs citation-style-aware export (APA, MLA, Chicago, Vancouver, IEEE, Harvard, Nature)
 
-## What it does
+## Document intents
 
-Runs the local research loop to gather grounded papers, then drives the manuscript pipeline (same engine as the `/full-paper` HTTP route): ordered sections, grounded visuals, a peer-review critique pass, and a reference list. Drafting is an **agentic generate → review → revise loop** — each round re-reviews and rewrites flagged sections, stopping on convergence (max rounds configurable). Prose minimizes em-dashes by both prompt instruction and a deterministic post-process.
+| Intent | CLI flag | Description |
+|--------|----------|-------------|
+| `fullpaper` | `--intent fullpaper` (default) | Full grounded manuscript: plan → draft → review → fact-check |
+| `report` | `--intent report` | Fast thematic synthesis (Quick Report) |
+| `litreview` | `--intent litreview` | Thematic literature review with grounded citations |
 
-Section prose is enriched by the Python sidecar when reachable; falls back to grounded scaffolds otherwise — `--offline`/no sidecar still produces a structured draft, just less polished prose.
-
-## CLI
+## CLI examples
 
 ```bash
-wisdev docgen "your topic"
-wisdev docgen -o paper.md --provider pubmed,arxiv "your topic"
-wisdev docgen --words 4000 --min-citations 20 --flow introduction,methods,results,discussion "your topic"
-wisdev yolo --docgen --doc-words 3000 "your question"   # research loop + manuscript in one run
+# Full manuscript (default)
+wisdev docgen --offline "transformers in drug discovery"
+
+# Quick report with IEEE bibliography
+wisdev docgen --intent report --citation-style ieee --offline "clinical RAG"
+
+# Literature review as HTML
+wisdev docgen --intent litreview --format html --offline "graph neural networks"
+
+# Full paper as LaTeX with custom section flow
+wisdev docgen --intent fullpaper --format latex --flow introduction,methods,results,discussion \
+  --min-citations 10 --words 5000 "battery anodes"
+
+# DOCX export (requires pandoc on PATH)
+wisdev docgen --format docx -o paper.docx --offline "topic"
+
+# Replay a fixed corpus (skip retrieval)
+wisdev docgen --corpus-file papers.json --intent fullpaper "topic"
 ```
 
-| Flag | Default | Effect |
-|---|---|---|
-| `-o`/`--output` | stdout | Write manuscript markdown to a file |
-| `-f`/`--format` | markdown | `markdown` \| `latex` \| `json` |
-| `--words` | model default | Target total word count across sections |
-| `--min-citations` | 0 | Minimum distinct sources cited (raises retrieval floor too) |
-| `--flow` | default plan | Comma-separated section order; unknown ids become generic sections |
-| `--review-rounds` | 2 (max 5) | Agentic review/revise rounds |
-| `--genre` | narrative literature review | e.g. `research paper` — controls voice + reviewer grading |
-| `--provider` / `--domain` / `--offline` | — | Same retrieval controls as `yolo`/`search` |
+## YOLO + DocGen
 
-Inside a `yolo` run, the same controls are the `--doc-*` aliases (`--doc-words`, `--doc-min-citations`, `--doc-flow`, `--doc-review-rounds`, `--doc-genre`, `--doc-format`, `--doc-output`).
+```bash
+wisdev yolo --docgen --doc-intent fullpaper --doc-citation-style apa "topic"
+```
 
-## MCP (`wisdevGenerateManuscript`)
+## TUI
 
-| Param | Type | Notes |
-|---|---|---|
-| `query` | string, required | Topic / research question |
-| `words` | integer | 0 = model default |
-| `minCitations` | integer | Raises retrieval floor |
-| `flow` | string[] | e.g. `["abstract","introduction","methods","results","discussion","conclusion"]` |
-| `reviewRounds` | integer | 0 = default 2, max 5 |
-| `genre` | string | default `narrative literature review` |
-| `maxPapers` | integer | 1–80, default 30 |
-| `sources` | string[] | Provider hints |
-| `format` | string | `markdown` (default) or `json` |
+Enable **DocGen** in settings (row 7). When on, cycle with:
 
-Legacy aliases accepted: `scholarlmGenerateManuscript`, `wisdevDocGen`. Tune persistent defaults (e.g. `manuscript.maxPapers`, `manuscript.genre`, `manuscript.reviewRounds`) with `wisdevTuneConfig` — see [[wisdev-mcp-research]].
+- `i` — intent (`fullpaper` / `report` / `litreview`)
+- `f` — format (`markdown` / `latex` / `html` / `json`)
+- `c` — citation style (`apa` / `mla` / `chicago` / `vancouver` / `ieee` / `harvard` / `nature`)
 
-## Local-model drafting
+Manuscript is written beside the research export as `{stem}-manuscript.{ext}`.
 
-DocGen's writer/reviewer/coordinator calls go through the sidecar's `manuscript_llm()` selector, independent of the research loop's `WISDEV_LLM_*` vars. Set `MANUSCRIPT_LLM_PROVIDER=local` (or `ollama`) plus `LOCAL_LLM_BASE_URL`/`LOCAL_LLM_MODEL` to draft with no cloud credentials; unset defaults to Gemini/Vertex if no local server is configured.
+## MCP tool: `wisdevGenerateManuscript`
 
-Full reference: `docs/CLI.md` (DocGen controls), `docs/COMMANDS.md` (`docgen` section), `docs/MCP_CLIENTS.md` (granular controls).
+Key parameters:
+
+| Param | Values | Notes |
+|-------|--------|-------|
+| `query` | string | Required |
+| `intent` | `fullpaper` \| `report` \| `litreview` | Default `fullpaper` |
+| `citationStyle` | `apa` \| `mla` \| `chicago` \| `vancouver` \| `ieee` \| `harvard` \| `nature` | Default `apa` |
+| `format` | `markdown` \| `json` \| `latex` \| `html` | `docx` is CLI-only |
+| `words`, `minCitations`, `flow`, `genre`, `reviewRounds` | | Full-paper knobs |
+
+`fullpaper` + `json` returns the raw pipeline result; other intents return canonical Document JSON.
+
+## Go embedding API
+
+```go
+import "github.com/bharathvbcr/wisdev-arc/orchestrator/pkg/wisdev"
+
+// Requires SetDocumentGenerator wired at startup (CLI does this automatically).
+result, err := wisdev.GenerateDocument(ctx, wisdev.DocumentOptions{
+    Query:         "topic",
+    Intent:        "report",
+    CitationStyle: "apa",
+    Format:        "markdown",
+    Offline:       true,
+})
+```
+
+## Offline / no sidecar
+
+`--offline` disables network search and uses grounded scaffolds when the Python sidecar is unreachable. Full-paper sections fall back to claim-packet scaffolds; report/litreview emit structured scaffolds from retrieved (or empty) papers.
+
+## Canonical docs
+
+Track `wisdev-arc/docs/CLI.md`, `docs/COMMANDS.md`, and `docs/MCP_CLIENTS.md` for flag/param details.

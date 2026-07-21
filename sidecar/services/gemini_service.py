@@ -16,6 +16,7 @@ import random
 import threading
 import time
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Type
 
 from pydantic import BaseModel
@@ -55,6 +56,47 @@ GEMINI_EMBED_FALLBACK_MODEL = get_embedding_model("fallback")
 
 _MAX_RETRIES = 3
 _BASE_BACKOFF_S = 1.0
+_sticky_embedding_model_override: str | None = None
+_sticky_embedding_fallback_logged = False
+_sticky_embedding_override_until: float = 0.0
+_STICKY_EMBEDDING_TTL_SECONDS = 3600
+
+
+# Gemini finish reasons / block reasons that mean the model declined to answer
+# for policy reasons. These never succeed on retry or on a heavier model, so the
+# caller must fail fast instead of burning the latency budget down to a 504.
+_SAFETY_FINISH_REASONS = frozenset(
+    {"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "IMAGE_SAFETY", "RECITATION"}
+)
+_UNSPECIFIED_BLOCK_REASONS = frozenset(
+    {"", "BLOCK_REASON_UNSPECIFIED", "BLOCKED_REASON_UNSPECIFIED"}
+)
+
+
+class EmptyStructuredTextError(RuntimeError):
+    """Raised when Gemini returns a structured response with no usable text.
+
+    Carries the response ``finish_reason`` / ``block_reason`` so callers can
+    distinguish a policy/safety block (terminal — do not retry) from a transient
+    empty generation (retryable — drop thinking, escalate model). The message
+    deliberately contains "returned empty text" so ``_is_empty_text_error``
+    keeps matching it as before.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        finish_reason: str = "",
+        block_reason: str = "",
+        safety_blocked: bool = False,
+        safety_categories: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.finish_reason = finish_reason
+        self.block_reason = block_reason
+        self.safety_blocked = safety_blocked
+        self.safety_categories = safety_categories
 
 
 def _is_empty_text_error(exc: BaseException) -> bool:
@@ -91,8 +133,6 @@ def _structured_empty_text_fallback_model(model: str) -> str:
         if cleaned and cleaned.lower() != normalized:
             return cleaned
     return ""
-
-
 _RUNTIME_SERVICE_LOCK = threading.Lock()
 _RUNTIME_DIAGNOSTICS_LOCK = threading.Lock()
 _runtime_service_cache_key: tuple[str, str, str, str] | None = None
@@ -119,6 +159,13 @@ _MODEL_LOCATION_DEFAULTS = {
 
 class StructuredOutputRequiresNativeRuntimeError(RuntimeError):
     """Raised when structured output is requested on a non-native runtime."""
+
+
+@dataclass(frozen=True)
+class GeminiGenerationResult:
+    text: str
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 async def _run_sync_with_timeout(timeout_s: float, func, *args, **kwargs):
@@ -237,6 +284,10 @@ def _supports_thinking_level(model: str | None) -> bool:
     return normalized.startswith("gemini-3")
 
 
+def _is_lite_model(model: str | None) -> bool:
+    return "lite" in str(model or "").strip().lower()
+
+
 def _thinking_budget_limits(model: str | None) -> tuple[int, int, bool] | None:
     normalized = str(model or "").strip().lower()
     if normalized.startswith("gemini-2.5-flash-lite"):
@@ -349,6 +400,12 @@ def _resolve_thinking_budget(
     ):
         return 0
 
+    # Lite models ship with thinking disabled by default per the Gemini docs;
+    # dynamic thinking (-1) on them burns latency and can spend the entire
+    # output budget on reasoning. Only an explicit positive budget enables it.
+    if _is_lite_model(model) and normalized_budget in {None, -1}:
+        return 0 if can_disable else minimum
+
     if normalized_budget == -1:
         return -1
     if normalized_budget == 0:
@@ -404,6 +461,10 @@ def _resolve_thinking_level(
         max_output_tokens=max_output_tokens,
     ):
         return "MINIMAL"
+    # Gemini 3.x cannot disable thinking entirely, so lite variants get the
+    # lowest level unless the caller explicitly requested a positive budget.
+    if _is_lite_model(model) and normalized_budget in {None, -1}:
+        return "MINIMAL"
     if normalized_budget is None:
         normalized_budget = (
             0
@@ -450,6 +511,31 @@ def _resolve_reasoning_controls(
         ),
         "thinking_level": None,
     }
+
+
+def _minimized_thinking_config(model: str | None, *, operation: str) -> Any | None:
+    """Lowest-reasoning ``ThinkingConfig`` for ``model``, or ``None`` when the
+    model exposes no thinking knob at all.
+
+    Empty text with ``finish_reason=MAX_TOKENS`` means the model spent its whole
+    output budget reasoning. Simply *removing* the thinking config does not fix
+    this on Gemini 3.x, which cannot disable thinking by omission — it reverts to
+    the model default (dynamic thinking) and burns the budget again on the retry,
+    producing an identical empty response (observed in production logs). Forcing
+    the minimum instead leaves room for visible output tokens. ``None`` tells the
+    caller to drop the field (the only lever left for models without a knob).
+    """
+    if _supports_thinking_level(model):
+        thinking_kwargs: dict[str, Any] = {"thinking_level": "MINIMAL"}
+    elif _supports_thinking_budget(model):
+        limits = _thinking_budget_limits(model)
+        if limits is None:
+            return None
+        minimum, _maximum, can_disable = limits
+        thinking_kwargs = {"thinking_budget": 0 if can_disable else minimum}
+    else:
+        return None
+    return build_optional_thinking_config(thinking_kwargs, operation=operation)
 
 
 def _log_budget_event(event: str, **fields: Any) -> None:
@@ -543,6 +629,63 @@ def _resolve_embedding_model(model: str | None) -> str:
     if alias in {"fallback"}:
         return get_embedding_model("fallback", default=GEMINI_EMBED_FALLBACK_MODEL)
     return normalized
+
+
+def _is_embedding_model_not_found_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    if any(
+        token in message
+        for token in (
+            "model is not found",
+            "model not found",
+            "not_found",
+            "does not exist",
+        )
+    ):
+        return True
+    return "404" in message and ("model" in message or "resource" in message)
+
+
+def _active_sticky_embedding_model_override() -> str | None:
+    global _sticky_embedding_model_override, _sticky_embedding_override_until
+
+    model = str(_sticky_embedding_model_override or "").strip()
+    if not model:
+        return None
+    if time.time() >= _sticky_embedding_override_until:
+        _clear_sticky_embedding_model_override()
+        return None
+    return model
+
+
+def _set_sticky_embedding_model_override(model: str) -> None:
+    global _sticky_embedding_model_override, _sticky_embedding_fallback_logged, _sticky_embedding_override_until
+
+    normalized = str(model or "").strip()
+    if not normalized:
+        return
+    _sticky_embedding_model_override = normalized
+    _sticky_embedding_override_until = time.time() + _STICKY_EMBEDDING_TTL_SECONDS
+    if not _sticky_embedding_fallback_logged:
+        _sticky_embedding_fallback_logged = True
+        logger.warning(
+            "gemini_embed_sticky_fallback_active | %s",
+            json.dumps(
+                {
+                    "fallback_model": normalized,
+                    "ttl_seconds": _STICKY_EMBEDDING_TTL_SECONDS,
+                },
+                sort_keys=True,
+                default=str,
+            ),
+        )
+
+
+def _clear_sticky_embedding_model_override() -> None:
+    global _sticky_embedding_model_override, _sticky_embedding_fallback_logged, _sticky_embedding_override_until
+    _sticky_embedding_model_override = None
+    _sticky_embedding_fallback_logged = False
+    _sticky_embedding_override_until = 0.0
 
 
 def _is_gemini_embedding_2_model(model: str | None) -> bool:
@@ -765,6 +908,55 @@ def _safe_response_attr(value: Any, name: str) -> Any:
         return None
 
 
+def _coerce_token_count(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        token_count = int(value)
+    except (TypeError, ValueError):
+        return None
+    return token_count if token_count >= 0 else None
+
+
+def _first_token_count(value: Any, names: tuple[str, ...]) -> int | None:
+    for name in names:
+        token_count = _coerce_token_count(_safe_response_attr(value, name))
+        if token_count is not None:
+            return token_count
+    return None
+
+
+def _extract_generation_usage(value: Any) -> tuple[int | None, int | None]:
+    usage = (
+        _safe_response_attr(value, "usage_metadata")
+        or _safe_response_attr(value, "usageMetadata")
+        or _safe_response_attr(value, "usage")
+        or value
+    )
+    input_tokens = _first_token_count(
+        usage,
+        (
+            "prompt_token_count",
+            "promptTokenCount",
+            "input_tokens",
+            "inputTokens",
+            "promptTokens",
+        ),
+    )
+    output_tokens = _first_token_count(
+        usage,
+        (
+            "candidates_token_count",
+            "candidatesTokenCount",
+            "completion_tokens",
+            "completionTokens",
+            "output_tokens",
+            "outputTokens",
+        ),
+    )
+    return input_tokens, output_tokens
+
+
 def _iter_response_sequence(value: Any) -> list[Any]:
     if value is None or isinstance(value, (str, bytes, bytearray)):
         return []
@@ -861,42 +1053,6 @@ def _json_text_from_structured_value(value: Any, source: str) -> tuple[str, bool
     return None
 
 
-# Gemini finish reasons / block reasons that mean the model declined to answer
-# for policy reasons. These never succeed on retry, so callers must fail fast
-# instead of burning the latency budget down to a misleading 504.
-_SAFETY_FINISH_REASONS = frozenset(
-    {"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "IMAGE_SAFETY", "RECITATION"}
-)
-_UNSPECIFIED_BLOCK_REASONS = frozenset(
-    {"", "BLOCK_REASON_UNSPECIFIED", "BLOCKED_REASON_UNSPECIFIED"}
-)
-
-
-class EmptyStructuredTextError(RuntimeError):
-    """Raised when Gemini returns a structured response with no usable text.
-
-    Carries the response ``finish_reason`` / ``block_reason`` so callers can
-    distinguish a policy/safety block (terminal — do not retry) from a transient
-    empty generation. The message deliberately contains "returned empty text" so
-    existing empty-text matchers keep recognizing it.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        finish_reason: str = "",
-        block_reason: str = "",
-        safety_blocked: bool = False,
-        safety_categories: tuple[str, ...] = (),
-    ) -> None:
-        super().__init__(message)
-        self.finish_reason = finish_reason
-        self.block_reason = block_reason
-        self.safety_blocked = safety_blocked
-        self.safety_categories = safety_categories
-
-
 def _normalize_reason_token(value: Any) -> str:
     """Normalize a finish_reason / block_reason (enum or str) to an UPPER token."""
     if value is None:
@@ -905,6 +1061,7 @@ def _normalize_reason_token(value: Any) -> str:
     token = str(name if name else value).strip()
     if not token:
         return ""
+    # Strip an enum-style prefix, e.g. "FinishReason.SAFETY" -> "SAFETY".
     if "." in token:
         token = token.rsplit(".", 1)[-1]
     return token.upper()
@@ -937,6 +1094,9 @@ _EMPTY_RESPONSE_DIAGNOSTICS: dict[str, Any] = {
 
 def _extract_response_diagnostics(response: Any) -> dict[str, Any]:
     """Pull finish_reason / block_reason / safety signal out of a raw response.
+
+    A safety block is inferred from a policy finish_reason, a populated prompt
+    ``block_reason``, or any safety rating marked ``blocked``.
 
     Never raises: this runs inside error-handling paths, so any malformed or
     unexpected response shape degrades to a no-signal result rather than masking
@@ -1397,8 +1557,36 @@ class GeminiService:
         trace_id: str | None = None,
     ) -> str:
         """Plain text generation (no structured output)."""
+        result = await self.generate_text_with_usage(
+            prompt,
+            temperature,
+            max_tokens,
+            timeout_s,
+            service_tier,
+            thinking_budget=thinking_budget,
+            latency_budget_ms=latency_budget_ms,
+            retry_profile=retry_profile,
+            request_class=request_class,
+            trace_id=trace_id,
+        )
+        return result.text
+
+    async def generate_text_with_usage(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        timeout_s: float = 30.0,
+        service_tier: str | None = None,
+        thinking_budget: int | None = None,
+        latency_budget_ms: int | None = None,
+        retry_profile: str | None = None,
+        request_class: str | None = None,
+        trace_id: str | None = None,
+    ) -> GeminiGenerationResult:
+        """Plain text generation with provider token usage when available."""
         if self._client is not None:
-            return await self._generate_text_native(
+            return await self._generate_text_native_with_usage(
                 prompt,
                 temperature,
                 max_tokens,
@@ -1410,7 +1598,7 @@ class GeminiService:
                 request_class=request_class,
                 trace_id=trace_id,
             )
-        return await self._generate_text_proxy(
+        return await self._generate_text_proxy_with_usage(
             prompt,
             temperature,
             max_tokens,
@@ -1601,6 +1789,35 @@ class GeminiService:
         trace_id: str | None = None,
         latency_budget_ms: int | None = None,
     ) -> str:
+        result = await self.generate_structured_with_usage(
+            prompt,
+            json_schema,
+            temperature,
+            max_tokens,
+            timeout_s,
+            service_tier=service_tier,
+            thinking_budget=thinking_budget,
+            retry_profile=retry_profile,
+            request_class=request_class,
+            trace_id=trace_id,
+            latency_budget_ms=latency_budget_ms,
+        )
+        return result.text
+
+    async def generate_structured_with_usage(
+        self,
+        prompt: str,
+        json_schema: dict,
+        temperature: float = 0.3,
+        max_tokens: int = 2048,
+        timeout_s: float = 60.0,
+        service_tier: str | None = None,
+        thinking_budget: int | None = None,
+        retry_profile: str | None = None,
+        request_class: str | None = None,
+        trace_id: str | None = None,
+        latency_budget_ms: int | None = None,
+    ) -> GeminiGenerationResult:
         """Generate structured output using a raw JSON schema dict.
 
         This path requires the native google-genai SDK so Gemini can enforce
@@ -1696,10 +1913,10 @@ class GeminiService:
         # Empty-text degradation ladder: flash-lite with aggressive thinking can
         # spend the entire output budget reasoning and return empty text on
         # every identical retry. First empty-text failure drops the thinking
-        # config; the next one falls back to a heavier model.
+        # config; the next one falls back to a non-lite model.
         active_config = config
         attempt_model = self.model
-        thinking_dropped = "thinking_config" not in config_kwargs
+        thinking_minimized = "thinking_config" not in config_kwargs
         model_fell_back = False
         budget_deadline = _budget_deadline(normalized_latency_budget_ms)
         last_exc: Exception | None = None
@@ -1746,7 +1963,12 @@ class GeminiService:
                         default=str,
                     ),
                 )
-                return text
+                input_tokens, output_tokens = _extract_generation_usage(resp)
+                return GeminiGenerationResult(
+                    text=text,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
             except asyncio.TimeoutError as exc:
                 logger.warning(
                     "gemini_structured_timeout | %s",
@@ -1818,20 +2040,26 @@ class GeminiService:
                 if attempt == _MAX_RETRIES - 1:
                     raise
                 last_exc = exc
-                # Empty-text degradation ladder: first empty-text failure drops the
-                # thinking config; the next one escalates to a heavier model.
                 if _is_empty_text_error(exc):
-                    if not thinking_dropped:
-                        thinking_dropped = True
-                        config_kwargs.pop("thinking_config", None)
+                    if not thinking_minimized:
+                        thinking_minimized = True
+                        minimal = _minimized_thinking_config(
+                            self.model,
+                            operation="generate_native_structured_retry",
+                        )
+                        if minimal is not None:
+                            config_kwargs["thinking_config"] = minimal
+                        else:
+                            config_kwargs.pop("thinking_config", None)
                         active_config = _build_native_generate_config(
                             config_kwargs,
                             operation="generate_native_structured_retry",
                         )
                         _log_budget_event(
-                            "gemini_structured_empty_text_thinking_dropped",
+                            "gemini_structured_empty_text_thinking_minimized",
                             **log_context,
                             attempt=attempt + 1,
+                            thinking_minimized=minimal is not None,
                         )
                     elif not model_fell_back:
                         fallback_model = _structured_empty_text_fallback_model(
@@ -1848,7 +2076,7 @@ class GeminiService:
                             )
                 if not await _sleep_backoff_within_budget(attempt, budget_deadline):
                     raise
-        return ""
+        return GeminiGenerationResult(text="")
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -2015,11 +2243,39 @@ class GeminiService:
         request_class: str | None = None,
         trace_id: str | None = None,
     ) -> str:
+        result = await self._generate_text_native_with_usage(
+            prompt,
+            temperature,
+            max_tokens,
+            timeout_s,
+            service_tier,
+            thinking_budget=thinking_budget,
+            latency_budget_ms=latency_budget_ms,
+            retry_profile=retry_profile,
+            request_class=request_class,
+            trace_id=trace_id,
+        )
+        return result.text
+
+    async def _generate_text_native_with_usage(
+        self,
+        prompt: str,
+        temperature: float,
+        max_tokens: int,
+        timeout_s: float,
+        service_tier: str | None,
+        thinking_budget: int | None = None,
+        latency_budget_ms: int | None = None,
+        retry_profile: str | None = None,
+        request_class: str | None = None,
+        trace_id: str | None = None,
+    ) -> GeminiGenerationResult:
         normalized_latency_budget_ms = _normalize_latency_budget_ms(
             latency_budget_ms, structured=False
         )
+        attempt_model = self.model
         reasoning_controls = _resolve_reasoning_controls(
-            self.model,
+            attempt_model,
             thinking_budget,
             latency_budget_ms=normalized_latency_budget_ms,
             structured=False,
@@ -2036,8 +2292,8 @@ class GeminiService:
             reasoning_controls["thinking_budget"] is not None
             or reasoning_controls["thinking_level"] is not None
         ) and (
-            _supports_thinking_budget(self.model)
-            or _supports_thinking_level(self.model)
+            _supports_thinking_budget(attempt_model)
+            or _supports_thinking_level(attempt_model)
         ):
             thinking_kwargs: dict[str, Any] = {}
             if reasoning_controls["thinking_budget"] is not None:
@@ -2060,9 +2316,11 @@ class GeminiService:
             )
             if thinking_config is not None:
                 config_kwargs["thinking_config"] = thinking_config
-        config = _build_native_generate_config(
+        active_config = _build_native_generate_config(
             config_kwargs, operation="generate_stream"
         )
+        thinking_minimized = "thinking_config" not in config_kwargs
+        model_fell_back = False
         budget_deadline = _budget_deadline(normalized_latency_budget_ms)
         last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES):
@@ -2089,11 +2347,17 @@ class GeminiService:
                 resp = await _run_sync_with_timeout(
                     attempt_timeout_s,
                     self._client.models.generate_content,
-                    model=self.model,
+                    model=attempt_model,
                     contents=prompt,
-                    config=config,
+                    config=active_config,
                 )
-                return _require_non_empty_text_with_diagnostics(resp, "Gemini")
+                text = _require_non_empty_text_with_diagnostics(resp, "Gemini")
+                input_tokens, output_tokens = _extract_generation_usage(resp)
+                return GeminiGenerationResult(
+                    text=text,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
             except Exception as exc:
                 if _is_google_auth_transport_error(exc):
                     logger.warning(
@@ -2157,9 +2421,58 @@ class GeminiService:
                 if attempt == _MAX_RETRIES - 1:
                     raise
                 last_exc = exc
+                if _is_empty_text_error(exc):
+                    if not thinking_minimized:
+                        thinking_minimized = True
+                        minimal = _minimized_thinking_config(
+                            attempt_model,
+                            operation="generate_text_native_retry",
+                        )
+                        if minimal is not None:
+                            config_kwargs["thinking_config"] = minimal
+                        else:
+                            config_kwargs.pop("thinking_config", None)
+                        active_config = _build_native_generate_config(
+                            config_kwargs,
+                            operation="generate_text_native_retry",
+                        )
+                        _log_budget_event(
+                            "gemini_text_empty_text_thinking_minimized",
+                            trace_id=str(trace_id or "").strip(),
+                            attempt=attempt + 1,
+                            retry_profile=retry_profile,
+                            request_class=request_class,
+                            thinking_minimized=minimal is not None,
+                        )
+                    elif not model_fell_back:
+                        fallback_model = _structured_empty_text_fallback_model(
+                            attempt_model
+                        )
+                        if fallback_model:
+                            model_fell_back = True
+                            attempt_model = fallback_model
+                            config_kwargs.pop("thinking_config", None)
+                            minimal = _minimized_thinking_config(
+                                attempt_model,
+                                operation="generate_text_native_retry",
+                            )
+                            if minimal is not None:
+                                config_kwargs["thinking_config"] = minimal
+                            active_config = _build_native_generate_config(
+                                config_kwargs,
+                                operation="generate_text_native_retry",
+                            )
+                            _log_budget_event(
+                                "gemini_text_empty_text_model_fallback",
+                                trace_id=str(trace_id or "").strip(),
+                                attempt=attempt + 1,
+                                retry_profile=retry_profile,
+                                request_class=request_class,
+                                fallback_model=fallback_model,
+                            )
                 if not await _sleep_backoff_within_budget(attempt, budget_deadline):
                     raise
-        return ""
+        return GeminiGenerationResult(text="")
 
     async def _generate_via_vertex_proxy(
         self,
@@ -2190,21 +2503,27 @@ class GeminiService:
             structured=True,
             max_output_tokens=max_tokens,
         )
+        proxy_tier = _proxy_model_tier(self.model)
         payload: dict[str, Any] = {
             "model": self.model,
+            "modelClass": proxy_tier,
+            "tier": proxy_tier,
             "prompt": prompt,
             "temperature": temperature,
-            "max_tokens": max_tokens,
-            "response_schema": _prepare_schema_for_provider(
+            "maxTokens": max_tokens,
+            "responseFormat": "json_object",
+            "jsonSchema": _prepare_schema_for_provider(
                 response_model.model_json_schema()
             ),
+            "retryProfile": "strict_json",
+            "routingIntent": {
+                "latencyBudgetMs": normalized_latency_budget_ms,
+            },
         }
         if _normalize_service_tier(service_tier):
-            payload["service_tier"] = _normalize_service_tier(service_tier)
+            payload["serviceTier"] = _normalize_service_tier(service_tier)
         if reasoning_controls["thinking_budget"] is not None:
-            payload["thinking_budget"] = reasoning_controls["thinking_budget"]
-        if reasoning_controls["thinking_level"] is not None:
-            payload["thinking_level"] = reasoning_controls["thinking_level"]
+            payload["thinkingBudget"] = reasoning_controls["thinking_budget"]
         log_context = {
             "trace_id": str(trace_id or "").strip(),
             "model": self.model,
@@ -2245,7 +2564,17 @@ class GeminiService:
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     r = await client.post(f"{proxy_url}/generate", json=payload)
                     r.raise_for_status()
-                    parsed = response_model.model_validate(r.json())
+                    response_payload = r.json()
+                    response_text = (
+                        response_payload.get("text")
+                        if isinstance(response_payload, dict)
+                        else None
+                    )
+                    parsed = (
+                        response_model.model_validate_json(response_text)
+                        if isinstance(response_text, str) and response_text.strip()
+                        else response_model.model_validate(response_payload)
+                    )
                     _log_budget_event("gemini_proxy_structured_success", **attempt_log)
                     return parsed
             except Exception as exc:
@@ -2275,19 +2604,51 @@ class GeminiService:
         request_class: str | None = None,
         trace_id: str | None = None,
     ) -> str:
+        result = await self._generate_text_proxy_with_usage(
+            prompt,
+            temperature,
+            max_tokens,
+            service_tier,
+            thinking_budget=thinking_budget,
+            latency_budget_ms=latency_budget_ms,
+            retry_profile=retry_profile,
+            request_class=request_class,
+            trace_id=trace_id,
+        )
+        return result.text
+
+    async def _generate_text_proxy_with_usage(
+        self,
+        prompt: str,
+        temperature: float,
+        max_tokens: int,
+        service_tier: str | None,
+        thinking_budget: int | None = None,
+        latency_budget_ms: int | None = None,
+        retry_profile: str | None = None,
+        request_class: str | None = None,
+        trace_id: str | None = None,
+    ) -> GeminiGenerationResult:
         proxy_url = _vertex_proxy_url()
         if not proxy_url:
             raise RuntimeError("No Gemini credentials and no VERTEX_PROXY_URL")
         import httpx  # type: ignore[import]
 
+        proxy_tier = _proxy_model_tier(self.model)
         payload = {
             "model": self.model,
+            "modelClass": proxy_tier,
+            "tier": proxy_tier,
             "prompt": prompt,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "maxTokens": max_tokens,
         }
         if _normalize_service_tier(service_tier):
-            payload["service_tier"] = _normalize_service_tier(service_tier)
+            payload["serviceTier"] = _normalize_service_tier(service_tier)
+        if retry_profile:
+            payload["retryProfile"] = str(retry_profile).strip()
+        if request_class:
+            payload["taskType"] = str(request_class).strip()
         reasoning_controls = _resolve_reasoning_controls(
             self.model,
             thinking_budget,
@@ -2297,12 +2658,13 @@ class GeminiService:
             structured=False,
         )
         if reasoning_controls["thinking_budget"] is not None:
-            payload["thinking_budget"] = reasoning_controls["thinking_budget"]
-        if reasoning_controls["thinking_level"] is not None:
-            payload["thinking_level"] = reasoning_controls["thinking_level"]
+            payload["thinkingBudget"] = reasoning_controls["thinking_budget"]
         normalized_latency_budget_ms = _normalize_latency_budget_ms(
             latency_budget_ms, structured=False
         )
+        payload["routingIntent"] = {
+            "latencyBudgetMs": normalized_latency_budget_ms,
+        }
         budget_deadline = _budget_deadline(normalized_latency_budget_ms)
         last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES):
@@ -2331,10 +2693,18 @@ class GeminiService:
                     connect=min(10.0, attempt_timeout_s),
                 )
                 async with httpx.AsyncClient(timeout=timeout) as client:
-                    r = await client.post(f"{proxy_url}/generate-text", json=payload)
+                    r = await client.post(f"{proxy_url}/generate", json=payload)
                     r.raise_for_status()
-                    return _require_non_empty_text(
-                        r.json().get("text", ""), "Vertex proxy"
+                    response_payload = r.json()
+                    input_tokens, output_tokens = _extract_generation_usage(
+                        response_payload
+                    )
+                    return GeminiGenerationResult(
+                        text=_require_non_empty_text(
+                            response_payload.get("text", ""), "Vertex proxy"
+                        ),
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
                     )
             except Exception as exc:
                 if attempt == _MAX_RETRIES - 1:
@@ -2464,24 +2834,38 @@ class GeminiService:
         """Generate multiple embedding vectors in one call.
 
         Uses the native SDK when available. Falls back to the Cloud Function
-        proxy when ``_client`` is None. When the resolved model fails (model not
-        found, quota exhausted, timeout), retries once on the configured
-        fallback embedding model so a misconfigured or inaccessible primary
-        model degrades the embedding tier instead of failing it outright.
+        proxy when ``_client`` is None. When the resolved model fails with a
+        model-not-found error (404 / unknown model), retries once on the
+        configured fallback embedding model and pins that fallback via a sticky
+        override (TTL ``_STICKY_EMBEDDING_TTL_SECONDS``) so a misconfigured or
+        retired primary model degrades the embedding tier instead of failing it
+        outright. Transient failures (quota exhausted, timeout, 5xx) are raised
+        unchanged so the caller's own retry policy handles them — falling back
+        on those would mask capacity problems behind a silent model swap.
         """
         if not texts:
             return []
-        resolved_model = _resolve_embedding_model(model)
+        primary_model = _resolve_embedding_model(model)
+        resolved_model = primary_model
+        sticky_model = _active_sticky_embedding_model_override()
+        if sticky_model and sticky_model != primary_model:
+            resolved_model = sticky_model
         try:
-            return await self._embed_batch_with_model(
+            result = await self._embed_batch_with_model(
                 texts, resolved_model, task_type, latency_budget_ms
             )
+            if resolved_model == primary_model:
+                _clear_sticky_embedding_model_override()
+            return result
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             fallback_model = _resolve_embedding_model("fallback")
             if not fallback_model or fallback_model == resolved_model:
                 raise
+            if not _is_embedding_model_not_found_error(exc):
+                raise
+            _set_sticky_embedding_model_override(fallback_model)
             logger.warning(
                 "gemini_embed_fallback_model | %s",
                 json.dumps(

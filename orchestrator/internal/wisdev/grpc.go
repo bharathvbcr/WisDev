@@ -246,7 +246,7 @@ func (s *agentGatewayGRPCServer) ExecutePlan(req *wisdevpb.ExecutePlanRequest, s
 					Payload: map[string]any{
 						"error":             err.Error(),
 						"adkRunnerExecuted": true,
-						"adkRuntime":        "google.golang.org/adk",
+						"adkRuntime":        "google.golang.org/adk/v2",
 					},
 				}:
 				case <-stream.Context().Done():

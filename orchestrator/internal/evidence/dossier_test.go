@@ -82,6 +82,70 @@ func TestBuildRawMaterialSet(t *testing.T) {
 	assert.Empty(t, dossier.Contradictions)
 }
 
+func TestBuildRawMaterialSetExtractsTableHeadersAndRows(t *testing.T) {
+	rawMaterials, _, err := BuildRawMaterialSet("job-table", "metrics", []search.Paper{
+		{
+			ID:       "doi:10.1000/table",
+			Title:    "Table Paper",
+			Abstract: "The study reports benchmark metrics.",
+			StructureMap: []any{
+				map[string]any{
+					"type":    "table",
+					"title":   "Benchmark Results",
+					"caption": "Accuracy improved across tasks.",
+					"headers": []any{"Task", "Score"},
+					"rows": []any{
+						[]any{"QA", "0.91"},
+						[]any{"Summarization", "0.87"},
+					},
+				},
+				map[string]any{
+					"type":  "table",
+					"title": "Cells Alias Table",
+					"cells": []any{
+						[]any{"A", "B"},
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, rawMaterials.VisualEvidence)
+
+	var benchmark, cellsAlias *VisualEvidence
+	for i := range rawMaterials.VisualEvidence {
+		switch rawMaterials.VisualEvidence[i].Title {
+		case "Benchmark Results":
+			benchmark = &rawMaterials.VisualEvidence[i]
+		case "Cells Alias Table":
+			cellsAlias = &rawMaterials.VisualEvidence[i]
+		}
+	}
+	require.NotNil(t, benchmark)
+	assert.Equal(t, []string{"Task", "Score"}, benchmark.Headers)
+	assert.Equal(t, [][]string{{"QA", "0.91"}, {"Summarization", "0.87"}}, benchmark.Rows)
+	require.NotNil(t, cellsAlias)
+	assert.Equal(t, [][]string{{"A", "B"}}, cellsAlias.Rows)
+
+	for _, visual := range rawMaterials.VisualEvidence {
+		if visual.Kind != "table" {
+			continue
+		}
+		require.NotEmpty(t, visual.SourcePacketIDs, "table visuals should ground to linked claim packets")
+		for _, packetID := range visual.SourcePacketIDs {
+			found := false
+			for _, packet := range rawMaterials.ClaimPackets {
+				if packet.PacketID != packetID {
+					continue
+				}
+				found = true
+				assert.Contains(t, packet.VisualEvidenceIDs, visual.VisualID)
+			}
+			assert.True(t, found, "source packet %s should exist", packetID)
+		}
+	}
+}
+
 func TestExtractQuantitativeClaims(t *testing.T) {
 	got := extractQuantitativeClaims("RAG reduced hallucinations by 35% across 250 patients in 12 studies")
 	require.NotEmpty(t, got)

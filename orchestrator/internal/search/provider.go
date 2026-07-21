@@ -12,16 +12,18 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
+	"math"
+	"net/http"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/researchquery"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/resilience"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/telemetry"
 	llmv1 "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm"
-	"log/slog"
-	"math"
-	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -65,21 +67,129 @@ func providerHTTPErrorKind(resp *http.Response) string {
 	return "none"
 }
 
+type providerHTTPError struct {
+	provider   string
+	statusCode int
+	kind       string
+	retryAfter time.Duration
+}
+
+func (e *providerHTTPError) Error() string {
+	switch e.kind {
+	case "rate_limit":
+		return providerError(e.provider, "rate limit exceeded (%d)", e.statusCode).Error()
+	case "upstream_5xx":
+		return providerError(e.provider, "upstream error (%d)", e.statusCode).Error()
+	case "permanent":
+		return providerError(e.provider, "HTTP %d", e.statusCode).Error()
+	default:
+		return providerError(e.provider, "HTTP %d", e.statusCode).Error()
+	}
+}
+
+func providerRetryAfter(resp *http.Response) time.Duration {
+	if resp == nil {
+		return 0
+	}
+	raw := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if raw == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	when, err := http.ParseTime(raw)
+	if err != nil {
+		return 0
+	}
+	delay := time.Until(when)
+	if delay <= 0 {
+		return 0
+	}
+	return delay
+}
+
 func providerHTTPStatusError(provider string, resp *http.Response) error {
 	kind := providerHTTPErrorKind(resp)
 	status := 0
 	if resp != nil {
 		status = resp.StatusCode
 	}
-	switch kind {
-	case "rate_limit":
-		return providerError(provider, "rate limit exceeded (%d)", status)
-	case "upstream_5xx":
-		return providerError(provider, "upstream error (%d)", status)
-	case "permanent":
-		return providerError(provider, "HTTP %d", status)
+	return &providerHTTPError{
+		provider:   provider,
+		statusCode: status,
+		kind:       kind,
+		retryAfter: providerRetryAfter(resp),
+	}
+}
+
+func providerRateLimitError(err error) (*providerHTTPError, bool) {
+	var httpErr *providerHTTPError
+	if errors.As(err, &httpErr) && httpErr.kind == "rate_limit" {
+		return httpErr, true
+	}
+	return nil, false
+}
+
+func providerRateLimitCooldown(provider string, err error) time.Duration {
+	if httpErr, ok := providerRateLimitError(err); ok && httpErr.retryAfter > 0 {
+		if httpErr.retryAfter > 2*time.Minute {
+			return 2 * time.Minute
+		}
+		return httpErr.retryAfter
+	}
+	switch NormalizeProviderName(provider) {
+	case "semantic_scholar":
+		return 30 * time.Second
+	case "pubmed":
+		return 15 * time.Second
 	default:
-		return providerError(provider, "HTTP %d", status)
+		return 10 * time.Second
+	}
+}
+
+func providerDispatchFailureDetails(err error) (stage string, code string, result string) {
+	if _, ok := providerRateLimitError(err); ok {
+		return "provider_rate_limited", "PROVIDER_RATE_LIMITED", "degraded"
+	}
+	return "provider_dispatch_failed", "PROVIDER_SEARCH_FAILED", "failure"
+}
+
+type providerRateGateDeferredError struct {
+	provider string
+	wait     time.Duration
+}
+
+func (e *providerRateGateDeferredError) Error() string {
+	return providerError(e.provider, "provider rate gate deferred for %s", e.wait.Round(time.Second)).Error()
+}
+
+func providerRateGateDeferredErrorFrom(err error) (*providerRateGateDeferredError, bool) {
+	var deferredErr *providerRateGateDeferredError
+	if errors.As(err, &deferredErr) {
+		return deferredErr, true
+	}
+	return nil, false
+}
+
+func providerRateGateMaxWait(name string) time.Duration {
+	switch NormalizeProviderName(name) {
+	case "semantic_scholar", "pubmed":
+		return 8 * time.Second
+	default:
+		return 0
+	}
+}
+
+func providerSemaphoreAcquireTimeout(name string) time.Duration {
+	switch NormalizeProviderName(name) {
+	case "semantic_scholar", "pubmed":
+		return 15 * time.Second
+	default:
+		return 5 * time.Second
 	}
 }
 
@@ -125,6 +235,10 @@ type SearchOpts struct {
 	YearTo           int
 	SkipCache        bool
 	QualitySort      bool
+	// ResearchMode, when set with QualitySort, applies policy research-mode
+	// ranking weights instead of query-intent ScoreQuality.
+	ResearchMode     string
+	OpenAccess       bool // OpenAlex is_oa:true filter; providers without an OA filter ignore it
 	ExpandQuery      bool
 	PageIndexRerank  bool
 	Stage2Rerank     bool
@@ -303,10 +417,13 @@ type SearchProvider interface {
 	Tools() []string
 }
 
-// CitationGraphProvider extends SearchProvider with citation-specific retrieval.
+// CitationGraphProvider extends SearchProvider with citation-graph retrieval.
+// GetCitations returns papers that cite paperID (forward / citing).
+// GetReferences returns papers that paperID cites (backward / cited).
 type CitationGraphProvider interface {
 	SearchProvider
 	GetCitations(ctx context.Context, paperID string, limit int) ([]Paper, error)
+	GetReferences(ctx context.Context, paperID string, limit int) ([]Paper, error)
 }
 
 // ============================================================
@@ -324,6 +441,10 @@ type ProviderRegistry struct {
 	providerMinIntervals map[string]time.Duration
 	providerLastRequest  map[string]time.Time
 	redis                redis.UniversalClient
+	// memCache backstops Redis so repeat queries stay fast on deployments
+	// without UPSTASH_REDIS_URL. Registry-scoped so each test registry is
+	// naturally isolated while the production singleton keeps its hits.
+	memCache *MemoryTTLCache
 
 	// Phase 2: Search Intelligence
 	intelligence *SearchIntelligence
@@ -346,18 +467,20 @@ func NewProviderRegistry() *ProviderRegistry {
 		providerMinIntervals: map[string]time.Duration{
 			"arxiv":            3 * time.Second,
 			"semantic_scholar": 1200 * time.Millisecond,
+			"pubmed":           1200 * time.Millisecond,
 		},
 		providerLastRequest: make(map[string]time.Time),
 		// Global backpressure limit: 50 concurrent provider requests across all users
 		globalSem: semaphore.NewWeighted(50),
 		abTest:    NewABTestManager(0.05), // 5% canary by default
+		memCache:  NewMemoryTTLCache(0, 0),
 	}
 	return reg
 }
 
 func defaultProviderConcurrency(name string) int64 {
 	switch NormalizeProviderName(name) {
-	case "arxiv", "semantic_scholar":
+	case "arxiv", "semantic_scholar", "pubmed":
 		return 1
 	default:
 		return 10
@@ -366,10 +489,19 @@ func defaultProviderConcurrency(name string) int64 {
 
 func maxProviderConcurrency(name string) int64 {
 	switch NormalizeProviderName(name) {
-	case "arxiv", "semantic_scholar":
+	case "arxiv", "semantic_scholar", "pubmed":
 		return 1
 	default:
 		return 20
+	}
+}
+
+func shouldSkipProviderQuery(providerName string, query string) bool {
+	switch NormalizeProviderName(providerName) {
+	case "arxiv":
+		return shouldSkipArXivQuery(query)
+	default:
+		return false
 	}
 }
 
@@ -398,7 +530,7 @@ func (r *ProviderRegistry) Register(p SearchProvider) {
 	defer r.mu.Unlock()
 	name := p.Name()
 	r.providers[name] = p
-	r.breakers[name] = resilience.NewSearchCircuitBreaker(name)
+	r.breakers[name] = resilience.NewCircuitBreaker(name)
 
 	cap := defaultProviderConcurrency(name)
 	r.adaptiveCaps[name] = cap
@@ -453,6 +585,10 @@ func (r *ProviderRegistry) SetConcurrencyLimit(name string, limit int64) {
 }
 
 func (r *ProviderRegistry) waitForProviderRateGate(ctx context.Context, name string) (time.Duration, error) {
+	return r.waitForProviderRateGateWithin(ctx, name, 0)
+}
+
+func (r *ProviderRegistry) waitForProviderRateGateWithin(ctx context.Context, name string, maxWait time.Duration) (time.Duration, error) {
 	providerName := NormalizeProviderName(name)
 	for {
 		r.mu.Lock()
@@ -468,6 +604,13 @@ func (r *ProviderRegistry) waitForProviderRateGate(ctx context.Context, name str
 			r.mu.Unlock()
 			return 0, nil
 		}
+		if maxWait > 0 && wait > maxWait {
+			r.mu.Unlock()
+			return wait, &providerRateGateDeferredError{
+				provider: providerName,
+				wait:     wait,
+			}
+		}
 		r.mu.Unlock()
 
 		timer := time.NewTimer(wait)
@@ -477,6 +620,24 @@ func (r *ProviderRegistry) waitForProviderRateGate(ctx context.Context, name str
 			timer.Stop()
 			return wait, ctx.Err()
 		}
+	}
+}
+
+func (r *ProviderRegistry) deferProviderRateGate(name string, cooldown time.Duration) {
+	if r == nil || cooldown <= 0 {
+		return
+	}
+	providerName := NormalizeProviderName(name)
+	if providerName == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	interval := r.providerMinIntervals[providerName]
+	notBeforeMarker := time.Now().Add(cooldown - interval)
+	if notBeforeMarker.After(r.providerLastRequest[providerName]) {
+		r.providerLastRequest[providerName] = notBeforeMarker
 	}
 }
 
@@ -595,10 +756,10 @@ func (r *ProviderRegistry) ResolveRequestedProviders(names []string) ([]SearchPr
 			})
 			continue
 		}
-		if breaker := r.breakers[name]; breaker != nil && !breaker.Admit() {
+		if breaker := r.breakers[name]; breaker != nil && !breaker.Allow() {
 			warnings = append(warnings, ProviderWarning{
 				Provider: name,
-				Message:  "requested provider is temporarily unavailable (circuit breaker open)",
+				Message:  "requested provider is temporarily unavailable",
 			})
 			continue
 		}
@@ -611,20 +772,36 @@ func (r *ProviderRegistry) ResolveRequestedProviders(names []string) ([]SearchPr
 
 // GetCitations fetches papers that cited the given paper ID.
 func (r *ProviderRegistry) GetCitations(ctx context.Context, paperID string, limit int) ([]Paper, error) {
+	return r.citationGraphLookup(ctx, paperID, limit, true)
+}
+
+// GetReferences fetches papers referenced (cited) by the given paper ID.
+func (r *ProviderRegistry) GetReferences(ctx context.Context, paperID string, limit int) ([]Paper, error) {
+	return r.citationGraphLookup(ctx, paperID, limit, false)
+}
+
+func (r *ProviderRegistry) citationGraphLookup(ctx context.Context, paperID string, limit int, forward bool) ([]Paper, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+
+	lookup := func(cp CitationGraphProvider) ([]Paper, error) {
+		if forward {
+			return cp.GetCitations(ctx, paperID, limit)
+		}
+		return cp.GetReferences(ctx, paperID, limit)
+	}
 
 	// 1. Try Semantic Scholar first (preferred)
 	if p, ok := r.providers["semantic_scholar"]; ok {
 		if cp, ok := p.(CitationGraphProvider); ok && cp.Healthy() {
-			return cp.GetCitations(ctx, paperID, limit)
+			return lookup(cp)
 		}
 	}
 
 	// 2. Fallback to any other healthy provider that implements the interface
 	for _, p := range r.providers {
 		if cp, ok := p.(CitationGraphProvider); ok && cp.Healthy() {
-			return cp.GetCitations(ctx, paperID, limit)
+			return lookup(cp)
 		}
 	}
 
@@ -736,6 +913,14 @@ func StreamParallelSearch(ctx context.Context, reg *ProviderRegistry, query stri
 				breaker := reg.breakers[prov.Name()]
 				reg.mu.RUnlock()
 
+				if shouldSkipProviderQuery(prov.Name(), query) {
+					select {
+					case out <- ProviderResult{Provider: prov.Name(), Papers: []Paper{}, LatencyMs: time.Since(t0).Milliseconds()}:
+					case <-ctx.Done():
+					}
+					return
+				}
+
 				rateGateWait, rateGateErr := reg.waitForProviderRateGate(ctx, prov.Name())
 				if rateGateErr != nil {
 					select {
@@ -831,7 +1016,7 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 	// 0. Cache check
 	cacheKey := getCacheKey(query, opts)
 	if !opts.SkipCache {
-		if cached, ok := checkCache(ctx, reg.redis, cacheKey); ok {
+		if cached, ok := checkCache(ctx, reg.memCache, reg.redis, cacheKey); ok {
 			return *cached
 		}
 	}
@@ -898,14 +1083,26 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 		sem := reg.semaphores[p.Name()]
 		reg.mu.RUnlock()
 
-		if breaker != nil && !breaker.Admit() {
+		if shouldSkipProviderQuery(p.Name(), query) {
+			logProviderSearchStage(ctx, "provider_query_skipped", p.Name(), query, opts,
+				"result", "skipped",
+				"result_count", 0,
+			)
+			results <- ProviderResult{
+				Provider: p.Name(),
+				Papers:   []Paper{},
+			}
+			continue
+		}
+
+		if breaker != nil && !breaker.Allow() {
 			logProviderSearchFailure(ctx, "circuit_breaker_open", p.Name(), query, opts,
 				"result", "failure",
 				"error_code", "CIRCUIT_BREAKER_OPEN",
 			)
 			results <- ProviderResult{
 				Provider: p.Name(),
-				Err:      fmt.Errorf("circuit breaker open for %s", p.Name()),
+				Err:      fmt.Errorf("circuit breaker open"),
 			}
 			continue
 		}
@@ -916,29 +1113,21 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 			)
 			defer pspan.End()
 
-			// Acquire provider-specific semaphore with timeout
-			acquireCtx, cancel := context.WithTimeout(pctx, 5*time.Second)
-			defer cancel()
-
-			if s != nil {
-				if err := s.Acquire(acquireCtx, 1); err != nil {
-					pspan.RecordError(err)
-					logProviderSearchFailure(pctx, "concurrency_acquire_failed", prov.Name(), query, opts,
-						"result", "failure",
-						"error_code", "PROVIDER_CONCURRENCY_LIMIT",
-						"error", err.Error(),
+			rateGateWait, rateGateErr := reg.waitForProviderRateGateWithin(pctx, prov.Name(), providerRateGateMaxWait(prov.Name()))
+			if rateGateErr != nil {
+				if deferredErr, deferred := providerRateGateDeferredErrorFrom(rateGateErr); deferred {
+					pspan.SetAttributes(attribute.Int64("provider_rate_gate_deferred_ms", deferredErr.wait.Milliseconds()))
+					logProviderSearchStage(pctx, "rate_gate_deferred", prov.Name(), query, opts,
+						"result", "degraded",
+						"error_code", "PROVIDER_RATE_GATE_DEFERRED",
+						"cooldown_ms", deferredErr.wait.Milliseconds(),
 					)
 					results <- ProviderResult{
 						Provider: prov.Name(),
-						Err:      fmt.Errorf("concurrency limit reached: %w", err),
+						Err:      rateGateErr,
 					}
 					return
 				}
-				defer s.Release(1)
-			}
-
-			rateGateWait, rateGateErr := reg.waitForProviderRateGate(pctx, prov.Name())
-			if rateGateErr != nil {
 				pspan.RecordError(rateGateErr)
 				logProviderSearchFailure(pctx, "rate_gate_cancelled", prov.Name(), query, opts,
 					"result", "failure",
@@ -957,6 +1146,28 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 					"latency_ms", rateGateWait.Milliseconds(),
 					"result", "waited",
 				)
+			}
+
+			// Acquire provider-specific semaphore after rate gating so long
+			// cooldown waits do not occupy the provider's single-flight slot.
+			acquireCtx, cancel := context.WithTimeout(pctx, providerSemaphoreAcquireTimeout(prov.Name()))
+			defer cancel()
+
+			if s != nil {
+				if err := s.Acquire(acquireCtx, 1); err != nil {
+					pspan.RecordError(err)
+					logProviderSearchFailure(pctx, "concurrency_acquire_failed", prov.Name(), query, opts,
+						"result", "failure",
+						"error_code", "PROVIDER_CONCURRENCY_LIMIT",
+						"error", err.Error(),
+					)
+					results <- ProviderResult{
+						Provider: prov.Name(),
+						Err:      fmt.Errorf("concurrency limit reached: %w", err),
+					}
+					return
+				}
+				defer s.Release(1)
 			}
 
 			t0 := time.Now()
@@ -978,12 +1189,25 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 
 			if err != nil {
 				pspan.RecordError(err)
-				logProviderSearchFailure(pctx, "provider_dispatch_failed", prov.Name(), query, opts,
-					"result", "failure",
-					"error_code", "PROVIDER_SEARCH_FAILED",
+				stage, errorCode, result := providerDispatchFailureDetails(err)
+				logAttrs := []any{
+					"result", result,
+					"error_code", errorCode,
 					"error", err.Error(),
 					"latency_ms", time.Since(t0).Milliseconds(),
-				)
+				}
+				if _, rateLimited := providerRateLimitError(err); rateLimited {
+					cooldown := providerRateLimitCooldown(prov.Name(), err)
+					reg.deferProviderRateGate(prov.Name(), cooldown)
+					logAttrs = append(logAttrs, "cooldown_ms", cooldown.Milliseconds())
+					logProviderSearchStage(pctx, stage, prov.Name(), query, opts,
+						logAttrs...,
+					)
+				} else {
+					logProviderSearchFailure(pctx, stage, prov.Name(), query, opts,
+						logAttrs...,
+					)
+				}
 			} else {
 				logProviderSearchStage(pctx, "provider_dispatch_complete", prov.Name(), query, opts,
 					"result", "success",
@@ -1073,7 +1297,11 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 	}
 
 	if opts.QualitySort {
-		ScoreQuality(deduped, query)
+		if strings.TrimSpace(opts.ResearchMode) != "" {
+			deduped = SortPapersByPreferenceWithResearchMode(deduped, opts.ResearchMode)
+		} else {
+			ScoreQuality(deduped, query)
+		}
 	}
 
 	limitApplied := len(deduped) > limit
@@ -1114,7 +1342,8 @@ func ParallelSearch(ctx context.Context, reg *ProviderRegistry, query string, op
 	// Async set cache
 	if !opts.SkipCache {
 		r := reg.redis
-		go setCache(context.Background(), r, cacheKey, finalResult)
+		mem := reg.memCache
+		go setCache(context.Background(), mem, r, cacheKey, finalResult)
 	}
 
 	return finalResult
@@ -1255,42 +1484,63 @@ func normaliseTitle(title string) string {
 // Quality Scoring — citation-aware relevance boost
 // ============================================================
 
-// ScoreQuality modifies Paper.Score in-place by blending RRF score
-// with a log-damped citation signal, recency, and author impact (h-factor/influential citations).
-// Papers are re-sorted descending.
+// ScoreQuality modifies Paper.Score in-place by blending RRF score with
+// citation, recency, venue prestige, open-access, and author-impact signals.
+// Intent weights fold FE SCORING_WEIGHTS_BY_INTENT (trends/review/methodology)
+// plus legacy cited/author-impact modes. Papers are re-sorted descending.
 func ScoreQuality(papers []Paper, query string) {
-	lowerQuery := strings.ToLower(query)
+	intent := detectQueryRankIntent(query)
 
-	// Detect query intent
-	isRecent := containsAny(lowerQuery, "recent", "new", "latest", "state of the art", "sota", "current", "trending", "2024", "2025", "2026", "modern", "recent advances", "recent progress", "newly")
-	isCited := containsAny(lowerQuery, "classic", "foundational", "seminal", "most cited", "highly cited", "citation", "popular", "famous", "landmark", "influential", "pioneer", "key papers", "seminal work")
-	isAuthorImpact := containsAny(lowerQuery, "h-index", "hindex", "h-factor", "h factor", "author impact", "prestigious", "h-value")
-
-	// Base weights — default favors recent publications unless query asks for classics.
+	// Base weights (RRF-first fusion path).
+	rrfWeight := 0.50
 	citationWeight := 0.18
-	recencyWeight := 0.24
-	authorImpactWeight := 0.08
-	baseWeight := 0.50
+	recencyWeight := 0.10
+	venueWeight := 0.12
+	accessWeight := 0.05
+	authorImpactWeight := 0.05
 
-	// Adjust weights dynamically based on detected intent
-	if isRecent {
-		baseWeight = 0.35
+	switch intent.name {
+	case "trends":
+		// Align with FE trends emphasis on recency.
+		rrfWeight = 0.30
+		citationWeight = 0.12
+		recencyWeight = 0.35
+		venueWeight = 0.10
+		accessWeight = 0.08
+		authorImpactWeight = 0.05
+	case "review":
+		rrfWeight = 0.25
+		citationWeight = 0.30
+		recencyWeight = 0.08
+		venueWeight = 0.25
+		accessWeight = 0.04
+		authorImpactWeight = 0.08
+	case "methodology":
+		rrfWeight = 0.35
 		citationWeight = 0.15
-		recencyWeight = 0.40
+		recencyWeight = 0.12
+		venueWeight = 0.10
+		accessWeight = 0.18
 		authorImpactWeight = 0.10
-	} else if isCited {
-		baseWeight = 0.30
-		citationWeight = 0.50
+	case "cited":
+		rrfWeight = 0.28
+		citationWeight = 0.45
 		recencyWeight = 0.05
-		authorImpactWeight = 0.15
-	} else if isAuthorImpact {
-		baseWeight = 0.30
-		citationWeight = 0.20
-		recencyWeight = 0.10
-		authorImpactWeight = 0.40
+		venueWeight = 0.10
+		accessWeight = 0.02
+		authorImpactWeight = 0.10
+	case "author_impact":
+		rrfWeight = 0.25
+		citationWeight = 0.18
+		recencyWeight = 0.08
+		venueWeight = 0.09
+		accessWeight = 0.05
+		authorImpactWeight = 0.35
 	}
 
+	const maxCitations = 10_000.0
 	const maxInfluential = 500.0
+	currentYear := time.Now().Year()
 
 	for i := range papers {
 		// Infer evidence level if missing
@@ -1298,25 +1548,42 @@ func ScoreQuality(papers []Paper, query string) {
 			papers[i].EvidenceLevel = InferEvidenceLevel(papers[i])
 		}
 
-		citNorm := CitationNorm(papers[i].CitationCount)
-		recencyNorm := RecencyNorm(papers[i].Year)
+		// 1. Citation Signal (0–1)
+		cit := math.Min(float64(papers[i].CitationCount), maxCitations)
+		citNorm := math.Log1p(cit) / math.Log1p(maxCitations)
 
+		// 2. Recency Signal (0–1)
+		// 10% decay per year, bounded between 0 and 1
+		age := currentYear - papers[i].Year
+		if age < 0 {
+			age = 0
+		}
+		recencyScore := 1.0
+		if age > 0 {
+			recencyScore = 1.0 - (float64(age) * 0.1)
+			if recencyScore < 0 {
+				recencyScore = 0
+			}
+		}
+
+		// 3. Author Impact / H-Factor Proxy Signal (0–1)
 		inf := math.Min(float64(papers[i].InfluentialCitationCount), maxInfluential)
 		authorImpactScore := math.Log1p(inf) / math.Log1p(maxInfluential)
 
-		papers[i].Score = papers[i].Score*baseWeight +
+		// 4. Venue prestige + open-access (from FE scoringConfig)
+		venueScore := VenuePrestigeNorm(papers[i].Venue)
+		accessScore := AccessNorm(papers[i].OpenAccessUrl, papers[i].PdfUrl)
+
+		// Combine signals
+		papers[i].Score = papers[i].Score*rrfWeight +
 			citNorm*citationWeight +
-			recencyNorm*recencyWeight +
+			recencyScore*recencyWeight +
+			venueScore*venueWeight +
+			accessScore*accessWeight +
 			authorImpactScore*authorImpactWeight
 	}
 
 	sort.Slice(papers, func(i, j int) bool {
-		if papers[i].Score == papers[j].Score {
-			if papers[i].Year == papers[j].Year {
-				return papers[i].CitationCount > papers[j].CitationCount
-			}
-			return papers[i].Year > papers[j].Year
-		}
 		return papers[i].Score > papers[j].Score
 	})
 }
@@ -1378,30 +1645,37 @@ func containsAny(s string, keywords ...string) bool {
 // DomainRoutes is the canonical domain → provider priority mapping.
 // Providers earlier in the list are preferred.
 var DomainRoutes = map[string][]string{
-	"medicine":              {"pubmed", "europe_pmc", "medrxiv", "semantic_scholar", "openalex", "biorxiv", "clinical_trials", "doaj"},
-	"biomedical":            {"pubmed", "semantic_scholar", "europe_pmc", "biorxiv", "medrxiv"},
-	"cs":                    {"dblp", "arxiv", "semantic_scholar", "papers_with_code", "openalex"},
-	"ml":                    {"arxiv", "semantic_scholar", "papers_with_code", "openalex"},
-	"social":                {"openalex", "semantic_scholar", "core", "crossref", "ssrn", "doaj"},
-	"climate":               {"openalex", "semantic_scholar", "core", "crossref"},
-	"physics":               {"arxiv", "nasa_ads", "semantic_scholar", "openalex", "core"},
-	"biology":               {"pubmed", "biorxiv", "medrxiv", "europe_pmc", "semantic_scholar", "openalex", "doaj"},
-	"neuro":                 {"biorxiv", "medrxiv", "europe_pmc", "semantic_scholar", "openalex", "pubmed"},
-	"humanities":            {"openalex", "core", "crossref", "semantic_scholar", "doaj"},
-	"mathematics":           {"arxiv", "openalex", "semantic_scholar", "repec"},
-	"math":                  {"arxiv", "semantic_scholar", "openalex", "repec"},
-	"chemistry":             {"openalex", "semantic_scholar", "europe_pmc", "pubmed"},
-	"economics":             {"repec", "ssrn", "semantic_scholar", "openalex", "core", "crossref"},
-	"law":                   {"openalex", "semantic_scholar", "crossref", "ssrn"},
-	"education":             {"openalex", "semantic_scholar", "core"},
-	"environmental_science": {"openalex", "semantic_scholar", "core", "crossref", "biorxiv"},
-	"materials_science":     {"openalex", "semantic_scholar", "arxiv", "crossref"},
-	"agriculture":           {"openalex", "semantic_scholar", "europe_pmc", "pubmed", "biorxiv"},
-	"linguistics":           {"openalex", "semantic_scholar", "arxiv"},
-	"philosophy":            {"philpapers", "semantic_scholar", "openalex", "doaj"},
-	"engineering":           {"ieee", "semantic_scholar", "openalex", "arxiv", "crossref"},
-	"astronomy":             {"nasa_ads", "arxiv", "semantic_scholar", "openalex"},
-	"general":               {"semantic_scholar", "openalex", "core", "crossref", "arxiv", "doaj"},
+	"medicine":                {"pubmed", "europe_pmc", "medrxiv", "semantic_scholar", "openalex", "biorxiv", "clinical_trials", "doaj"},
+	"biomedical":              {"pubmed", "semantic_scholar", "europe_pmc", "biorxiv", "medrxiv"},
+	"cs":                      {"dblp", "arxiv", "semantic_scholar", "papers_with_code", "openalex"},
+	"computer science":        {"dblp", "arxiv", "semantic_scholar", "papers_with_code", "openalex"},
+	"computer_science":        {"dblp", "arxiv", "semantic_scholar", "papers_with_code", "openalex"},
+	"ai":                      {"dblp", "arxiv", "semantic_scholar", "papers_with_code", "openalex"},
+	"ml":                      {"arxiv", "semantic_scholar", "papers_with_code", "openalex"},
+	"machine learning":        {"arxiv", "semantic_scholar", "papers_with_code", "openalex"},
+	"machine_learning":        {"arxiv", "semantic_scholar", "papers_with_code", "openalex"},
+	"artificial intelligence": {"dblp", "arxiv", "semantic_scholar", "papers_with_code", "openalex"},
+	"artificial_intelligence": {"dblp", "arxiv", "semantic_scholar", "papers_with_code", "openalex"},
+	"social":                  {"openalex", "semantic_scholar", "core", "crossref", "ssrn", "doaj"},
+	"climate":                 {"openalex", "semantic_scholar", "core", "crossref"},
+	"physics":                 {"arxiv", "nasa_ads", "semantic_scholar", "openalex", "core"},
+	"biology":                 {"pubmed", "biorxiv", "medrxiv", "europe_pmc", "semantic_scholar", "openalex", "doaj"},
+	"neuro":                   {"biorxiv", "medrxiv", "europe_pmc", "semantic_scholar", "openalex", "pubmed"},
+	"humanities":              {"openalex", "core", "crossref", "semantic_scholar", "doaj"},
+	"mathematics":             {"arxiv", "openalex", "semantic_scholar", "repec"},
+	"math":                    {"arxiv", "semantic_scholar", "openalex", "repec"},
+	"chemistry":               {"openalex", "semantic_scholar", "europe_pmc", "pubmed"},
+	"economics":               {"repec", "ssrn", "semantic_scholar", "openalex", "core", "crossref"},
+	"law":                     {"openalex", "semantic_scholar", "crossref", "ssrn"},
+	"education":               {"openalex", "semantic_scholar", "core"},
+	"environmental_science":   {"openalex", "semantic_scholar", "core", "crossref", "biorxiv"},
+	"materials_science":       {"openalex", "semantic_scholar", "arxiv", "crossref"},
+	"agriculture":             {"openalex", "semantic_scholar", "europe_pmc", "pubmed", "biorxiv"},
+	"linguistics":             {"openalex", "semantic_scholar", "arxiv"},
+	"philosophy":              {"philpapers", "semantic_scholar", "openalex", "doaj"},
+	"engineering":             {"ieee", "semantic_scholar", "openalex", "arxiv", "crossref"},
+	"astronomy":               {"nasa_ads", "arxiv", "semantic_scholar", "openalex"},
+	"general":                 {"semantic_scholar", "openalex", "core", "crossref", "arxiv", "doaj"},
 }
 
 // DefaultProviderOrder is used when no domain is specified or recognised.

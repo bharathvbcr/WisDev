@@ -11,10 +11,10 @@ import (
 
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/workflowagents/parallelagent"
-	"google.golang.org/adk/runner"
-	adksession "google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
+	"google.golang.org/adk/v2/runner"
+	adksession "google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
 )
 
@@ -236,7 +236,7 @@ func (rt *UnifiedResearchRuntime) executeADKSwarm(
 			allQueries = append(allQueries, res.Queries...)
 			applyResearchWorkerExecution(state, res)
 			metadata := map[string]any{
-				"adkRuntime":       "google.golang.org/adk",
+				"adkRuntime":       "google.golang.org/adk/v2",
 				"adkWorkflowAgent": "parallelagent",
 				"adkWorkflowStage": "parallel_fanout_gather",
 				"adkWave":          waveIdx + 1,
@@ -306,11 +306,11 @@ func (rt *UnifiedResearchRuntime) executeADKWorkerWave(
 					if res.Artifacts == nil {
 						res.Artifacts = map[string]any{}
 					}
-					event := adksession.NewEvent(invocation.InvocationID())
+					event := adksession.NewEvent(invocation, invocation.InvocationID())
 					event.Author = string(workerRole)
 					event.Content = genai.NewContentFromText(fmt.Sprintf("Research worker completed: %s", workerRole), genai.RoleModel)
 					event.Actions.StateDelta["researchWorkerResult"] = res
-					event.Actions.StateDelta["adkRuntime"] = "google.golang.org/adk"
+					event.Actions.StateDelta["adkRuntime"] = "google.golang.org/adk/v2"
 					event.Actions.StateDelta["adkWorkflowAgent"] = "parallelagent"
 					event.Actions.StateDelta["adkSubAgent"] = string(workerRole)
 					event.TurnComplete = true
@@ -413,7 +413,7 @@ func (rt *UnifiedResearchRuntime) executeSupervisorWorkerWave(
 			if res.Artifacts == nil {
 				res.Artifacts = map[string]any{}
 			}
-			res.Artifacts["adkRuntime"] = "google.golang.org/adk"
+			res.Artifacts["adkRuntime"] = "google.golang.org/adk/v2"
 			res.Artifacts["adkWorkflowAgent"] = "parallelagent"
 			res.Artifacts["adkFallback"] = true
 			res.Artifacts["adkFallbackStage"] = "parallel_wave_runtime"

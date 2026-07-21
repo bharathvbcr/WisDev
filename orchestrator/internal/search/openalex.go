@@ -73,12 +73,20 @@ func (o *OpenAlexProvider) Search(ctx context.Context, query string, opts Search
 
 	reqUrl := fmt.Sprintf("%s?search=%s&per_page=%d", o.baseURL, url.QueryEscape(query), limit)
 
+	// OpenAlex expects a single comma-separated filter= clause; accumulate then join.
+	var filters []string
 	if opts.YearFrom > 0 {
 		if opts.YearTo > 0 {
-			reqUrl += fmt.Sprintf("&filter=publication_year:%d-%d", opts.YearFrom, opts.YearTo)
+			filters = append(filters, fmt.Sprintf("publication_year:%d-%d", opts.YearFrom, opts.YearTo))
 		} else {
-			reqUrl += fmt.Sprintf("&filter=publication_year:>%d", opts.YearFrom-1)
+			filters = append(filters, fmt.Sprintf("publication_year:>%d", opts.YearFrom-1))
 		}
+	}
+	if opts.OpenAccess {
+		filters = append(filters, "is_oa:true")
+	}
+	if len(filters) > 0 {
+		reqUrl += "&filter=" + strings.Join(filters, ",")
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqUrl, nil)
@@ -110,58 +118,117 @@ func (o *OpenAlexProvider) Search(ctx context.Context, query string, opts Search
 		return nil, providerError("openalex", "failed to parse response: %v", err)
 	}
 
-	var papers []Paper
+	papers := make([]Paper, 0, len(oaRes.Results))
 	for _, w := range oaRes.Results {
-		sourceName := w.PrimaryLocation.Source.DisplayName
-		if sourceName == "" {
-			sourceName = "OpenAlex"
-		}
-		authors := make([]string, 0, len(w.Authorships))
-		for _, authorship := range w.Authorships {
-			name := strings.TrimSpace(authorship.Author.DisplayName)
-			if name == "" {
-				name = strings.TrimSpace(authorship.RawAuthorName)
-			}
-			if name == "" {
-				continue
-			}
-			authors = append(authors, name)
-		}
-		pdfURL := strings.TrimSpace(w.PrimaryLocation.PDFURL)
-		oaURL := ""
-		if w.OpenAccess.IsOA && w.OpenAccess.OAURL != "" {
-			oaURL = strings.TrimSpace(w.OpenAccess.OAURL)
-		}
-		link := strings.TrimSpace(w.PrimaryLocation.LandingPageURL)
-		if link == "" {
-			link = strings.TrimSpace(w.DOI)
-		}
-		if link == "" {
-			link = strings.TrimSpace(w.ID)
-		}
-		if pdfURL == "" {
-			pdfURL = oaURL
-		}
-		papers = append(papers, Paper{
-			ID:             "openalex:" + strings.TrimPrefix(w.ID, "https://openalex.org/"),
-			Title:          w.Title,
-			Abstract:       reconstructOpenAlexAbstract(w.AbstractInvertedIndex),
-			Link:           link,
-			DOI:            strings.TrimPrefix(w.DOI, "https://doi.org/"),
-			Source:         "openalex",
-			SourceApis:     []string{"openalex"},
-			Authors:        authors,
-			Venue:          sourceName,
-			Year:           w.PublicationYear,
-			CitationCount:  w.CitedByCount,
-			ReferenceCount: w.ReferencedWorksCount,
-			OpenAccessUrl:  oaURL,
-			PdfUrl:         pdfURL,
-		})
+		papers = append(papers, o.mapWork(w))
 	}
 
 	o.RecordSuccess()
 	return papers, nil
+}
+
+// mapWork converts a single OpenAlex work into the unified Paper model. Shared by
+// Search and GetByDOI so provider mapping stays DRY.
+func (o *OpenAlexProvider) mapWork(w OpenAlexWork) Paper {
+	sourceName := w.PrimaryLocation.Source.DisplayName
+	if sourceName == "" {
+		sourceName = "OpenAlex"
+	}
+	authors := make([]string, 0, len(w.Authorships))
+	for _, authorship := range w.Authorships {
+		name := strings.TrimSpace(authorship.Author.DisplayName)
+		if name == "" {
+			name = strings.TrimSpace(authorship.RawAuthorName)
+		}
+		if name == "" {
+			continue
+		}
+		authors = append(authors, name)
+	}
+	pdfURL := strings.TrimSpace(w.PrimaryLocation.PDFURL)
+	oaURL := ""
+	if w.OpenAccess.IsOA && w.OpenAccess.OAURL != "" {
+		oaURL = strings.TrimSpace(w.OpenAccess.OAURL)
+	}
+	link := strings.TrimSpace(w.PrimaryLocation.LandingPageURL)
+	if link == "" {
+		link = strings.TrimSpace(w.DOI)
+	}
+	if link == "" {
+		link = strings.TrimSpace(w.ID)
+	}
+	if pdfURL == "" {
+		pdfURL = oaURL
+	}
+	return Paper{
+		ID:             "openalex:" + strings.TrimPrefix(w.ID, "https://openalex.org/"),
+		Title:          w.Title,
+		Abstract:       reconstructOpenAlexAbstract(w.AbstractInvertedIndex),
+		Link:           link,
+		DOI:            strings.TrimPrefix(w.DOI, "https://doi.org/"),
+		Source:         "openalex",
+		SourceApis:     []string{"openalex"},
+		Authors:        authors,
+		Venue:          sourceName,
+		Year:           w.PublicationYear,
+		CitationCount:  w.CitedByCount,
+		ReferenceCount: w.ReferencedWorksCount,
+		OpenAccessUrl:  oaURL,
+		PdfUrl:         pdfURL,
+	}
+}
+
+// GetByDOI resolves a single work by DOI via OpenAlex's /works/doi:<doi> endpoint.
+// Canonical Go owner of provider DOI resolution — migrated from the frontend
+// openAlexService.getOpenAlexByDoi during frontend thinning. Returns (nil, nil) when
+// no work matches the DOI.
+func (o *OpenAlexProvider) GetByDOI(ctx context.Context, doi string) (*Paper, error) {
+	doi = strings.TrimSpace(doi)
+	if doi == "" {
+		return nil, providerError("openalex", "doi is required")
+	}
+	// Accept a bare DOI, a doi: prefix, or a full doi.org URL.
+	doi = strings.TrimPrefix(doi, "https://doi.org/")
+	doi = strings.TrimPrefix(doi, "http://doi.org/")
+	doi = strings.TrimPrefix(doi, "doi:")
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	reqUrl := fmt.Sprintf("%s/doi:%s", o.baseURL, url.PathEscape(doi))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqUrl, nil)
+	if err != nil {
+		o.RecordFailure()
+		return nil, providerError("openalex", "build request: %v", err)
+	}
+	if email := os.Getenv("OPENALEX_EMAIL"); email != "" {
+		req.URL.RawQuery = "mailto=" + url.QueryEscape(email)
+	}
+
+	resp, err := SharedHTTPClient.Do(req)
+	if err != nil {
+		o.RecordFailure()
+		return nil, providerError("openalex", "request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		o.RecordSuccess()
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		o.RecordFailure()
+		return nil, providerHTTPStatusError("openalex", resp)
+	}
+
+	var w OpenAlexWork
+	if err := json.NewDecoder(resp.Body).Decode(&w); err != nil {
+		o.RecordFailure()
+		return nil, providerError("openalex", "failed to parse response: %v", err)
+	}
+	paper := o.mapWork(w)
+	o.RecordSuccess()
+	return &paper, nil
 }
 
 func reconstructOpenAlexAbstract(index map[string][]int) string {

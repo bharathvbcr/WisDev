@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 	"google.golang.org/genai"
 )
 
@@ -91,7 +91,7 @@ func (wa *WisDevWorkflowAgent) Run(ctx agent.InvocationContext) iter.Seq2[*sessi
 
 // mapToADKEvent converts WisDev internal execution events to ADK session events.
 func (wa *WisDevWorkflowAgent) mapToADKEvent(ctx agent.InvocationContext, event PlanExecutionEvent) *session.Event {
-	adkEvent := session.NewEvent(ctx.InvocationID())
+	adkEvent := session.NewEvent(ctx, ctx.InvocationID())
 	adkEvent.Author = "wisdev-workflow"
 	adkEvent.Timestamp = workflowEventTimestamp(event.CreatedAt)
 	if metadata := workflowEventMetadata(event); len(metadata) > 0 {

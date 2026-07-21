@@ -119,13 +119,37 @@ func TestVerifySectionsBlindStopsFalseFlagging(t *testing.T) {
 	assert.Equal(t, "needs_revision", out[0].ReviewStatus)
 }
 
+func TestBuildVisualSpecEmitsTableForTableKind(t *testing.T) {
+	visual := evidence.VisualEvidence{
+		VisualID: "v-table",
+		Kind:     "table",
+		Title:    "Results Table",
+		Headers:  []string{"Metric", "Value"},
+		Rows:     [][]string{{"Accuracy", "92%"}},
+	}
+	specType, specAny := BuildVisualSpec(visual, nil)
+	require.Equal(t, "table", specType)
+	spec, ok := specAny.(ManuscriptTableSpec)
+	require.True(t, ok)
+	assert.Equal(t, []string{"Metric", "Value"}, spec.Headers)
+	assert.Equal(t, [][]string{{"Accuracy", "92%"}}, spec.Rows)
+
+	visualFallback := evidence.VisualEvidence{Kind: "table", Title: "Table 2", Caption: "Summary caption"}
+	specType, specAny = BuildVisualSpec(visualFallback, nil)
+	require.Equal(t, "table", specType)
+	spec, ok = specAny.(ManuscriptTableSpec)
+	require.True(t, ok)
+	assert.Equal(t, []string{"Item", "Summary"}, spec.Headers)
+	assert.Equal(t, [][]string{{"Table 2", "Summary caption"}}, spec.Rows)
+}
+
 func TestBuildVisualSpecEmitsLabeledNodes(t *testing.T) {
 	packets := map[string]evidence.EvidencePacket{
 		"p1": {PacketID: "p1", ClaimText: "Alpha claim text"},
 		"p2": {PacketID: "p2", ClaimText: "Beta claim text"},
 	}
 	visual := evidence.VisualEvidence{VisualID: "v1", Title: "My Visual", SourcePacketIDs: []string{"p1", "p2"}}
-	specType, specAny := buildVisualSpec(visual, packets)
+	specType, specAny := BuildVisualSpec(visual, packets)
 	require.Equal(t, "mermaid", specType)
 	spec := specAny.(string)
 
@@ -220,6 +244,31 @@ func TestConceptDiagramDedupsSharedClaims(t *testing.T) {
 	assert.Contains(t, spec, "Discussion")
 }
 
+func TestComposeVisualsEmitsEvidenceTableWithSingleCluster(t *testing.T) {
+	p := &ManuscriptPipeline{}
+	raw := evidence.ManuscriptRawMaterialSet{
+		CanonicalSources: []evidence.CanonicalCitationRecord{{CanonicalID: "s1", Title: "Source One"}},
+		ClaimPackets: []evidence.EvidencePacket{
+			{PacketID: "p1", ClaimText: "Finding one", Confidence: 0.8, EvidenceSpans: []evidence.EvidenceSpan{{SourceCanonicalID: "s1"}}},
+		},
+		SourceClusters: []evidence.ManuscriptSourceCluster{
+			{ClusterID: "c1", Label: "Theme A", PacketIDs: []string{"p1"}},
+		},
+	}
+	blueprint := ManuscriptBlueprint{Sections: []SectionBrief{{SectionID: "results", Title: "Results", RequiredClaimPacketIDs: []string{"p1"}}}}
+	visuals := p.composeVisuals("job", "q", raw, blueprint)
+	var table *VisualArtifact
+	for i := range visuals {
+		if visuals[i].Title == "Evidence Summary" {
+			table = &visuals[i]
+		}
+	}
+	require.NotNil(t, table, "evidence summary should emit with a single cluster row")
+	spec, ok := table.Spec.(ManuscriptTableSpec)
+	require.True(t, ok)
+	assert.Len(t, spec.Rows, 1)
+}
+
 func TestComposeVisualsEmitsEvidenceTable(t *testing.T) {
 	p := &ManuscriptPipeline{}
 	raw := evidence.ManuscriptRawMaterialSet{
@@ -263,13 +312,13 @@ func TestSelectRelevantPacketsBackfillGating(t *testing.T) {
 	}
 
 	// Methods (specific) gets its own + the general packet, never the results one.
-	methods := ids(selectRelevantPackets(packets, "methods", 8, nil))
+	methods := ids(selectRelevantPackets(packets, "methods", 8, nil, false))
 	assert.Contains(t, methods, "m1")
 	assert.Contains(t, methods, "g1")
 	assert.NotContains(t, methods, "r1")
 
 	// Abstract (synthesis) may draw on any packet, including the results one.
-	abstract := ids(selectRelevantPackets(packets, "abstract", 8, nil))
+	abstract := ids(selectRelevantPackets(packets, "abstract", 8, nil, false))
 	assert.Contains(t, abstract, "r1")
 }
 
@@ -277,10 +326,10 @@ func TestSelectRelevantPacketsPrefersUnassigned(t *testing.T) {
 	// Two general packets; with g1 already assigned, a limit-1 selection prefers the
 	// unassigned g2 so sections contribute distinct evidence.
 	packets := []evidence.EvidencePacket{{PacketID: "g1"}, {PacketID: "g2"}}
-	got := selectRelevantPackets(packets, "results", 1, map[string]int{"g1": 1})
+	got := selectRelevantPackets(packets, "results", 1, map[string]int{"g1": 1}, false)
 	require.Len(t, got, 1)
 	assert.Equal(t, "g2", got[0].PacketID)
 	// But if everything is assigned, it still fills rather than starving.
-	got = selectRelevantPackets(packets, "results", 1, map[string]int{"g1": 1, "g2": 1})
+	got = selectRelevantPackets(packets, "results", 1, map[string]int{"g1": 1, "g2": 1}, false)
 	require.Len(t, got, 1)
 }

@@ -852,7 +852,7 @@ func (c *BrainCapabilities) SystematicReviewPrisma(ctx context.Context, query st
 	resp, err := c.llmClient.StructuredOutput(requestCtx, applyWisdevRecoverableStructuredPolicy(&llmv1.StructuredRequest{
 		Prompt:     prompt,
 		Model:      model,
-		JsonSchema: `{"type": "object", "properties": {"records_identified": {"type": "integer"}, "records_screened": {"type": "integer"}, "full_text_assessed": {"type": "integer"}, "studies_included": {"type": "integer"}}}`,
+		JsonSchema: `{"type": "object", "properties": {"identified": {"type": "integer"}, "duplicatesRemoved": {"type": "integer"}, "screened": {"type": "integer"}, "excluded": {"type": "integer"}, "fullTextAssessed": {"type": "integer"}, "fullTextExcluded": {"type": "integer"}, "included": {"type": "integer"}}}`,
 	}))
 	if err != nil {
 		if llm.IsProviderRateLimitError(err) {
@@ -1539,12 +1539,16 @@ func fallbackPrimarySource(papers []Source) map[string]any {
 
 func fallbackPrismaReport(papers []Source) map[string]any {
 	count := len(papers)
+	// Shape matches frontend PrismaReport / api.BuildPrismaReportFromStages.
 	return map[string]any{
-		"records_identified": float64(count),
-		"records_screened":   float64(count),
-		"full_text_assessed": float64(count),
-		"studies_included":   float64(count),
-		"degraded":           true,
+		"identified":        count,
+		"duplicatesRemoved": 0,
+		"screened":          count,
+		"excluded":          0,
+		"fullTextAssessed":  count,
+		"fullTextExcluded":  0,
+		"included":          count,
+		"degraded":          true,
 	}
 }
 

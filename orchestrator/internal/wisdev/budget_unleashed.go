@@ -15,8 +15,8 @@ import (
 //
 // The default (unset / "0" / "false") preserves the standard bounded behavior,
 // so the test suite and production safety limits are unaffected unless an
-// operator explicitly opts in. Intended for credit-rich runs such as hackathons
-// and demos where maximizing depth matters more than conserving tokens.
+// operator explicitly opts in. Intended for deep research runs where maximizing depth
+// matters more than conserving tokens.
 //
 // See also the package-local gates in internal/policy and internal/llm, which
 // read the same variable to lift the per-session guardrail budget and the

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 func TestLoadADKRuntimeFromPathMergesYAMLAndRegistry(t *testing.T) {

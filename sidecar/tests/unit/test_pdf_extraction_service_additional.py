@@ -14,6 +14,8 @@ from services.pdf_extraction_service import (
     _fast_regex_extract,
     _llm_fallback_extract,
     _docling_extract,
+    _extract_markdown_tables,
+    _extract_table_from_docling_element,
     _normalize_title,
     extract_pdf_content,
 )
@@ -349,6 +351,226 @@ def test_docling_extract_returns_structured_payload():
     assert result["docling_meta"]["version"] == "2.3.0+"
     assert len(result["structure_map"]) == 2
     assert result["structure_map"][0]["label"] == "Introduction"
+
+
+def test_extract_table_from_docling_element_uses_data_grid():
+    element = type(
+        "TableElement",
+        (),
+        {
+            "label": "table",
+            "caption": "Benchmark results",
+            "data": [["Metric", "Score"], ["Accuracy", "0.95"]],
+            "prov": [type("Prov", (), {"page_no": 3})()],
+        },
+    )()
+
+    table = _extract_table_from_docling_element(element)
+
+    assert table is not None
+    assert table["type"] == "table"
+    assert table["title"] == "Benchmark results"
+    assert table["headers"] == ["Metric", "Score"]
+    assert table["rows"] == [["Accuracy", "0.95"]]
+    assert table["page"] == 3
+
+
+def test_extract_table_from_docling_element_skips_broken_api():
+    class BrokenTable:
+        label = "table"
+
+        def export_to_dataframe(self):
+            raise RuntimeError("docling version mismatch")
+
+    assert _extract_table_from_docling_element(BrokenTable()) is None
+
+
+def test_extract_markdown_tables_parses_gfm_pipe_tables():
+    markdown = "\n".join(
+        [
+            "# Paper",
+            "",
+            "| Metric | Value |",
+            "| --- | --- |",
+            "| Accuracy | 0.95 |",
+            "| F1 | 0.91 |",
+        ]
+    )
+
+    tables = _extract_markdown_tables(markdown)
+
+    assert len(tables) == 1
+    assert tables[0]["type"] == "table"
+    assert tables[0]["headers"] == ["Metric", "Value"]
+    assert tables[0]["rows"] == [["Accuracy", "0.95"], ["F1", "0.91"]]
+
+
+def test_docling_extract_falls_back_to_markdown_tables():
+    class FakePdfFormatOption:
+        def __init__(self, pipeline_options=None):
+            self.pipeline_options = pipeline_options
+
+    class FakeInputFormat:
+        PDF = "pdf"
+
+    class FakePdfPipelineOptions:
+        def __init__(self):
+            self.do_ocr = False
+            self.do_table_structure = False
+
+    class FakeDoc:
+        def export_to_markdown(self):
+            return "\n".join(
+                [
+                    "# Intro",
+                    "",
+                    "| Col A | Col B |",
+                    "| --- | --- |",
+                    "| one | two |",
+                ]
+            )
+
+        def iterate_items(self):
+            yield type("Node", (), {"label": "title", "text": "Intro"}), 0
+
+    class FakeResult:
+        def __init__(self):
+            self.document = FakeDoc()
+
+    class FakeConverter:
+        def __init__(self, format_options=None):
+            self.format_options = format_options
+
+        def convert(self, source):
+            return FakeResult()
+
+    fake_docling_base = types.ModuleType("docling")
+    fake_models = types.ModuleType("docling.datamodel")
+    fake_base_models = types.ModuleType("docling.datamodel.base_models")
+    fake_pipeline = types.ModuleType("docling.datamodel.pipeline_options")
+    fake_converter = types.ModuleType("docling.document_converter")
+    fake_document = types.ModuleType("docling.datamodel.document")
+
+    fake_base_models.InputFormat = FakeInputFormat
+    fake_pipeline.PdfPipelineOptions = FakePdfPipelineOptions
+    fake_converter.DocumentConverter = FakeConverter
+    fake_converter.PdfFormatOption = FakePdfFormatOption
+    fake_document.DocumentStream = type(
+        "DocumentStream",
+        (),
+        {"__init__": lambda self, name, stream: None},
+    )
+    fake_docling_base.datamodel = fake_models
+    fake_models.base_models = fake_base_models
+    fake_models.pipeline_options = fake_pipeline
+    fake_docling_base.datamodel.document = fake_document
+    fake_docling_base.datamodel.base_models = fake_base_models
+    fake_docling_base.datamodel.pipeline_options = fake_pipeline
+    fake_docling_base.document_converter = fake_converter
+
+    with patch.dict(
+        "sys.modules",
+        {
+            "docling": fake_docling_base,
+            "docling.datamodel": fake_models,
+            "docling.datamodel.base_models": fake_base_models,
+            "docling.datamodel.pipeline_options": fake_pipeline,
+            "docling.document_converter": fake_converter,
+            "docling.datamodel.document": fake_document,
+        },
+        clear=False,
+    ):
+        result = _docling_extract(b"pdf-bytes", "paper.pdf")
+
+    assert result is not None
+    table_entries = [item for item in result["structure_map"] if item.get("type") == "table"]
+    assert len(table_entries) == 1
+    assert table_entries[0]["headers"] == ["Col A", "Col B"]
+    assert table_entries[0]["rows"] == [["one", "two"]]
+
+
+def test_docling_extract_emits_docling_table_elements():
+    class FakePdfFormatOption:
+        def __init__(self, pipeline_options=None):
+            self.pipeline_options = pipeline_options
+
+    class FakeInputFormat:
+        PDF = "pdf"
+
+    class FakePdfPipelineOptions:
+        def __init__(self):
+            self.do_ocr = False
+            self.do_table_structure = False
+
+    class FakeTable:
+        label = "table"
+        caption = "Model scores"
+        data = [["Model", "Score"], ["A", "0.9"]]
+        prov = [type("Prov", (), {"page_no": 1})()]
+
+    class FakeDoc:
+        def export_to_markdown(self):
+            return "# Intro"
+
+        def iterate_items(self):
+            yield type("Node", (), {"label": "heading", "text": "Methods"}), 0
+            yield FakeTable(), 0
+
+    class FakeResult:
+        def __init__(self):
+            self.document = FakeDoc()
+
+    class FakeConverter:
+        def __init__(self, format_options=None):
+            self.format_options = format_options
+
+        def convert(self, source):
+            return FakeResult()
+
+    fake_docling_base = types.ModuleType("docling")
+    fake_models = types.ModuleType("docling.datamodel")
+    fake_base_models = types.ModuleType("docling.datamodel.base_models")
+    fake_pipeline = types.ModuleType("docling.datamodel.pipeline_options")
+    fake_converter = types.ModuleType("docling.document_converter")
+    fake_document = types.ModuleType("docling.datamodel.document")
+
+    fake_base_models.InputFormat = FakeInputFormat
+    fake_pipeline.PdfPipelineOptions = FakePdfPipelineOptions
+    fake_converter.DocumentConverter = FakeConverter
+    fake_converter.PdfFormatOption = FakePdfFormatOption
+    fake_document.DocumentStream = type(
+        "DocumentStream",
+        (),
+        {"__init__": lambda self, name, stream: None},
+    )
+    fake_docling_base.datamodel = fake_models
+    fake_models.base_models = fake_base_models
+    fake_models.pipeline_options = fake_pipeline
+    fake_docling_base.datamodel.document = fake_document
+    fake_docling_base.datamodel.base_models = fake_base_models
+    fake_docling_base.datamodel.pipeline_options = fake_pipeline
+    fake_docling_base.document_converter = fake_converter
+
+    with patch.dict(
+        "sys.modules",
+        {
+            "docling": fake_docling_base,
+            "docling.datamodel": fake_models,
+            "docling.datamodel.base_models": fake_base_models,
+            "docling.datamodel.pipeline_options": fake_pipeline,
+            "docling.document_converter": fake_converter,
+            "docling.datamodel.document": fake_document,
+        },
+        clear=False,
+    ):
+        result = _docling_extract(b"pdf-bytes", "paper.pdf")
+
+    assert result is not None
+    assert any(item.get("label") == "Methods" for item in result["structure_map"])
+    table_entries = [item for item in result["structure_map"] if item.get("type") == "table"]
+    assert len(table_entries) == 1
+    assert table_entries[0]["title"] == "Model scores"
+    assert table_entries[0]["headers"] == ["Model", "Score"]
 
 
 def test_docling_extract_returns_none_when_dependencies_missing():

@@ -216,6 +216,24 @@ func TestCircuitBreakerWithFallback(t *testing.T) {
 		is.Error(err)
 		is.Contains(err.Error(), "circuit breaker test2 is open")
 	})
+
+	t.Run("never discards a successful result when a concurrent failure trips the breaker", func(t *testing.T) {
+		cb3 := NewCircuitBreaker("test3")
+		cb3.maxFailures = 1
+		fallback3 := &mockFallback{}
+		cbf3 := NewCircuitBreakerWithFallback(cb3, fallback3)
+
+		err := cbf3.Call(context.Background(), func(ctx context.Context) error {
+			// Another request fails and trips the breaker while this
+			// (ultimately successful) call is still in flight.
+			_ = cb3.Call(ctx, func(context.Context) error { return errors.New("concurrent upstream failure") })
+			return nil
+		})
+
+		is.NoError(err)
+		is.False(fallback3.called, "fallback must not replace a successful primary result")
+		is.Equal(StateOpen, cb3.State())
+	})
 }
 
 func TestFallbackStrategies(t *testing.T) {

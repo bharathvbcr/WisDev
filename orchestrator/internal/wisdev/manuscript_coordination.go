@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/evidence"
-	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/stackconfig"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/resilience"
 )
 
 // entailmentBlockThreshold is the EntailmentScore at or below which a fact-checked
@@ -62,8 +62,33 @@ type factCheckResult struct {
 var entailmentCitationToken = regexp.MustCompile(`\[[^\]]*\]`)
 var nonMatchChars = regexp.MustCompile(`[^a-z0-9]+`)
 
+// manuscriptSidecarRetryPolicy bounds EVERY manuscript sidecar POST: at most 3
+// attempts with exponential backoff + jitter between them. A var (not a const)
+// so tests can shrink the delays; production code must not mutate it.
+var manuscriptSidecarRetryPolicy = resilience.RetryPolicy{
+	MaxAttempts: 3,
+	BaseDelay:   250 * time.Millisecond,
+	MaxDelay:    2 * time.Second,
+}
+
+// SetManuscriptSidecarRetryPolicyForTest overrides manuscriptSidecarRetryPolicy for
+// the duration of a test and returns a restore func to hand to t.Cleanup. Test-only:
+// it lets cross-package integration tests (e.g. the api docgen job, which runs the
+// real pipeline against an offline sidecar) shrink the backoff so their scaffold
+// fallback completes inside the test deadline instead of waiting on production
+// retries. Production code must not call it.
+func SetManuscriptSidecarRetryPolicyForTest(p resilience.RetryPolicy) func() {
+	prev := manuscriptSidecarRetryPolicy
+	manuscriptSidecarRetryPolicy = p
+	return func() { manuscriptSidecarRetryPolicy = prev }
+}
+
 // postManuscriptJSON POSTs payload to a sidecar manuscript endpoint and decodes the
-// JSON body into out. Offline-guarded like the other post* helpers.
+// JSON body into out. Offline-guarded like the other post* helpers. Transient
+// failures (network errors, timeouts, 5xx responses) are retried under
+// manuscriptSidecarRetryPolicy; 4xx responses and malformed bodies are terminal
+// and never retried. Exhausted retries surface the last error unchanged, so every
+// caller keeps its existing grounded-scaffold fallback.
 func (p *ManuscriptPipeline) postManuscriptJSON(ctx context.Context, path string, payload map[string]any, out any) error {
 	if strings.TrimSpace(p.pythonBaseURL) == "" {
 		return fmt.Errorf("python sidecar base URL is not configured")
@@ -72,30 +97,30 @@ func (p *ManuscriptPipeline) postManuscriptJSON(ctx context.Context, path string
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.pythonBaseURL+path, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Caller-Service", "go_orchestrator")
-	if key := stackconfig.ResolveInternalServiceKey(); key != "" {
-		req.Header.Set("X-Internal-Service-Key", key)
-		req.Header.Set("Authorization", "Bearer "+key)
-	}
-	client := p.httpClient
-	if client == nil {
-		client = &http.Client{Timeout: 120 * time.Second}
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%s returned %d: %s", path, resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return resilience.Retry(ctx, "manuscript.sidecar_post:"+path, manuscriptSidecarRetryPolicy, func(ctx context.Context) (string, bool, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.pythonBaseURL+path, bytes.NewReader(body))
+		if err != nil {
+			return "request_error", false, err
+		}
+		p.setSidecarHeaders(req)
+		resp, err := p.sidecarHTTPClient().Do(req)
+		if err != nil {
+			return "transport_error", true, err // network error / timeout: retryable
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			respBody, _ := io.ReadAll(resp.Body)
+			statusErr := fmt.Errorf("%s returned %d: %s", path, resp.StatusCode, strings.TrimSpace(string(respBody)))
+			if resp.StatusCode >= http.StatusInternalServerError {
+				return "http_5xx", true, statusErr // transient upstream failure: retryable
+			}
+			return "http_4xx", false, statusErr // caller/payload problem: never retried
+		}
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			return "decode_error", false, err
+		}
+		return "", false, nil
+	})
 }
 
 // ---- Feature A: concept-level cross-section coordination ----

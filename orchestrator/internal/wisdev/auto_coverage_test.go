@@ -205,7 +205,7 @@ func TestAutoCoverageGenerated(t *testing.T) {
 	callWithZeroValueArgs(buildSearchCacheKey)
 	callWithZeroValueArgs(buildSectionScaffold)
 	callWithZeroValueArgs(buildSourceClusters)
-	callWithZeroValueArgs(buildVisualSpec)
+	callWithZeroValueArgs(BuildVisualSpec)
 	callWithZeroValueArgs(buildWorkspaceAcceptedSeedPapers)
 	callWithZeroValueArgs(buildWorkspaceArtifactsFromEpisodes)
 	callWithZeroValueArgs(calculateCoverageEstimate)

@@ -201,59 +201,6 @@ func TestWisDevRouteHelpersPriorityTargets(t *testing.T) {
 		assert.Equal(t, "owner-3", wisdev.AsOptionalString(dossier["userId"]))
 		assert.Equal(t, "Evidence dossier for tests", wisdev.AsOptionalString(dossier["title"]))
 	})
-
-	t.Run("upsertDraftingState updates outline, sections, and claim packets", func(t *testing.T) {
-		t.Run("returns error for missing state store", func(t *testing.T) {
-			err := upsertDraftingState(&wisdev.AgentGateway{}, "job-1", map[string]any{"items": []any{}}, "section-1", nil)
-			assert.Error(t, err)
-		})
-
-		t.Run("merges outline and section payloads", func(t *testing.T) {
-			t.Setenv("WISDEV_STATE_DIR", t.TempDir())
-			stateStore := wisdev.NewRuntimeStateStore(nil, nil)
-			documentID := "document-1"
-			err := stateStore.SaveFullPaperJob(documentID, map[string]any{
-				"documentId": documentID,
-				"userId":     "owner-4",
-				"workspace": map[string]any{
-					"drafting": map[string]any{
-						"sectionArtifactIds": []string{"s-dup", "s-dup"},
-						"claimPacketIds":     []string{"existing-claim"},
-						"sections":           map[string]any{},
-					},
-				},
-			})
-			require.NoError(t, err)
-
-			outline := map[string]any{"items": []any{
-				map[string]any{"id": "intro"},
-				map[string]any{"id": "methods"},
-			}}
-			section := map[string]any{
-				"claimPacketIds":    []string{"section-claim", "existing-claim"},
-				"claimPacketId":     "extra-claim",
-				"evidencePacketIds": []string{"ev-1", "section-claim"},
-				"evidencePacketId":  "ev-2",
-			}
-			require.NoError(t, upsertDraftingState(&wisdev.AgentGateway{StateStore: stateStore}, documentID, outline, "methods", section))
-
-			updated, err := stateStore.LoadFullPaperJob(documentID)
-			require.NoError(t, err)
-			workspace := mapAny(updated["workspace"])
-			drafting := mapAny(workspace["drafting"])
-
-			assert.Equal(t, outline, mapAny(drafting["outline"]))
-			assert.Equal(t, []string{"intro", "methods"}, sliceStrings(drafting["sectionOrder"]))
-			assert.ElementsMatch(t, []string{"s-dup", "methods"}, sliceStrings(drafting["sectionArtifactIds"]))
-			assert.Equal(t, []string{"existing-claim", "section-claim", "extra-claim", "ev-1", "ev-2"}, sliceStrings(drafting["claimPacketIds"]))
-			sections := mapAny(drafting["sections"])
-			actualSection := mapAny(sections["methods"])
-			assert.Equal(t, section["claimPacketId"], actualSection["claimPacketId"])
-			assert.Equal(t, section["evidencePacketId"], actualSection["evidencePacketId"])
-			assert.ElementsMatch(t, []string{"section-claim", "existing-claim"}, sliceStrings(actualSection["claimPacketIds"]))
-			assert.ElementsMatch(t, []string{"ev-1", "section-claim"}, sliceStrings(actualSection["evidencePacketIds"]))
-		})
-	})
 }
 
 func TestLoadOwnedFullPaperJobStateAuthorization(t *testing.T) {

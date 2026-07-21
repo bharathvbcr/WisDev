@@ -10,9 +10,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/adk/agent"
-	adkrunner "google.golang.org/adk/runner"
-	adksession "google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	adkrunner "google.golang.org/adk/v2/runner"
+	adksession "google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -208,7 +208,7 @@ func TestAgentGatewayGRPCExecutePlanUsesOfficialADKRunnerWhenAvailable(t *testin
 		Description: "test ADK workflow for gRPC execution",
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*adksession.Event, error] {
 			return func(yield func(*adksession.Event, error) bool) {
-				event := adksession.NewEvent(ctx.InvocationID())
+				event := adksession.NewEvent(ctx, ctx.InvocationID())
 				event.Author = "wisdev-workflow"
 				event.Content = genai.NewContentFromText("ADK gRPC progress", genai.RoleModel)
 				event.CustomMetadata = map[string]any{

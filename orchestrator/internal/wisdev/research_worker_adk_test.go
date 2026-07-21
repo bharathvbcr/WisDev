@@ -5,8 +5,8 @@ import (
 	"iter"
 	"testing"
 
-	"google.golang.org/adk/agent"
-	adksession "google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	adksession "google.golang.org/adk/v2/session"
 )
 
 func TestExecuteResearchWorkersUsesOfficialADKParallelRunnerMetadata(t *testing.T) {
@@ -46,7 +46,7 @@ func TestExecuteResearchWorkersUsesOfficialADKParallelRunnerMetadata(t *testing.
 	if adkEvent == nil {
 		t.Fatalf("expected completed_adk_parallel event, got %#v", events)
 	}
-	if adkEvent.Payload["adkRuntime"] != "google.golang.org/adk" {
+	if adkEvent.Payload["adkRuntime"] != "google.golang.org/adk/v2" {
 		t.Fatalf("expected official ADK runtime marker, got %#v", adkEvent.Payload)
 	}
 	if adkEvent.Payload["adkWorkflowAgent"] != "parallelagent" {

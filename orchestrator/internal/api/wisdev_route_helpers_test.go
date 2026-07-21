@@ -208,34 +208,8 @@ func TestWisDev_GateHelpers(t *testing.T) {
 }
 
 func TestWisDev_DraftHelpers(t *testing.T) {
-	t.Run("normalizeSectionID", func(t *testing.T) {
-		assert.Equal(t, "intro_section", normalizeSectionID("Intro Section "))
-	})
-
 	t.Run("uniqueStrings", func(t *testing.T) {
 		assert.Equal(t, []string{"a", "b"}, uniqueStrings([]string{" a", "b", "a "}))
-	})
-
-	t.Run("inferDraftSections", func(t *testing.T) {
-		assert.Contains(t, inferDraftSections("Survey of AI", nil), "Landscape")
-		assert.Contains(t, inferDraftSections("Benchmark of models", nil), "Comparative Findings")
-		assert.Contains(t, inferDraftSections("Architecture of X", nil), "Operational Risks")
-	})
-
-	t.Run("buildDraftOutlinePayload", func(t *testing.T) {
-		res := buildDraftOutlinePayload("d1", "Title", 1000, []string{"Custom"})
-		assert.Equal(t, "d1", res["documentId"])
-		items := res["items"].([]map[string]any)
-		assert.NotEmpty(t, items)
-	})
-
-	t.Run("buildDraftSectionPayload", func(t *testing.T) {
-		papers := []map[string]any{
-			{"title": "T1", "summary": "S1", "score": 0.9},
-		}
-		res := buildDraftSectionPayload("d1", "s1", "Title", 200, papers)
-		assert.Equal(t, "d1", res["documentId"])
-		assert.Contains(t, res["content"].(string), "S1")
 	})
 }
 
@@ -367,51 +341,6 @@ func TestWisDev_AgentHelpers(t *testing.T) {
 		)
 
 		assert.Equal(t, first, reordered)
-	})
-
-	t.Run("drafting idempotency keys include payload and expected version", func(t *testing.T) {
-		outline := makeDraftOutlineIdempotencyKey(
-			"doc-1",
-			"Sleep Review",
-			1200,
-			[]string{"Methods", "Results"},
-			777,
-		)
-		repeatedOutline := makeDraftOutlineIdempotencyKey(
-			"doc-1",
-			"Sleep Review",
-			1200,
-			[]string{"Results", "Methods"},
-			777,
-		)
-		changedOutline := makeDraftOutlineIdempotencyKey(
-			"doc-1",
-			"Sleep Review Revised",
-			1200,
-			[]string{"Methods", "Results"},
-			777,
-		)
-		versionedOutline := makeDraftOutlineIdempotencyKey(
-			"doc-1",
-			"Sleep Review",
-			1200,
-			[]string{"Methods", "Results"},
-			778,
-		)
-
-		assert.Equal(t, outline, repeatedOutline)
-		assert.NotEqual(t, outline, changedOutline)
-		assert.NotEqual(t, outline, versionedOutline)
-
-		papers := []map[string]any{{"id": "p1", "title": "Paper 1"}}
-		section := makeDraftSectionIdempotencyKey("doc-1", "intro", "Introduction", 650, papers, 777)
-		repeatedSection := makeDraftSectionIdempotencyKey("doc-1", "intro", "Introduction", 650, papers, 777)
-		changedSection := makeDraftSectionIdempotencyKey("doc-1", "intro", "Background", 650, papers, 777)
-		versionedSection := makeDraftSectionIdempotencyKey("doc-1", "intro", "Introduction", 650, papers, 778)
-
-		assert.Equal(t, section, repeatedSection)
-		assert.NotEqual(t, section, changedSection)
-		assert.NotEqual(t, section, versionedSection)
 	})
 
 	t.Run("replanAgentSessionForDomainAnswer updates canonical domain and question plan", func(t *testing.T) {

@@ -37,7 +37,7 @@ func TestEvidenceGrounding_FailureModes_Contract(t *testing.T) {
 		}
 		
 		// Verify buildCanonicalRecord handles malformed IDs
-		record := buildCanonicalRecord(p)
+		record := BuildCanonicalRecord(p)
 		// The system prioritizes DOI and prepends scheme
 		assert.Equal(t, "doi:not-a-doi", record.CanonicalID)
 		assert.Equal(t, "not-a-doi", record.SourceIDs.DOI)

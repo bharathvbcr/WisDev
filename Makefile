@@ -1,4 +1,4 @@
-.PHONY: cli-help install-cli check demo tui tui-demo smoke-local smoke-run smoke-mcp build-cli test-go test-wisdev test-python test-python-contract test-all tidy serve wisdev
+.PHONY: cli-help install-cli check tui smoke-local smoke-run smoke-mcp build-cli test-go test-wisdev test-python test-python-contract test-all tidy serve stack wisdev
 
 WISDEV := node scripts/run-wisdev.mjs
 
@@ -11,14 +11,8 @@ install-cli:
 check:
 	$(WISDEV) check
 
-demo:
-	$(WISDEV) demo --offline
-
 tui:
 	$(WISDEV) tui
-
-tui-demo:
-	$(WISDEV) tui --demo --autostart
 
 wisdev:
 	$(WISDEV) $(ARGS)
@@ -33,13 +27,15 @@ smoke-mcp:
 
 doctor-cli: check
 
-demo-cli: demo
-
 build-cli:
-	powershell -ExecutionPolicy Bypass -File ./scripts/build-wisdev-cli.ps1 -Version 0.1.0-hackathon
+	powershell -ExecutionPolicy Bypass -File ./scripts/build-wisdev-cli.ps1 -Version 0.1.0
 
 serve:
 	cd orchestrator && go run ./cmd/server
+
+stack:
+	chmod +x ./scripts/start-stack.sh
+	./scripts/start-stack.sh
 
 test-go:
 	cd orchestrator && go test ./internal/api ./internal/search ./internal/wisdev ./internal/rag ./internal/evidence ./internal/evidence/citations ./internal/telemetry ./internal/stackconfig ./internal/cli ./cmd/server ./cmd/wisdev ./pkg/wisdev -count=1 -parallel=1

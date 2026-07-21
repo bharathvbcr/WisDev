@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/adk/agent"
+	"google.golang.org/adk/v2/agent"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/policy"
 )
 
@@ -270,7 +270,7 @@ func TestPlanExecutor_ADKDelegatedStepUsesRuntimeDispatcherWhenBound(t *testing.
 	assert.Equal(t, true, result.Payload["adkRunnerExecuted"])
 	assert.NotEmpty(t, result.Payload["adkInvocationId"])
 	assert.Equal(t, "python-researcher", result.Payload["adkEventAuthor"])
-	assert.Equal(t, "google.golang.org/adk", result.Payload["adkRuntime"])
+	assert.Equal(t, "google.golang.org/adk/v2", result.Payload["adkRuntime"])
 	assert.Equal(t, "adk_delegate", result.ResultOrigin)
 	assert.Len(t, result.Sources, 1)
 	assert.InDelta(t, 0.82, result.Confidence, 0.001)

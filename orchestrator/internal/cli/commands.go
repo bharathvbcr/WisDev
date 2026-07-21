@@ -19,8 +19,8 @@ func isKnownCommand(name string) bool {
 		return true
 	}
 	switch name {
-	case "search", "run", "yolo", "max", "docgen", "demo", "mcp", "mcp-config",
-		"doctor", "providers", "version", "serve", "help", "tui", "update", "guide":
+	case "search", "run", "yolo", "max", "docgen", "mcp", "mcp-config",
+		"doctor", "providers", "version", "serve", "stack", "help", "tui", "update", "guide":
 		return true
 	default:
 		return false

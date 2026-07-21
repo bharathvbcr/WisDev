@@ -135,30 +135,61 @@ func ResolveGRPCTarget(targetID string) string {
 	return strings.TrimSpace(target.DefaultAddress)
 }
 
+func resolveConfiguredPort(raw string, preferred int) int {
+	if IsAutoPortSpec(raw) && AutoPortEnabled() {
+		if picked, err := PickListenPort(preferred); err == nil {
+			return picked
+		}
+	}
+	if parsed, err := strconv.Atoi(raw); err == nil {
+		if AutoPortEnabled() && !portAvailable(parsed) {
+			if picked, pickErr := PickListenPort(preferred); pickErr == nil {
+				return picked
+			}
+		}
+		return parsed
+	}
+	return preferred
+}
+
 func ResolveListenPort(serviceID, portName string) int {
 	service, ok := Manifest.Services[serviceID]
 	if !ok {
 		return 0
 	}
 	if portName == "http" {
-		if raw := strings.TrimSpace(os.Getenv("PORT")); raw != "" {
-			if parsed, err := strconv.Atoi(raw); err == nil {
-				return parsed
+		raw := strings.TrimSpace(os.Getenv("PORT"))
+		if raw == "" && AutoPortEnabled() {
+			if picked, err := PickListenPort(service.ListenPorts["http"]); err == nil {
+				return picked
 			}
+		}
+		if raw != "" {
+			return resolveConfiguredPort(raw, service.ListenPorts["http"])
 		}
 	}
 	if portName == "metrics" {
-		if raw := strings.TrimSpace(os.Getenv("INTERNAL_METRICS_PORT")); raw != "" {
-			if parsed, err := strconv.Atoi(raw); err == nil {
-				return parsed
+		raw := strings.TrimSpace(os.Getenv("INTERNAL_METRICS_PORT"))
+		if raw == "" && AutoPortEnabled() {
+			if picked, err := PickListenPort(service.ListenPorts["metrics"]); err == nil {
+				return picked
 			}
+		}
+		if raw != "" {
+			return resolveConfiguredPort(raw, service.ListenPorts["metrics"])
 		}
 	}
 	if portName == "grpc" && serviceID == "go_orchestrator" {
 		if raw := ResolveEnv("GO_INTERNAL_GRPC_ADDR"); raw != "" {
-			if _, parsed, ok := strings.Cut(raw, ":"); ok {
-				if value, err := strconv.Atoi(parsed); err == nil {
-					return value
+			if _, portRaw, ok := strings.Cut(raw, ":"); ok {
+				preferred := service.ListenPorts["grpc"]
+				if parsed, err := strconv.Atoi(portRaw); err == nil {
+					if AutoPortEnabled() && !portAvailable(parsed) {
+						if picked, pickErr := PickListenPort(preferred); pickErr == nil {
+							return picked
+						}
+					}
+					return parsed
 				}
 			}
 		}

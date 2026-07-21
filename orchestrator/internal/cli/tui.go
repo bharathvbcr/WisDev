@@ -86,6 +86,9 @@ type tuiState struct {
 	deepSearch          bool
 	longFormReport      bool
 	generateDoc         bool
+	docIntent           string // "report" | "litreview" | "fullpaper"
+	docFormat           string // "markdown" | "latex" | "html" | "json"
+	docCitationStyle    string // "apa" | "mla" | ... (see internal/citations)
 	offlineMode         bool
 	originalQuery       string
 	preparedQuery       string
@@ -428,12 +431,51 @@ func (s *tuiState) toggleActiveSetting() {
 func (s *tuiState) manuscriptOutputPath() string {
 	base := strings.TrimSpace(s.outputPath)
 	if base == "" {
-		return fmt.Sprintf("wisdev-manuscript-%d.md", time.Now().UnixMilli())
+		return fmt.Sprintf("wisdev-manuscript-%d%s", time.Now().UnixMilli(), docManuscriptExt(s.docFormat))
 	}
 	ext := filepath.Ext(base)
 	stem := strings.TrimSuffix(base, ext)
-	return stem + "-manuscript.md"
+	return stem + "-manuscript" + docManuscriptExt(s.docFormat)
 }
+
+// docManuscriptExt maps the TUI docgen format to a file extension.
+func docManuscriptExt(format string) string {
+	switch format {
+	case "latex":
+		return ".tex"
+	case "html":
+		return ".html"
+	case "json":
+		return ".json"
+	default:
+		return ".md"
+	}
+}
+
+// docIntentCycle / docFormatCycle / docCitationStyleCycle enumerate the values
+// the docgen setting cycles through in the TUI. They mirror the vocabularies
+// parsed by internal/docgen and internal/citations.
+var (
+	docIntentCycle        = []string{"fullpaper", "report", "litreview"}
+	docFormatCycle        = []string{"markdown", "latex", "html", "json"}
+	docCitationStyleCycle = []string{"apa", "mla", "chicago", "vancouver", "ieee", "harvard", "nature"}
+)
+
+func cycleValue(current string, values []string) string {
+	for i, v := range values {
+		if v == current {
+			return values[(i+1)%len(values)]
+		}
+	}
+	if len(values) > 0 {
+		return values[0]
+	}
+	return current
+}
+
+func (s *tuiState) cycleDocIntent()        { s.docIntent = cycleValue(s.docIntent, docIntentCycle) }
+func (s *tuiState) cycleDocFormat()        { s.docFormat = cycleValue(s.docFormat, docFormatCycle) }
+func (s *tuiState) cycleDocCitationStyle() { s.docCitationStyle = cycleValue(s.docCitationStyle, docCitationStyleCycle) }
 
 // composeFollowUpQuery builds the task for a follow-up run: the new question
 // carries the previous research question as context so query preparation and
@@ -626,6 +668,9 @@ func (s *tuiState) saveSession() {
 		DeepSearch:         s.deepSearch,
 		LongFormReport:     s.longFormReport,
 		GenerateDoc:        s.generateDoc,
+		DocIntent:          s.docIntent,
+		DocFormat:          s.docFormat,
+		DocCitationStyle:   s.docCitationStyle,
 	}
 
 	data, err := json.Marshal(sess)
@@ -667,6 +712,15 @@ func (s *tuiState) restoreSession() {
 		s.deepSearch = sess.DeepSearch
 		s.longFormReport = sess.LongFormReport
 		s.generateDoc = sess.GenerateDoc
+		if sess.DocIntent != "" {
+			s.docIntent = sess.DocIntent
+		}
+		if sess.DocFormat != "" {
+			s.docFormat = sess.DocFormat
+		}
+		if sess.DocCitationStyle != "" {
+			s.docCitationStyle = sess.DocCitationStyle
+		}
 
 		for _, sp := range sess.Providers {
 			for idx, p := range s.providers {
@@ -690,6 +744,9 @@ type tuiSession struct {
 	DeepSearch         bool             `json:"deep_search"`
 	LongFormReport     bool             `json:"long_form_report"`
 	GenerateDoc        bool             `json:"generate_doc"`
+	DocIntent          string           `json:"doc_intent,omitempty"`
+	DocFormat          string           `json:"doc_format,omitempty"`
+	DocCitationStyle   string           `json:"doc_citation_style,omitempty"`
 }
 
 type tuiSessionProv struct {
@@ -1369,7 +1426,6 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	offline := fs.Bool("offline", false, "run without network-backed search providers")
-	demo := fs.Bool("demo", false, "prefill hackathon demo query (implies --offline)")
 	autostart := fs.Bool("autostart", false, "start research immediately when a query is set")
 	queryFlag := fs.String("query", "", "pre-fill the research question")
 	outputFlag := fs.String("output", "", "save results to this markdown file (also bound to s in results)")
@@ -1431,10 +1487,7 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 	}()
 
 	initialQuery := strings.TrimSpace(*queryFlag)
-	offlineMode := *offline || *demo
-	if *demo && initialQuery == "" {
-		initialQuery = defaultDemoQuery
-	}
+	offlineMode := *offline
 
 	eventCh := make(chan tuiEvent, 100)
 	state := &tuiState{
@@ -1449,6 +1502,9 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 		enableHypotheses:    true,
 		deepSearch:          false,
 		generateDoc:         false,
+		docIntent:           "fullpaper",
+		docFormat:           "markdown",
+		docCitationStyle:    "apa",
 		offlineMode:         offlineMode,
 		activeSetting:       0,
 		outputPath:          strings.TrimSpace(*outputFlag),
@@ -1558,7 +1614,7 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if (*autostart || *demo || state.batchMode) && strings.TrimSpace(state.query) != "" {
+	if (*autostart || state.batchMode) && strings.TrimSpace(state.query) != "" {
 		state.startResearch(ctx)
 	}
 
@@ -2105,6 +2161,14 @@ func runTUI(args []string, stdout, stderr io.Writer) error {
 						if state.maxIterations > 1 {
 							state.maxIterations--
 						}
+					} else if state.activeElement == 2 && state.activeSetting == 7 && (key == 'i' || key == 'I') {
+						// On the DocGen setting, i/f/c cycle the manuscript intent,
+						// output format, and citation style (see internal/docgen).
+						state.cycleDocIntent()
+					} else if state.activeElement == 2 && state.activeSetting == 7 && (key == 'f' || key == 'F') {
+						state.cycleDocFormat()
+					} else if state.activeElement == 2 && state.activeSetting == 7 && (key == 'c' || key == 'C') {
+						state.cycleDocCitationStyle()
 					} else if key >= 32 && key <= 126 { // Printable ASCII
 						if state.activeElement == 0 {
 							state.validationMsg = ""
@@ -2689,7 +2753,7 @@ func (s *tuiState) startResearchWithOptions(parentCtx context.Context, forceExha
 				// failing the whole run.
 				if s.generateDoc && result != nil {
 					s.addLog("DocGen: generating grounded manuscript…", "I")
-					rendered, _, derr := generateManuscriptFromResearch(runCtx, io.Discard, task, result, "markdown", "", s.offlineMode, manuscriptControls{})
+					rendered, _, derr := generateManuscriptFromResearch(runCtx, io.Discard, task, result, s.docIntent, s.docFormat, s.docCitationStyle, "", s.offlineMode, manuscriptControls{})
 					if derr != nil {
 						manuscriptErr = derr
 					} else {
@@ -3624,6 +3688,9 @@ func (s *tuiState) render() {
 		drawLine("   "+rowOne, "")
 		drawLine("   "+rowTwo, "")
 		drawLine("   "+rowThree, "")
+		if s.generateDoc {
+			drawLine(fmt.Sprintf("     DocGen → intent: %s | format: %s | citations: %s   (i/f/c to cycle)", s.docIntent, s.docFormat, s.docCitationStyle), theme.DimText)
+		}
 		if backend := strings.TrimSpace(s.llmBackend); backend != "" {
 			drawLine("   LLM backend: "+backend, theme.DimText)
 		}
@@ -3658,7 +3725,7 @@ func (s *tuiState) render() {
 			case 6:
 				settingHint = "Long-form: Write extended Introduction and Background sections in the report."
 			case 7:
-				settingHint = "DocGen: After research, generate a grounded manuscript from the retrieved papers and save it alongside the export."
+				settingHint = "DocGen: generate a grounded manuscript after research (space toggles; i/f/c cycle intent, format, citation style)."
 			}
 		} else {
 			settingHint = "Exhaustive runs all max iterations before early stop."

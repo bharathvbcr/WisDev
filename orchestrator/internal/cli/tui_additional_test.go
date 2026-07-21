@@ -67,9 +67,14 @@ func TestTuiHistoryPersistence(t *testing.T) {
 	}
 	defer os.RemoveAll(tempHome)
 
-	origHome := os.Getenv("USERPROFILE")
+	origHome := os.Getenv("HOME")
+	origUP := os.Getenv("USERPROFILE")
+	os.Setenv("HOME", tempHome)
 	os.Setenv("USERPROFILE", tempHome)
-	defer os.Setenv("USERPROFILE", origHome)
+	defer func() {
+		os.Setenv("HOME", origHome)
+		os.Setenv("USERPROFILE", origUP)
+	}()
 
 	s := &tuiState{}
 	s.loadHistory()

@@ -13,8 +13,7 @@ func printUsage(w io.Writer) {
 	note(w, "  wisdev max \"your research question\"   Maximum depth (unleashed, long-form, 12 iters)")
 	note(w, "  wisdev docgen [-o paper.md] \"topic\"   Search + DocuGen: a grounded manuscript draft")
 	note(w, "  wisdev check")
-	note(w, "  wisdev tui [--demo]   Interactive UI — make tui-demo for recording")
-	note(w, "  wisdev demo [--offline]")
+	note(w, "  wisdev tui            Interactive UI")
 	fmt.Fprintln(w)
 
 	printSection(w, "More")

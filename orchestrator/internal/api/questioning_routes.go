@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -13,10 +14,17 @@ import (
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/llm"
 	internalsearch "github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
+	llmv1 "github.com/bharathvbcr/wisdev-arc/orchestrator/proto/llm"
 )
 
 var wisdevAnalyzeQueryHandlerTimeout = 20 * time.Second
 var wisdevQuestionRecommendationTimeout = 25 * time.Second
+
+// maxAgentAnswerValues bounds how many values (and display values) a single
+// multi-select answer may carry. Kept in sync with the frontend selection cap
+// (frontend/services/wisdevAgent/answerNormalization.ts) so the UI blocks the
+// user before this validation would reject the submission with a 400.
+const maxAgentAnswerValues = 24
 
 type dynamicQuestionOptionsResult struct {
 	options     []any
@@ -32,8 +40,14 @@ type dynamicQuestionOptionsInflightCall struct {
 func dynamicQuestionOptionsSingleflightKey(sessionID string, questionID string, session map[string]any) string {
 	normalizedSessionID := strings.TrimSpace(sessionID)
 	normalizedQuestionID := strings.TrimSpace(questionID)
+	return normalizedSessionID + ":" + normalizedQuestionID + ":" + dynamicQuestionOptionContextSignature(normalizedQuestionID, session)
+}
+
+func dynamicQuestionOptionContextSignature(questionID string, session map[string]any) string {
+	normalizedQuestionID := strings.TrimSpace(questionID)
 	optionContext := "default"
-	if normalizedQuestionID == "q5_study_types" {
+	switch normalizedQuestionID {
+	case "q5_study_types":
 		subtopics := uniqueStrings(answeredAgentQuestionValues(session, "q4_subtopics"))
 		if len(subtopics) > 0 {
 			sort.Strings(subtopics)
@@ -41,8 +55,115 @@ func dynamicQuestionOptionsSingleflightKey(sessionID string, questionID string, 
 		} else {
 			optionContext = "speculative"
 		}
+	case "q6_exclusions", "q7_evidence_quality", "q8_output_focus":
+		contextParts := []string{}
+		subtopics := uniqueStrings(answeredAgentQuestionValues(session, "q4_subtopics"))
+		if len(subtopics) > 0 {
+			sort.Strings(subtopics)
+			contextParts = append(contextParts, "q4:"+strings.Join(subtopics, "|"))
+		}
+		studyTypes := uniqueStrings(answeredAgentQuestionValues(session, "q5_study_types"))
+		if len(studyTypes) > 0 {
+			sort.Strings(studyTypes)
+			contextParts = append(contextParts, "q5:"+strings.Join(studyTypes, "|"))
+		}
+		if len(contextParts) > 0 {
+			optionContext = strings.Join(contextParts, ";")
+		} else {
+			optionContext = "speculative"
+		}
 	}
-	return normalizedSessionID + ":" + normalizedQuestionID + ":" + optionContext
+	return optionContext
+}
+
+func dynamicQuestionOptionsNeedContextMatch(questionID string, contextSignature string) bool {
+	switch strings.TrimSpace(questionID) {
+	case "q5_study_types", "q6_exclusions", "q7_evidence_quality", "q8_output_focus":
+		return strings.TrimSpace(contextSignature) != "" && strings.TrimSpace(contextSignature) != "speculative"
+	default:
+		return false
+	}
+}
+
+func dynamicQuestionOptionsNeedRefresh(session map[string]any, question map[string]any, questionID string) bool {
+	if len(questionOptionValues(question["options"])) == 0 {
+		return false
+	}
+	expectedContext := dynamicQuestionOptionContextSignature(questionID, session)
+	if !dynamicQuestionOptionsNeedContextMatch(questionID, expectedContext) {
+		return false
+	}
+	storedContext := strings.TrimSpace(wisdev.AsOptionalString(question["optionsContextKey"]))
+	return storedContext == "" || storedContext != expectedContext
+}
+
+func isDynamicQuestionOptionID(questionID string) bool {
+	switch strings.TrimSpace(questionID) {
+	case "q4_subtopics", "q5_study_types", "q6_exclusions", "q7_evidence_quality", "q8_output_focus":
+		return true
+	default:
+		return false
+	}
+}
+
+func isAIQuestionOptionSource(source string) bool {
+	switch strings.TrimSpace(strings.ToLower(source)) {
+	case "ai", "llm_structured":
+		return true
+	default:
+		return false
+	}
+}
+
+func dynamicQuestionOptionsWithDescriptions(questionID string, query string, domain string, options []map[string]any) ([]map[string]any, bool) {
+	switch strings.TrimSpace(questionID) {
+	case "q4_subtopics", "q5_study_types", "q6_exclusions", "q7_evidence_quality", "q8_output_focus":
+	default:
+		return options, false
+	}
+	enriched := make([]map[string]any, 0, len(options))
+	changed := false
+	for _, option := range options {
+		next := cloneAnyMap(option)
+		label := strings.TrimSpace(wisdev.AsOptionalString(next["label"]))
+		if label == "" {
+			label = strings.TrimSpace(wisdev.AsOptionalString(next["value"]))
+		}
+		if strings.TrimSpace(wisdev.AsOptionalString(next["description"])) == "" {
+			if description := dynamicQuestionOptionDescription(questionID, label, query, domain); description != "" {
+				next["description"] = description
+				changed = true
+			}
+		}
+		enriched = append(enriched, next)
+	}
+	return enriched, changed
+}
+
+func dynamicQuestionOptionMapsAsAny(options []map[string]any) []any {
+	out := make([]any, 0, len(options))
+	for _, option := range options {
+		out = append(out, option)
+	}
+	return out
+}
+
+func agentSessionIncludesQuestion(session map[string]any, questionID string) bool {
+	questionID = strings.TrimSpace(questionID)
+	if len(session) == 0 || questionID == "" {
+		return false
+	}
+	for _, question := range sliceAnyMap(session["questions"]) {
+		if wisdev.AsOptionalString(question["id"]) == questionID {
+			return true
+		}
+	}
+	for _, id := range sliceStrings(session["questionSequence"]) {
+		if strings.TrimSpace(id) == questionID {
+			return true
+		}
+	}
+	return false
 }
 
 // wisdevAnalyzeQueryBudget returns an adaptive handler timeout that accounts
@@ -56,42 +177,248 @@ func wisdevAnalyzeQueryBudget() time.Duration {
 	return wisdevAnalyzeQueryHandlerTimeout
 }
 
-func defaultEvidenceQualityOptions(query string, domain string) []string {
-	text := strings.ToLower(strings.TrimSpace(query + " " + domain))
-	options := []string{
-		"Peer-reviewed evidence",
-		"Transparent methods and data",
-		"Replication or validation evidence",
-		"High citation signal",
-		"Recent evidence",
-		"Open data or code availability",
+func dynamicQuestionOptionContextAnchors(query string, domain string, contextGroups ...[]string) []string {
+	candidates := []string{}
+	for _, group := range contextGroups {
+		candidates = append(candidates, group...)
 	}
+	candidates = append(candidates, queryAwareSubtopicHints(query, domain)...)
+	candidates = append(candidates, deriveQuerySubtopics(query, 6)...)
+	if len(normalizeDynamicOptionValues(candidates)) == 0 {
+		candidates = append(candidates, defaultDomainSubtopics(domain)...)
+	}
+
+	anchors := []string{}
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		anchor := normalizeDynamicQuestionOptionAnchor(candidate)
+		if anchor == "" {
+			continue
+		}
+		key := strings.ToLower(anchor)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		anchors = append(anchors, anchor)
+		if len(anchors) >= 4 {
+			break
+		}
+	}
+	return anchors
+}
+
+func normalizeDynamicQuestionOptionAnchor(value string) string {
+	normalized := strings.NewReplacer("_", " ", "/", " ", "-", " ").Replace(strings.TrimSpace(value))
+	fields := strings.Fields(normalized)
+	if len(fields) == 0 {
+		return ""
+	}
+	if len(fields) > 5 {
+		fields = fields[:5]
+	}
+
+	parts := make([]string, 0, len(fields))
+	for _, field := range fields {
+		cleaned := strings.Trim(field, ".,;:!?")
+		if cleaned == "" {
+			continue
+		}
+		parts = append(parts, normalizeResearchDisplayToken(cleaned))
+	}
+	anchor := strings.TrimSpace(strings.Join(parts, " "))
+	if anchor == "" {
+		return ""
+	}
+	switch strings.ToLower(anchor) {
+	case "background", "methods", "method", "limitations", "applications", "theoretical background",
+		"empirical evidence", "comparative analysis", "future directions", "systematic review",
+		"meta analysis", "review", "survey", "best papers first", "broad coverage map":
+		return ""
+	default:
+		return anchor
+	}
+}
+
+func defaultEvidenceQualityOptions(query string, domain string, contextGroups ...[]string) []string {
+	text := strings.ToLower(strings.TrimSpace(query + " " + domain))
+	anchors := dynamicQuestionOptionContextAnchors(query, domain, contextGroups...)
+	options := make([]string, 0, 12)
+	if containsAny(text, []string{"rlhf", "reinforcement learning from human feedback", "preference learning", "human feedback", "reward model", "reward modeling", "alignment"}) {
+		options = append(options,
+			"Human preference label reliability",
+			"Reward model validation benchmarks",
+			"Policy-optimization ablation evidence",
+			"Reward hacking and safety failure evidence",
+		)
+	}
+	if containsAny(text, []string{"benchmark", "evaluation", "leaderboard", "baseline", "model comparison", "generalization"}) {
+		options = append(options,
+			"Benchmark protocol reproducibility",
+			"Baseline and dataset comparability",
+			"Metric validity and error analysis",
+		)
+	}
+	if containsAny(text, []string{"clinical", "medicine", "health", "patient", "treatment", "therapy"}) {
+		options = append(options,
+			"Randomized or controlled clinical evidence",
+			"Safety and adverse-event evidence",
+			"Population and inclusion fit",
+		)
+	}
+	if containsAny(text, []string{"systematic review", "meta-analysis", "meta analysis", "prisma", "evidence synthesis"}) {
+		options = append(options,
+			"Systematic review inclusion quality",
+			"Publication-bias assessment",
+		)
+	}
+	if len(anchors) > 0 {
+		primary := anchors[0]
+		options = append(options,
+			primary+" validation evidence",
+			primary+" reproducibility evidence",
+		)
+		if len(anchors) > 1 {
+			options = append(options, primary+" vs "+anchors[1]+" evidence quality")
+		}
+		if strings.Contains(text, "benchmark") || strings.Contains(text, "model") || strings.Contains(text, "ai") || strings.Contains(text, "computer") || strings.Contains(text, "rlhf") {
+			options = append(options, primary+" benchmark protocol quality")
+		}
+		if strings.Contains(text, "human") || strings.Contains(text, "feedback") || strings.Contains(text, "label") || strings.Contains(text, "rlhf") {
+			options = append(options, "Human feedback label reliability")
+		}
+	}
+	options = append(options, queryGroundedEvidenceQualityFallbacks(anchors)...)
 	if strings.Contains(text, "clinical") || strings.Contains(text, "medicine") || strings.Contains(text, "health") {
-		options = append([]string{"Randomized or controlled evidence", "Systematic review evidence"}, options...)
+		options = append(options, "Randomized or controlled evidence", "Systematic review evidence")
 	}
 	if strings.Contains(text, "benchmark") || strings.Contains(text, "model") || strings.Contains(text, "ai") || strings.Contains(text, "computer") {
-		options = append([]string{"Reproducible benchmarks", "Ablation-backed evidence"}, options...)
+		options = append(options, "Reproducible benchmarks", "Ablation-backed evidence")
 	}
 	return uniqueStrings(options)
 }
 
-func defaultOutputFocusOptions(query string, domain string) []string {
+func defaultOutputFocusOptions(query string, domain string, contextGroups ...[]string) []string {
 	text := strings.ToLower(strings.TrimSpace(query + " " + domain))
-	options := []string{
-		"Best papers first",
-		"Broad coverage map",
-		"Evidence gaps and limitations",
-		"Method comparison",
-		"Contradictions and disagreements",
-		"Practical implications",
+	anchors := dynamicQuestionOptionContextAnchors(query, domain, contextGroups...)
+	options := make([]string, 0, 12)
+	if containsAny(text, []string{"rlhf", "reinforcement learning from human feedback", "preference learning", "human feedback", "reward model", "reward modeling", "alignment"}) {
+		options = append(options,
+			"Reward-model comparison takeaways",
+			"Preference-data failure modes",
+			"Alignment safety tradeoffs",
+		)
 	}
+	if containsAny(text, []string{"benchmark", "evaluation", "leaderboard", "baseline", "model comparison", "generalization"}) {
+		options = append(options,
+			"Benchmark leaderboard caveats",
+			"Method and dataset tradeoffs",
+			"Reproducibility checklist",
+		)
+	}
+	if containsAny(text, []string{"clinical", "medicine", "health", "patient", "treatment", "therapy"}) {
+		options = append(options,
+			"Clinical relevance and safety",
+			"Patient-selection implications",
+		)
+	}
+	if len(anchors) > 0 {
+		primary := anchors[0]
+		options = append(options,
+			primary+" evidence map",
+			primary+" gaps and limitations",
+			primary+" method tradeoffs",
+		)
+		if len(anchors) > 1 {
+			options = append(options, primary+" vs "+anchors[1]+" comparison")
+		}
+		if strings.Contains(text, "benchmark") || strings.Contains(text, "model") || strings.Contains(text, "ai") || strings.Contains(text, "computer") || strings.Contains(text, "rlhf") {
+			options = append(options, primary+" benchmark takeaways")
+		}
+	}
+	options = append(options, queryGroundedOutputFocusFallbacks(anchors)...)
 	if strings.Contains(text, "benchmark") || strings.Contains(text, "compare") || strings.Contains(text, "model") {
-		options = append([]string{"Benchmark comparison", "Method tradeoffs"}, options...)
+		options = append(options, "Benchmark comparison", "Method tradeoffs")
 	}
 	if strings.Contains(text, "clinical") || strings.Contains(text, "medicine") || strings.Contains(text, "health") {
-		options = append([]string{"Clinical relevance", "Safety and adverse effects"}, options...)
+		options = append(options, "Clinical relevance", "Safety and adverse effects")
 	}
 	return uniqueStrings(options)
+}
+
+func queryGroundedEvidenceQualityFallbacks(anchors []string) []string {
+	if len(anchors) == 0 {
+		return []string{
+			"Query-specific validation evidence",
+			"Query-specific replication signals",
+			"Query-specific data fit",
+		}
+	}
+	primary := anchors[0]
+	options := []string{
+		primary + " validation evidence",
+		primary + " replication signals",
+		primary + " data fit",
+	}
+	if len(anchors) > 1 {
+		options = append(options, primary+" vs "+anchors[1]+" evidence contrast")
+	}
+	return options
+}
+
+func queryGroundedOutputFocusFallbacks(anchors []string) []string {
+	if len(anchors) == 0 {
+		return []string{
+			"Query-specific evidence map",
+			"Query-specific unresolved gaps",
+			"Query-specific comparison angles",
+		}
+	}
+	primary := anchors[0]
+	options := []string{
+		primary + " evidence map",
+		primary + " unresolved gaps",
+		primary + " comparison angles",
+	}
+	if len(anchors) > 1 {
+		options = append(options, primary+" vs "+anchors[1]+" synthesis contrast")
+	}
+	return options
+}
+
+func defaultExclusionOptions(query string, domain string, contextGroups ...[]string) []string {
+	contextTerms := flattenStringGroups(contextGroups...)
+	text := strings.ToLower(strings.TrimSpace(query + " " + domain + " " + strings.Join(contextTerms, " ")))
+	options := []string{"No exclusions"}
+	if containsAny(text, []string{"biomedical", "clinical", "medicine", "patient", "therapy", "disease", "biomarker", "single-cell", "crispr", "assay"}) {
+		options = append(options,
+			"Exclude non-human evidence unless mechanistic",
+			"Exclude underpowered cohorts",
+			"Exclude unvalidated assay-only findings",
+			"Exclude non-primary research",
+		)
+	}
+	if containsAny(text, []string{"benchmark", "model", "ai", "evaluation", "leaderboard"}) {
+		options = append(options,
+			"Exclude non-reproducible benchmarks",
+			"Exclude papers without baseline comparisons",
+			"Exclude result-only reports without methods",
+		)
+	}
+	options = append(options,
+		"Exclude preprints",
+		"Exclude non-English studies",
+		"Exclude non-peer-reviewed sources",
+	)
+	return uniqueStrings(options)
+}
+
+func flattenStringGroups(groups ...[]string) []string {
+	out := []string{}
+	for _, group := range groups {
+		out = append(out, group...)
+	}
+	return out
 }
 
 func normalizeQuestionOptionValue(label string) string {
@@ -99,6 +426,314 @@ func normalizeQuestionOptionValue(label string) string {
 	replacer := strings.NewReplacer("&", " and ", "/", " ", "-", " ", "(", " ", ")", " ", ",", " ")
 	value = replacer.Replace(value)
 	return strings.Join(strings.Fields(value), "_")
+}
+
+func dynamicQuestionOptionDescription(questionID string, label string, query string, domain string) string {
+	trimmedLabel := strings.TrimSpace(label)
+	if trimmedLabel == "" {
+		return ""
+	}
+	lowerLabel := strings.ToLower(trimmedLabel)
+	switch strings.TrimSpace(questionID) {
+	case "q6_exclusions":
+		switch {
+		case strings.Contains(lowerLabel, "no exclusion"):
+			return "Keep the search broad and let later evidence scoring reject weak papers."
+		case strings.Contains(lowerLabel, "non-human") || strings.Contains(lowerLabel, "animal"):
+			return "Filter animal or model-organism evidence unless it directly explains mechanism or translation."
+		case strings.Contains(lowerLabel, "underpowered") || strings.Contains(lowerLabel, "small"):
+			return "Down-rank studies whose sample size or statistical power is too weak for the claim."
+		case strings.Contains(lowerLabel, "assay") || strings.Contains(lowerLabel, "validation"):
+			return "Filter findings that only report exploratory assay signals without independent validation."
+		case strings.Contains(lowerLabel, "non-primary") || strings.Contains(lowerLabel, "review"):
+			return "Prefer original evidence over reviews, commentary, or secondary summaries for this pass."
+		case strings.Contains(lowerLabel, "preprint"):
+			return "Filter preprints when formally reviewed evidence is needed for the current question."
+		case strings.Contains(lowerLabel, "non-english"):
+			return "Limit retrieval to English-language records for this pass."
+		case strings.Contains(lowerLabel, "non-peer-reviewed"):
+			return "Prioritize peer-reviewed venues and indexed literature."
+		default:
+			return fmt.Sprintf("Apply %s as an exclusion or down-ranking rule for this research pass.", trimmedLabel)
+		}
+	case "q4_subtopics":
+		switch {
+		case strings.Contains(lowerLabel, "reward model"):
+			return "Focus retrieval on how reward models are trained, validated, and compared."
+		case strings.Contains(lowerLabel, "preference data") || strings.Contains(lowerLabel, "human feedback"):
+			return "Look for evidence about feedback collection, label quality, annotator agreement, and preference data bias."
+		case strings.Contains(lowerLabel, "policy optimization"):
+			return "Prioritize papers on PPO-style optimization, reward-policy coupling, and RLHF training stability."
+		case strings.Contains(lowerLabel, "safety") || strings.Contains(lowerLabel, "alignment failure") || strings.Contains(lowerLabel, "reward hacking"):
+			return "Surface papers on failure modes, misuse risks, reward hacking, and alignment tradeoffs."
+		case strings.Contains(lowerLabel, "benchmark") || strings.Contains(lowerLabel, "evaluation protocol"):
+			return "Target benchmark datasets, evaluation protocols, baselines, and reproducibility constraints."
+		case strings.Contains(lowerLabel, "patient") || strings.Contains(lowerLabel, "clinical"):
+			return "Focus retrieval on patient fit, clinical outcomes, safety signals, and care-context constraints."
+		case strings.Contains(lowerLabel, "publication bias") || strings.Contains(lowerLabel, "study quality"):
+			return "Track how inclusion criteria, bias assessment, and study quality affect the evidence base."
+		}
+		return fmt.Sprintf("Focus retrieval on %s within the current research question.", trimmedLabel)
+	case "q5_study_types":
+		switch {
+		case strings.Contains(lowerLabel, "benchmark"):
+			return "Include benchmark studies with explicit tasks, baselines, datasets, and comparable metrics."
+		case strings.Contains(lowerLabel, "ablation"):
+			return "Include ablation studies that isolate which components drive the reported results."
+		case strings.Contains(lowerLabel, "human evaluation") || strings.Contains(lowerLabel, "user study"):
+			return "Include papers with human judgments, annotation protocols, rater agreement, or user-centered evaluation."
+		case strings.Contains(lowerLabel, "safety evaluation"):
+			return "Include studies that test harmful behavior, failure cases, robustness, or alignment risks."
+		case strings.Contains(lowerLabel, "cohort") || strings.Contains(lowerLabel, "observational"):
+			return "Include observational evidence that can expose population fit, confounding, and real-world outcomes."
+		case strings.Contains(lowerLabel, "randomized") || strings.Contains(lowerLabel, "controlled trial"):
+			return "Include controlled comparisons that can support stronger causal or intervention claims."
+		case strings.Contains(lowerLabel, "systematic review") || strings.Contains(lowerLabel, "meta-analysis"):
+			return "Include evidence syntheses with explicit search criteria, inclusion rules, and bias assessment."
+		case strings.Contains(lowerLabel, "comparative"):
+			return "Include side-by-side comparisons that explain where each method or evidence type is stronger."
+		}
+		return fmt.Sprintf("Include papers that use %s as a method or evidence design.", trimmedLabel)
+	case "q7_evidence_quality":
+		switch {
+		case strings.Contains(lowerLabel, "preference label") || strings.Contains(lowerLabel, "label reliability") || strings.Contains(lowerLabel, "human feedback"):
+			return "Check whether preference labels, annotator agreement, and feedback protocols are reliable enough to trust."
+		case strings.Contains(lowerLabel, "reward model validation"):
+			return "Prefer studies that validate reward models against held-out preferences, adversarial cases, or downstream policy behavior."
+		case strings.Contains(lowerLabel, "policy") && strings.Contains(lowerLabel, "ablation"):
+			return "Look for ablations that separate policy optimization effects from reward-model and data-quality effects."
+		case strings.Contains(lowerLabel, "reward hacking") || strings.Contains(lowerLabel, "safety failure"):
+			return "Surface evidence that probes reward hacking, specification gaming, robustness failures, or unsafe behaviors."
+		case strings.Contains(lowerLabel, "metric validity"):
+			return "Check whether reported metrics match the actual research claim and are robust to dataset or protocol changes."
+		case strings.Contains(lowerLabel, "dataset comparability"):
+			return "Prefer evidence where datasets, baselines, and evaluation splits are comparable across methods."
+		case strings.Contains(lowerLabel, "adverse-event") || strings.Contains(lowerLabel, "population"):
+			return "Prioritize evidence with clear safety reporting, population fit, and inclusion or exclusion criteria."
+		case strings.Contains(lowerLabel, "label reliability") || strings.Contains(lowerLabel, "human feedback"):
+			return "Check whether human-preference or labeling evidence is consistent enough to trust."
+		case strings.Contains(lowerLabel, "benchmark protocol"):
+			return "Prefer benchmark papers with clear tasks, baselines, metrics, and reproducible protocols."
+		case strings.Contains(lowerLabel, "validation evidence"):
+			return fmt.Sprintf("Prioritize papers that validate %s with external, held-out, or comparative evidence.", trimmedLabel)
+		case strings.Contains(lowerLabel, "reproducibility evidence"):
+			return fmt.Sprintf("Favor studies that make %s reproducible through data, code, protocols, or repeated trials.", trimmedLabel)
+		case strings.Contains(lowerLabel, "evidence quality"):
+			return fmt.Sprintf("Compare how strong the evidence is across %s.", trimmedLabel)
+		case strings.Contains(lowerLabel, "randomized") || strings.Contains(lowerLabel, "controlled"):
+			return "Prioritize controlled designs that can support stronger causal or comparative claims."
+		case strings.Contains(lowerLabel, "systematic review"):
+			return "Favor papers that synthesize evidence across multiple studies with explicit inclusion criteria."
+		case strings.Contains(lowerLabel, "peer-reviewed"):
+			return "Prefer vetted publications from journals, conferences, or comparable peer-review venues."
+		case strings.Contains(lowerLabel, "transparent"):
+			return "Look for papers that clearly expose methods, datasets, measurements, and analysis choices."
+		case strings.Contains(lowerLabel, "replication") || strings.Contains(lowerLabel, "validation"):
+			return "Emphasize findings that were replicated, externally validated, or tested on held-out settings."
+		case strings.Contains(lowerLabel, "citation"):
+			return "Surface influential papers while still checking recency and methodological fit."
+		case strings.Contains(lowerLabel, "recent"):
+			return "Bias toward newer evidence so the review reflects the current state of the field."
+		case strings.Contains(lowerLabel, "open data") || strings.Contains(lowerLabel, "code"):
+			return "Favor studies with public artifacts that make methods easier to inspect or reproduce."
+		case strings.Contains(lowerLabel, "benchmark"):
+			return "Prefer papers with clear benchmark suites, baselines, protocols, and reproducible comparisons."
+		case strings.Contains(lowerLabel, "ablation"):
+			return "Prioritize studies that isolate components and measure how each design choice changes results."
+		default:
+			return fmt.Sprintf("Use %s as the quality bar for ranking candidate papers.", trimmedLabel)
+		}
+	case "q8_output_focus":
+		switch {
+		case strings.Contains(lowerLabel, "reward-model comparison"):
+			return "Compare reward-model objectives, validation setup, and downstream policy effects in the final synthesis."
+		case strings.Contains(lowerLabel, "preference-data failure"):
+			return "Center the output on feedback-source bias, label noise, coverage gaps, and their effect on conclusions."
+		case strings.Contains(lowerLabel, "alignment safety"):
+			return "Explain the main safety tradeoffs, unresolved failure modes, and where evidence is still weak."
+		case strings.Contains(lowerLabel, "leaderboard caveat"):
+			return "Separate headline benchmark scores from protocol limits, dataset leakage risks, and baseline fairness."
+		case strings.Contains(lowerLabel, "dataset tradeoff"):
+			return "Compare methods through the datasets, assumptions, and evaluation constraints behind each result."
+		case strings.Contains(lowerLabel, "reproducibility checklist"):
+			return "End with the data, code, protocol, and replication details needed to trust or rerun the evidence."
+		case strings.Contains(lowerLabel, "patient-selection"):
+			return "Frame clinical conclusions around who the evidence applies to and where population fit is uncertain."
+		case strings.Contains(lowerLabel, "evidence map"):
+			return fmt.Sprintf("Organize the final answer around where %s has strong, weak, or missing evidence.", trimmedLabel)
+		case strings.Contains(lowerLabel, "benchmark takeaway"):
+			return "Summarize benchmark setup, baselines, and the practical meaning of the reported scores."
+		case strings.Contains(lowerLabel, "method tradeoffs"):
+			return fmt.Sprintf("Explain the practical tradeoffs behind %s instead of only ranking papers.", trimmedLabel)
+		case strings.Contains(lowerLabel, "best papers"):
+			return "Rank the strongest papers first and keep weaker supporting evidence secondary."
+		case strings.Contains(lowerLabel, "coverage"):
+			return "Build a broad map of themes, methods, and evidence clusters before narrowing."
+		case strings.Contains(lowerLabel, "gap") || strings.Contains(lowerLabel, "limitation"):
+			return "Highlight unresolved questions, weak evidence, and places where follow-up work is needed."
+		case strings.Contains(lowerLabel, "method comparison"):
+			return "Compare approaches side by side, including strengths, weaknesses, and where each fits."
+		case strings.Contains(lowerLabel, "contradiction") || strings.Contains(lowerLabel, "disagreement"):
+			return "Call out conflicting findings and explain which assumptions or methods may drive them."
+		case strings.Contains(lowerLabel, "practical"):
+			return "Emphasize implications for implementation, decision-making, or real-world use."
+		case strings.Contains(lowerLabel, "benchmark"):
+			return "Center the output on benchmark setup, baselines, metrics, and comparative performance."
+		case strings.Contains(lowerLabel, "tradeoff"):
+			return "Summarize the main tradeoffs between methods instead of only ranking winners."
+		case strings.Contains(lowerLabel, "clinical"):
+			return "Prioritize clinical usefulness, patient relevance, and translational implications."
+		case strings.Contains(lowerLabel, "safety") || strings.Contains(lowerLabel, "adverse"):
+			return "Surface safety signals, risks, adverse effects, and uncertainty around harms."
+		default:
+			context := strings.TrimSpace(query)
+			if context == "" {
+				context = strings.TrimSpace(domain)
+			}
+			if context != "" {
+				return fmt.Sprintf("Shape the final synthesis around %s for %s.", trimmedLabel, context)
+			}
+			return fmt.Sprintf("Shape the final synthesis around %s.", trimmedLabel)
+		}
+	default:
+		return ""
+	}
+}
+
+func dynamicQuestionOptionPayload(questionID string, value string, label string, query string, domain string) map[string]any {
+	return normalizeQuestionOptionPayload(
+		value,
+		label,
+		dynamicQuestionOptionDescription(questionID, label, query, domain),
+		"",
+	)
+}
+
+func dynamicQuestionOptionExcluded(label string, excluded []string) bool {
+	trimmed := strings.TrimSpace(label)
+	if trimmed == "" {
+		return true
+	}
+	normalizedValue := normalizeQuestionOptionValue(trimmed)
+	for _, value := range normalizeDynamicOptionValues(excluded) {
+		if strings.EqualFold(trimmed, value) || strings.EqualFold(normalizedValue, normalizeQuestionOptionValue(value)) {
+			return true
+		}
+	}
+	return false
+}
+
+func dynamicQuestionOptionKind(questionID string) (string, string, string, bool) {
+	switch strings.TrimSpace(questionID) {
+	case "q6_exclusions":
+		return "exclusions_generate",
+			"exclusion filters for retrieval and evidence ranking",
+			"Generate exclusion or down-ranking options that are specific to the query, detected domain, selected subtopics, and selected study types. Infer which constraints could materially improve evidence quality; for biomedical research, adapt to the actual population, model organism, assay, intervention, endpoint, validation stage, or study design instead of using a fixed checklist. Include a broad no-exclusion option only when keeping the search broad is a reasonable user choice.",
+			true
+	case "q7_evidence_quality":
+		return "evidence_quality_generate",
+			"evidence-quality filters used to rank candidate papers",
+			"Generate evidence-quality options that are specific to the query, detected domain, selected subtopics, and selected study types. Infer the relevant scientific standards from context; for biomedical research, adapt to the actual modality, population, assay, mechanism, endpoint, or translational question instead of using a fixed checklist. Avoid generic labels like Peer-reviewed evidence, Recent evidence, and Transparent methods unless the query makes them unusually important.",
+			true
+	case "q8_output_focus":
+		return "output_focus_generate",
+			"final synthesis focus options",
+			"Generate final-output focus options that shape how the answer should be organized for this query and domain. Infer the useful synthesis angles from context; for biomedical research, adapt to the actual disease area, intervention, biomarker, cohort, mechanism, or translational workflow instead of using a fixed checklist. Avoid generic labels like Best papers first, Broad coverage map, and Practical implications unless the query makes them unusually important.",
+			true
+	default:
+		return "", "", "", false
+	}
+}
+
+func buildStructuredDynamicQuestionOptions(ctx context.Context, agentGateway *wisdev.AgentGateway, questionID string, query string, domain string, selectedSubtopics []string, selectedStudyTypes []string, excluded []string, limit int) ([]map[string]any, string, string, bool) {
+	if limit <= 0 {
+		limit = 4
+	}
+	operation, optionKind, guidance, ok := dynamicQuestionOptionKind(questionID)
+	if !ok {
+		return nil, "", "", false
+	}
+	if agentGateway == nil || agentGateway.LLMClient == nil {
+		logInteractiveStructuredFallback(operation, "llm_unavailable", query, nil)
+		return nil, "", "", false
+	}
+
+	avoidLine := ""
+	if filteredExcluded := normalizeDynamicOptionValues(excluded); len(filteredExcluded) > 0 {
+		avoidLine = fmt.Sprintf("Avoid repeating any of these already shown options: %s.", strings.Join(filteredExcluded, ", "))
+	}
+
+	requestCtx, structuredClient, cancel := interactiveStructuredRequest(ctx, agentGateway.LLMClient)
+	defer cancel()
+	prompt := fmt.Sprintf(`You are WisDev, ScholarLM's adaptive research-planning assistant.
+Question slot: %s
+Query: %q
+Detected domain: %q
+Selected subtopics: %s
+Selected study types: %s
+Generate exactly %d %s.
+%s
+Each option must include a concise label and a one-sentence description explaining why that option is useful for this exact research task. Do not hard-code domain playbooks; infer the best labels from the query and selected context.
+%s
+%s`, questionID, query, domain, strings.Join(selectedSubtopics, ", "), strings.Join(selectedStudyTypes, ", "), limit, optionKind, guidance, avoidLine, structuredOutputSchemaInstruction)
+	schema := fmt.Sprintf(`{"type":"object","properties":{"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"description":{"type":"string"}},"required":["label","description"]},"maxItems":%d},"explanation":{"type":"string"}},"required":["options","explanation"]}`, limit)
+	resp, err := structuredClient.StructuredOutput(requestCtx, llm.ApplyStructuredPolicy(&llmv1.StructuredRequest{
+		Prompt:     prompt,
+		Model:      llm.ResolveLightModel(),
+		JsonSchema: schema,
+	}, llm.ResolveRequestPolicy(llm.RequestPolicyInput{
+		RequestedTier: "light",
+		Structured:    true,
+		HighValue:     false,
+	})))
+	if err != nil {
+		logInteractiveStructuredFallback(operation, "llm_request_failed", query, err)
+		return nil, "", "", false
+	}
+
+	var parsed struct {
+		Options []struct {
+			Label       string `json:"label"`
+			Description string `json:"description"`
+		} `json:"options"`
+		Explanation string `json:"explanation"`
+	}
+	if json.Unmarshal([]byte(resp.JsonResult), &parsed) != nil {
+		logInteractiveStructuredFallback(operation, "llm_invalid_response", query, fmt.Errorf("structured output JSON decode failed"))
+		return nil, "structured_invalid_fallback", "Regenerated heuristic options because model structured output was invalid.", false
+	}
+
+	options := make([]map[string]any, 0, limit)
+	seen := map[string]struct{}{}
+	for _, item := range parsed.Options {
+		label := strings.TrimSpace(item.Label)
+		if dynamicQuestionOptionExcluded(label, excluded) {
+			continue
+		}
+		key := normalizeQuestionOptionValue(label)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		description := strings.TrimSpace(item.Description)
+		if description == "" {
+			description = dynamicQuestionOptionDescription(questionID, label, query, domain)
+		}
+		options = append(options, normalizeQuestionOptionPayload(key, label, description, ""))
+		if len(options) >= limit {
+			break
+		}
+	}
+	if len(options) == 0 {
+		logInteractiveStructuredFallback(operation, "llm_empty_response", query, nil)
+		return nil, "structured_invalid_fallback", "Regenerated heuristic options because model structured output had no usable options.", false
+	}
+
+	explanation := strings.TrimSpace(parsed.Explanation)
+	if len(normalizeDynamicOptionValues(excluded)) > 0 && explanation != "" {
+		explanation += " Regenerated to avoid repeating prior options."
+	}
+	return options, "llm_structured", explanation, true
 }
 
 func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGateway *wisdev.AgentGateway) {
@@ -115,12 +750,14 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 			wisdev.AsOptionalString(session["originalQuery"]),
 		)
 		domain := wisdev.AsOptionalString(session["detectedDomain"])
+		selectedSubtopics := answeredAgentQuestionValues(session, "q4_subtopics")
+		selectedStudyTypes := answeredAgentQuestionValues(session, "q5_study_types")
 		switch strings.TrimSpace(questionID) {
 		case "q4_subtopics":
 			subtopics, _, _, source, explanation := buildSubtopicsResponseWithExclusions(ctx, agentGateway, query, domain, 8, previousOptions)
 			options := make([]any, 0, len(subtopics))
 			for _, subtopic := range subtopics {
-				options = append(options, map[string]any{"value": subtopic, "label": subtopic})
+				options = append(options, dynamicQuestionOptionPayload("q4_subtopics", subtopic, subtopic, query, domain))
 			}
 			return options, source, explanation
 		case "q5_study_types":
@@ -128,27 +765,107 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 			studyTypes, _, source, explanation := buildStudyTypesResponseWithExclusions(ctx, agentGateway, query, domain, existingSubtopics, 6, previousOptions)
 			options := make([]any, 0, len(studyTypes))
 			for _, studyType := range studyTypes {
-				options = append(options, map[string]any{"value": studyType, "label": studyType})
+				options = append(options, dynamicQuestionOptionPayload("q5_study_types", studyType, studyType, query, domain))
 			}
 			return options, source, explanation
+		case "q6_exclusions":
+			if llmOptions, source, explanation, ok := buildStructuredDynamicQuestionOptions(ctx, agentGateway, "q6_exclusions", query, domain, selectedSubtopics, selectedStudyTypes, previousOptions, 5); ok {
+				return dynamicQuestionOptionMapsAsAny(llmOptions), source, explanation
+			}
+			exclusions := avoidRepeatedDynamicOptions(defaultExclusionOptions(query, domain, selectedSubtopics, selectedStudyTypes), previousOptions, 5, func(selected []string) []string {
+				return defaultExclusionOptions(query+" "+strings.Join(selected, " "), domain, selectedSubtopics, selectedStudyTypes)
+			})
+			options := make([]any, 0, len(exclusions))
+			for _, exclusion := range exclusions {
+				options = append(options, dynamicQuestionOptionPayload("q6_exclusions", normalizeQuestionOptionValue(exclusion), exclusion, query, domain))
+			}
+			return options, "heuristic", "WisDev refreshed exclusion options from the current query and domain."
 		case "q7_evidence_quality":
-			qualityBars := avoidRepeatedDynamicOptions(defaultEvidenceQualityOptions(query, domain), previousOptions, 4, func(selected []string) []string {
-				return defaultEvidenceQualityOptions(query+" "+strings.Join(selected, " "), domain)
+			if llmOptions, source, explanation, ok := buildStructuredDynamicQuestionOptions(ctx, agentGateway, "q7_evidence_quality", query, domain, selectedSubtopics, selectedStudyTypes, previousOptions, 4); ok {
+				return dynamicQuestionOptionMapsAsAny(llmOptions), source, explanation
+			}
+			qualityBars := avoidRepeatedDynamicOptions(defaultEvidenceQualityOptions(query, domain, selectedSubtopics, selectedStudyTypes), previousOptions, 4, func(selected []string) []string {
+				return defaultEvidenceQualityOptions(query+" "+strings.Join(selected, " "), domain, selectedSubtopics, selectedStudyTypes)
 			})
 			options := make([]any, 0, len(qualityBars))
 			for _, qualityBar := range qualityBars {
-				options = append(options, map[string]any{"value": normalizeQuestionOptionValue(qualityBar), "label": qualityBar})
+				options = append(options, dynamicQuestionOptionPayload("q7_evidence_quality", normalizeQuestionOptionValue(qualityBar), qualityBar, query, domain))
 			}
 			return options, "heuristic", "WisDev refreshed evidence-quality options from the current query and domain."
 		case "q8_output_focus":
-			outputFocus := avoidRepeatedDynamicOptions(defaultOutputFocusOptions(query, domain), previousOptions, 4, func(selected []string) []string {
-				return defaultOutputFocusOptions(query+" "+strings.Join(selected, " "), domain)
+			if llmOptions, source, explanation, ok := buildStructuredDynamicQuestionOptions(ctx, agentGateway, "q8_output_focus", query, domain, selectedSubtopics, selectedStudyTypes, previousOptions, 4); ok {
+				return dynamicQuestionOptionMapsAsAny(llmOptions), source, explanation
+			}
+			outputFocus := avoidRepeatedDynamicOptions(defaultOutputFocusOptions(query, domain, selectedSubtopics, selectedStudyTypes), previousOptions, 4, func(selected []string) []string {
+				return defaultOutputFocusOptions(query+" "+strings.Join(selected, " "), domain, selectedSubtopics, selectedStudyTypes)
 			})
 			options := make([]any, 0, len(outputFocus))
 			for _, focus := range outputFocus {
-				options = append(options, map[string]any{"value": normalizeQuestionOptionValue(focus), "label": focus})
+				options = append(options, dynamicQuestionOptionPayload("q8_output_focus", normalizeQuestionOptionValue(focus), focus, query, domain))
 			}
 			return options, "heuristic", "WisDev refreshed output-focus options from the current query and domain."
+		default:
+			return nil, "", ""
+		}
+	}
+
+	buildFastQuestionOptions := func(ctx context.Context, session map[string]any, questionID string) ([]any, string, string) {
+		if len(session) == 0 {
+			return nil, "", ""
+		}
+		query := wisdev.ResolveSessionQueryText(
+			wisdev.AsOptionalString(session["correctedQuery"]),
+			wisdev.AsOptionalString(session["originalQuery"]),
+		)
+		domain := wisdev.AsOptionalString(session["detectedDomain"])
+		selectedSubtopics := answeredAgentQuestionValues(session, "q4_subtopics")
+		selectedStudyTypes := answeredAgentQuestionValues(session, "q5_study_types")
+		switch strings.TrimSpace(questionID) {
+		case "q4_subtopics":
+			subtopics, _, _, source, explanation := buildSubtopicsResponseWithExclusions(ctx, agentGateway, query, domain, 8, nil)
+			options := make([]any, 0, len(subtopics))
+			for _, subtopic := range subtopics {
+				options = append(options, dynamicQuestionOptionPayload("q4_subtopics", subtopic, subtopic, query, domain))
+			}
+			return options, source, explanation
+		case "q5_study_types":
+			existingSubtopics := answeredAgentQuestionValues(session, "q4_subtopics")
+			studyTypes, _, source, explanation := buildStudyTypesResponseWithExclusions(ctx, agentGateway, query, domain, existingSubtopics, 6, nil)
+			options := make([]any, 0, len(studyTypes))
+			for _, studyType := range studyTypes {
+				options = append(options, dynamicQuestionOptionPayload("q5_study_types", studyType, studyType, query, domain))
+			}
+			return options, source, explanation
+		case "q6_exclusions":
+			if llmOptions, source, explanation, ok := buildStructuredDynamicQuestionOptions(ctx, agentGateway, "q6_exclusions", query, domain, selectedSubtopics, selectedStudyTypes, nil, 5); ok {
+				return dynamicQuestionOptionMapsAsAny(llmOptions), source, explanation
+			}
+			exclusions := defaultExclusionOptions(query, domain, selectedSubtopics, selectedStudyTypes)
+			options := make([]any, 0, len(exclusions))
+			for _, exclusion := range trimStrings(exclusions, 5) {
+				options = append(options, dynamicQuestionOptionPayload("q6_exclusions", normalizeQuestionOptionValue(exclusion), exclusion, query, domain))
+			}
+			return options, "heuristic", "WisDev served exclusion options from the current query and domain."
+		case "q7_evidence_quality":
+			if llmOptions, source, explanation, ok := buildStructuredDynamicQuestionOptions(ctx, agentGateway, "q7_evidence_quality", query, domain, selectedSubtopics, selectedStudyTypes, nil, 4); ok {
+				return dynamicQuestionOptionMapsAsAny(llmOptions), source, explanation
+			}
+			qualityBars := defaultEvidenceQualityOptions(query, domain, selectedSubtopics, selectedStudyTypes)
+			options := make([]any, 0, len(qualityBars))
+			for _, qualityBar := range trimStrings(qualityBars, 4) {
+				options = append(options, dynamicQuestionOptionPayload("q7_evidence_quality", normalizeQuestionOptionValue(qualityBar), qualityBar, query, domain))
+			}
+			return options, "heuristic", "WisDev served evidence-quality options from the current query and domain."
+		case "q8_output_focus":
+			if llmOptions, source, explanation, ok := buildStructuredDynamicQuestionOptions(ctx, agentGateway, "q8_output_focus", query, domain, selectedSubtopics, selectedStudyTypes, nil, 4); ok {
+				return dynamicQuestionOptionMapsAsAny(llmOptions), source, explanation
+			}
+			outputFocus := defaultOutputFocusOptions(query, domain, selectedSubtopics, selectedStudyTypes)
+			options := make([]any, 0, len(outputFocus))
+			for _, focus := range trimStrings(outputFocus, 4) {
+				options = append(options, dynamicQuestionOptionPayload("q8_output_focus", normalizeQuestionOptionValue(focus), focus, query, domain))
+			}
+			return options, "heuristic", "WisDev served output-focus options from the current query and domain."
 		default:
 			return nil, "", ""
 		}
@@ -183,9 +900,13 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 		return call.result.options, call.result.source, call.result.explanation
 	}
 
-	patchDynamicQuestionOptions := func(session map[string]any, questionID string, options []any, source string, explanation string, overwrite bool) bool {
+	patchDynamicQuestionOptions := func(session map[string]any, questionID string, options []any, source string, explanation string, contextSignature string, overwrite bool) bool {
 		if len(session) == 0 || len(options) == 0 {
 			return false
+		}
+		contextSignature = strings.TrimSpace(contextSignature)
+		if contextSignature == "" {
+			contextSignature = dynamicQuestionOptionContextSignature(questionID, session)
 		}
 		questions := sliceAnyMap(session["questions"])
 		if len(questions) == 0 {
@@ -202,33 +923,34 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 			questions[i]["options"] = options
 			questions[i]["optionsSource"] = source
 			questions[i]["optionsExplanation"] = explanation
+			questions[i]["optionsContextKey"] = contextSignature
 			patched = true
 			break
 		}
 		if patched {
 			session["questions"] = questions
+			previousUpdatedAt := wisdev.IntValue64(session["updatedAt"])
+			updatedAt := time.Now().UnixMilli()
+			if updatedAt <= previousUpdatedAt {
+				updatedAt = previousUpdatedAt + 1
+			}
+			session["updatedAt"] = updatedAt
 		}
 		return patched
 	}
 
-	persistDynamicQuestionOptions := func(sessionID, userID, questionID string, options []any, source string, explanation string, overwrite bool) {
+	persistDynamicQuestionOptions := func(sessionID, userID, questionID string, options []any, source string, explanation string, contextSignature string, overwrite bool) bool {
 		if agentGateway == nil || agentGateway.StateStore == nil {
-			return
+			return false
 		}
 		latest, err := agentGateway.StateStore.LoadAgentSession(sessionID)
 		if err != nil {
-			return
+			return false
 		}
-		if !patchDynamicQuestionOptions(latest, questionID, options, source, explanation, overwrite) {
-			return
+		if !patchDynamicQuestionOptions(latest, questionID, options, source, explanation, contextSignature, overwrite) {
+			return false
 		}
-		previousUpdatedAt := wisdev.IntValue64(latest["updatedAt"])
-		nextUpdatedAt := time.Now().UnixMilli()
-		if nextUpdatedAt <= previousUpdatedAt {
-			nextUpdatedAt = previousUpdatedAt + 1
-		}
-		latest["updatedAt"] = nextUpdatedAt
-		_ = agentGateway.StateStore.PersistAgentSessionMutation(sessionID, userID, latest, wisdev.RuntimeJournalEntry{
+		err = agentGateway.StateStore.PersistAgentSessionMutation(sessionID, userID, latest, wisdev.RuntimeJournalEntry{
 			EventID:   wisdev.NewTraceID(),
 			SessionID: sessionID,
 			UserID:    userID,
@@ -241,8 +963,21 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 				"optionCount": len(options),
 				"overwrite":   overwrite,
 				"source":      source,
+				"context":     contextSignature,
 			},
 		})
+		if err != nil {
+			slog.Warn("wisdev dynamic question options persist failed",
+				"component", "api.wisdev",
+				"operation", "persist_dynamic_options",
+				"stage", "failed",
+				"session_id", sessionID,
+				"question_id", questionID,
+				"error", err,
+			)
+			return false
+		}
+		return true
 	}
 
 	appendQuestionRouteJournalEntry := func(entry wisdev.RuntimeJournalEntry) {
@@ -399,13 +1134,13 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 			})
 			return
 		}
-		if err := validateStringSlice(req.Values, "values", 8, 160); err != nil {
+		if err := validateStringSlice(req.Values, "values", maxAgentAnswerValues, 160); err != nil {
 			WriteError(w, http.StatusBadRequest, ErrInvalidParameters, err.Error(), map[string]any{
 				"field": "values",
 			})
 			return
 		}
-		if err := validateStringSlice(req.DisplayValues, "displayValues", 8, 160); err != nil {
+		if err := validateStringSlice(req.DisplayValues, "displayValues", maxAgentAnswerValues, 160); err != nil {
 			WriteError(w, http.StatusBadRequest, ErrInvalidParameters, err.Error(), map[string]any{
 				"field": "displayValues",
 			})
@@ -445,7 +1180,8 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 		}
 		if req.ExpectedUpdatedAt > 0 &&
 			wisdev.IntValue64(session["updatedAt"]) != req.ExpectedUpdatedAt &&
-			agentAnswerAlreadyApplied(session, questionID, normalizedValues, normalizedDisplayValues) {
+			(agentAnswerAlreadyApplied(session, questionID, normalizedValues, normalizedDisplayValues) ||
+				agentAnswerValuesAlreadyApplied(session, questionID, normalizedValues)) {
 			traceID := wisdev.NewTraceID()
 			responseBody := buildAgentQuestioningEnvelopeBody(traceID, session, false)
 			if body, err := json.Marshal(responseBody); err == nil {
@@ -626,16 +1362,18 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 						// Step 1: Generate q4 subtopic options via LLM.
 						q4Opts, q4Src, q4Expl := buildDynamicQuestionOptionsOnce(pwCtx, sessionID, sessionSnap, "q4_subtopics", nil)
 						if len(q4Opts) > 0 {
-							persistDynamicQuestionOptions(sessionID, userID, "q4_subtopics", q4Opts, q4Src, q4Expl, false)
-							slog.Info("wisdev q4_subtopics options pre-warmed",
-								"component", "api.wisdev",
-								"operation", "prewarm_options",
-								"stage", "completed",
-								"session_id", sessionID,
-								"triggered_by", answeredID,
-								"option_count", len(q4Opts),
-								"source", q4Src,
-							)
+							q4Context := dynamicQuestionOptionContextSignature("q4_subtopics", sessionSnap)
+							if persistDynamicQuestionOptions(sessionID, userID, "q4_subtopics", q4Opts, q4Src, q4Expl, q4Context, false) {
+								slog.Info("wisdev q4_subtopics options pre-warmed",
+									"component", "api.wisdev",
+									"operation", "prewarm_options",
+									"stage", "completed",
+									"session_id", sessionID,
+									"triggered_by", answeredID,
+									"option_count", len(q4Opts),
+									"source", q4Src,
+								)
+							}
 
 							// Step 2: Chain q5 study types immediately using q4 generated
 							// options as subtopic context (better than waiting for user's q4 answer).
@@ -675,16 +1413,18 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 									if q5Src == "" {
 										q5Src = "heuristic"
 									}
-									persistDynamicQuestionOptions(sessionID, userID, "q5_study_types", q5Opts, q5Src, q5Expl, false)
-									slog.Info("wisdev q5_study_types options pre-warmed (chained from q4)",
-										"component", "api.wisdev",
-										"operation", "prewarm_options",
-										"stage", "completed",
-										"session_id", sessionID,
-										"triggered_by", answeredID,
-										"option_count", len(q5Opts),
-										"source", q5Src,
-									)
+									q5Context := dynamicQuestionOptionContextSignature("q5_study_types", q5SessionSnap)
+									if persistDynamicQuestionOptions(sessionID, userID, "q5_study_types", q5Opts, q5Src, q5Expl, q5Context, false) {
+										slog.Info("wisdev q5_study_types options pre-warmed (chained from q4)",
+											"component", "api.wisdev",
+											"operation", "prewarm_options",
+											"stage", "completed",
+											"session_id", sessionID,
+											"triggered_by", answeredID,
+											"option_count", len(q5Opts),
+											"source", q5Src,
+										)
+									}
 								}
 							}
 						}
@@ -703,16 +1443,57 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 					defer pwCancel()
 					opts, src, expl := buildDynamicQuestionOptionsOnce(pwCtx, sessionID, sessionSnap, "q5_study_types", nil)
 					if len(opts) > 0 {
-						persistDynamicQuestionOptions(sessionID, userID, "q5_study_types", opts, src, expl, true)
-						slog.Info("wisdev q5_study_types options re-warmed from q4 selection",
-							"component", "api.wisdev",
-							"operation", "prewarm_options",
-							"stage", "completed",
-							"session_id", sessionID,
-							"triggered_by", answeredID,
-							"option_count", len(opts),
-							"source", src,
-						)
+						q5Context := dynamicQuestionOptionContextSignature("q5_study_types", sessionSnap)
+						if persistDynamicQuestionOptions(sessionID, userID, "q5_study_types", opts, src, expl, q5Context, true) {
+							slog.Info("wisdev q5_study_types options re-warmed from q4 selection",
+								"component", "api.wisdev",
+								"operation", "prewarm_options",
+								"stage", "completed",
+								"session_id", sessionID,
+								"triggered_by", answeredID,
+								"option_count", len(opts),
+								"source", src,
+							)
+						}
+					}
+				}()
+			} else if answeredID == "q5_study_types" {
+				// Q7/Q8 depend on the selected subtopics and study types. Re-warm
+				// both after q5 so the next cards do not show generic or stale
+				// fallback options while the user is progressing through the flow.
+				go func() {
+					pwCtx, pwCancel := context.WithTimeout(context.Background(), 20*time.Second)
+					defer pwCancel()
+					for _, nextQuestionID := range []string{"q7_evidence_quality", "q8_output_focus"} {
+						if !agentSessionIncludesQuestion(sessionSnap, nextQuestionID) {
+							slog.Info("wisdev context-sensitive options prewarm skipped",
+								"component", "api.wisdev",
+								"operation", "prewarm_options",
+								"stage", "skipped",
+								"session_id", sessionID,
+								"triggered_by", answeredID,
+								"question_id", nextQuestionID,
+								"reason", "question_not_planned",
+							)
+							continue
+						}
+						opts, src, expl := buildDynamicQuestionOptionsOnce(pwCtx, sessionID, sessionSnap, nextQuestionID, nil)
+						if len(opts) == 0 {
+							continue
+						}
+						contextKey := dynamicQuestionOptionContextSignature(nextQuestionID, sessionSnap)
+						if persistDynamicQuestionOptions(sessionID, userID, nextQuestionID, opts, src, expl, contextKey, true) {
+							slog.Info("wisdev context-sensitive options re-warmed from q5 selection",
+								"component", "api.wisdev",
+								"operation", "prewarm_options",
+								"stage", "completed",
+								"session_id", sessionID,
+								"triggered_by", answeredID,
+								"question_id", nextQuestionID,
+								"option_count", len(opts),
+								"source", src,
+							)
+						}
 					}
 				}()
 			}
@@ -899,7 +1680,27 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 			if wisdev.AsOptionalString(question["id"]) != questionID {
 				continue
 			}
+			query := wisdev.ResolveSessionQueryText(
+				wisdev.AsOptionalString(session["correctedQuery"]),
+				wisdev.AsOptionalString(session["originalQuery"]),
+			)
+			domain := wisdev.AsOptionalString(session["detectedDomain"])
 			options := questionOptionPayloads(question["options"])
+			optionsStale := dynamicQuestionOptionsNeedRefresh(session, question, questionID)
+			if !optionsStale && len(options) > 0 {
+				var descriptionsAdded bool
+				options, descriptionsAdded = dynamicQuestionOptionsWithDescriptions(questionID, query, domain, options)
+				if descriptionsAdded {
+					contextKey := strings.TrimSpace(wisdev.AsOptionalString(question["optionsContextKey"]))
+					if contextKey == "" {
+						contextKey = dynamicQuestionOptionContextSignature(questionID, session)
+					}
+					enrichedOptions := dynamicQuestionOptionMapsAsAny(options)
+					if patchDynamicQuestionOptions(session, questionID, enrichedOptions, wisdev.AsOptionalString(question["optionsSource"]), wisdev.AsOptionalString(question["optionsExplanation"]), contextKey, true) {
+						persistDynamicQuestionOptions(sessionID, wisdev.AsOptionalString(session["userId"]), questionID, enrichedOptions, wisdev.AsOptionalString(question["optionsSource"]), wisdev.AsOptionalString(question["optionsExplanation"]), contextKey, true)
+					}
+				}
+			}
 			// Read stored provenance so pre-seeded LLM options are correctly
 			// identified as AI-generated on subsequent fetches (BUG-1 fix).
 			source := wisdev.AsOptionalString(question["optionsSource"])
@@ -908,12 +1709,12 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 			}
 			explanation := wisdev.AsOptionalString(question["optionsExplanation"])
 
-			// If stored options are empty, generate them on-demand with a tight
-			// timeout. The generation helpers already fall back heuristically,
-			// so degraded or non-LLM sessions still get dynamic options.
-			if len(options) == 0 && agentGateway != nil {
-				genCtx, genCancel := context.WithTimeout(r.Context(), 45*time.Second)
-				generatedOptions, generatedSource, generatedExplanation := buildDynamicQuestionOptionsOnce(genCtx, sessionID, session, questionID, nil)
+			// GET must stay inside the Rust gateway's interactive proxy budget:
+			// first reads attempt structured AI generation on that short budget,
+			// then persist deterministic Go fallback options when the model is unavailable.
+			if (len(options) == 0 || optionsStale) && agentGateway != nil {
+				genCtx, genCancel := context.WithTimeout(r.Context(), 2*time.Second)
+				generatedOptions, generatedSource, generatedExplanation := buildFastQuestionOptions(genCtx, session, questionID)
 				genCancel()
 				if generatedSource != "" {
 					source = generatedSource
@@ -921,10 +1722,49 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 				if generatedExplanation != "" {
 					explanation = generatedExplanation
 				}
-				if patchDynamicQuestionOptions(session, questionID, generatedOptions, source, explanation, false) {
-					persistDynamicQuestionOptions(sessionID, wisdev.AsOptionalString(session["userId"]), questionID, generatedOptions, source, explanation, false)
+				contextKey := dynamicQuestionOptionContextSignature(questionID, session)
+				if patchDynamicQuestionOptions(session, questionID, generatedOptions, source, explanation, contextKey, optionsStale) {
+					persistDynamicQuestionOptions(sessionID, wisdev.AsOptionalString(session["userId"]), questionID, generatedOptions, source, explanation, contextKey, optionsStale)
 				}
 				options = questionOptionPayloads(generatedOptions)
+			}
+
+			// The fast path above runs the LLM on a ~2s budget, so it usually
+			// persists static heuristic options — and once stored with a fresh
+			// context key they are never considered stale, locking the question
+			// to non-dynamic suggestions. Upgrade heuristic options to real
+			// LLM-generated ones in the background (detached context, same
+			// pattern as the answer-triggered prewarm); the frontend re-polls
+			// fallback-sourced options and swaps the AI set in when it lands.
+			if fallbackTriggered, _ := deriveQuestionOptionFallback(source); fallbackTriggered &&
+				len(options) > 0 && isDynamicQuestionOptionID(questionID) &&
+				agentGateway != nil && agentGateway.LLMClient != nil {
+				upgradeSession := cloneAnyMap(session)
+				upgradeUserID := wisdev.AsOptionalString(session["userId"])
+				go func() {
+					budget := 50 * time.Second
+					if llm.IsColdStartWindow() {
+						budget = 70 * time.Second
+					}
+					upgradeCtx, upgradeCancel := context.WithTimeout(context.Background(), budget)
+					defer upgradeCancel()
+					upgradedOptions, upgradedSource, upgradedExplanation := buildDynamicQuestionOptionsOnce(upgradeCtx, sessionID, upgradeSession, questionID, nil)
+					if len(upgradedOptions) == 0 || !isAIQuestionOptionSource(upgradedSource) {
+						return
+					}
+					contextKey := dynamicQuestionOptionContextSignature(questionID, upgradeSession)
+					if persistDynamicQuestionOptions(sessionID, upgradeUserID, questionID, upgradedOptions, upgradedSource, upgradedExplanation, contextKey, true) {
+						slog.Info("wisdev dynamic question options upgraded to AI",
+							"component", "api.wisdev",
+							"operation", "upgrade_options",
+							"stage", "completed",
+							"session_id", sessionID,
+							"question_id", questionID,
+							"option_count", len(upgradedOptions),
+							"source", upgradedSource,
+						)
+					}
+				}()
 			}
 
 			writeQuestionOptionResponse(w, questionID, options, source, explanation)
@@ -1003,12 +1843,14 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 
 		question, questionIndex := findRecommendationQuestion()
 		if len(question) > 0 {
-			if questionIndex >= 0 && len(questionOptionValues(question["options"])) == 0 && agentGateway != nil {
+			optionsStale := dynamicQuestionOptionsNeedRefresh(session, question, questionID)
+			if questionIndex >= 0 && (len(questionOptionValues(question["options"])) == 0 || optionsStale) && agentGateway != nil {
 				genCtx, genCancel := context.WithTimeout(r.Context(), 12*time.Second)
 				generatedOptions, generatedSource, generatedExplanation := buildDynamicQuestionOptionsOnce(genCtx, sessionID, session, questionID, nil)
 				genCancel()
-				if patchDynamicQuestionOptions(session, questionID, generatedOptions, generatedSource, generatedExplanation, false) {
-					persistDynamicQuestionOptions(sessionID, wisdev.AsOptionalString(session["userId"]), questionID, generatedOptions, generatedSource, generatedExplanation, false)
+				contextKey := dynamicQuestionOptionContextSignature(questionID, session)
+				if patchDynamicQuestionOptions(session, questionID, generatedOptions, generatedSource, generatedExplanation, contextKey, optionsStale) {
+					persistDynamicQuestionOptions(sessionID, wisdev.AsOptionalString(session["userId"]), questionID, generatedOptions, generatedSource, generatedExplanation, contextKey, optionsStale)
 					questions = sliceAnyMap(session["questions"])
 					question = questions[questionIndex]
 				}
@@ -1195,8 +2037,9 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 			}
 			if len(generatedOptions) > 0 {
 				options = questionOptionPayloads(generatedOptions)
-				if patchDynamicQuestionOptions(session, questionID, generatedOptions, source, explanation, true) {
-					persistDynamicQuestionOptions(strings.TrimSpace(req.SessionID), wisdev.AsOptionalString(session["userId"]), questionID, generatedOptions, source, explanation, true)
+				contextKey := dynamicQuestionOptionContextSignature(questionID, session)
+				if patchDynamicQuestionOptions(session, questionID, generatedOptions, source, explanation, contextKey, true) {
+					persistDynamicQuestionOptions(strings.TrimSpace(req.SessionID), wisdev.AsOptionalString(session["userId"]), questionID, generatedOptions, source, explanation, contextKey, true)
 				}
 			}
 		}
@@ -1205,12 +2048,30 @@ func (s *wisdevServer) registerQuestioningRoutes(mux *http.ServeMux, agentGatewa
 		if len(options) == 0 {
 			for _, question := range sliceAnyMap(session["questions"]) {
 				if wisdev.AsOptionalString(question["id"]) == questionID {
-					options = questionOptionPayloads(question["options"])
+					storedOptions := questionOptionPayloads(question["options"])
+					query := wisdev.ResolveSessionQueryText(
+						wisdev.AsOptionalString(session["correctedQuery"]),
+						wisdev.AsOptionalString(session["originalQuery"]),
+					)
+					domain := wisdev.AsOptionalString(session["detectedDomain"])
+					var descriptionsAdded bool
+					storedOptions, descriptionsAdded = dynamicQuestionOptionsWithDescriptions(questionID, query, domain, storedOptions)
+					options = storedOptions
 					source = wisdev.AsOptionalString(question["optionsSource"])
 					if source == "" {
 						source = "stored"
 					}
 					explanation = wisdev.AsOptionalString(question["optionsExplanation"])
+					if descriptionsAdded {
+						contextKey := strings.TrimSpace(wisdev.AsOptionalString(question["optionsContextKey"]))
+						if contextKey == "" {
+							contextKey = dynamicQuestionOptionContextSignature(questionID, session)
+						}
+						enrichedOptions := dynamicQuestionOptionMapsAsAny(storedOptions)
+						if patchDynamicQuestionOptions(session, questionID, enrichedOptions, source, explanation, contextKey, true) {
+							persistDynamicQuestionOptions(strings.TrimSpace(req.SessionID), wisdev.AsOptionalString(session["userId"]), questionID, enrichedOptions, source, explanation, contextKey, true)
+						}
+					}
 					break
 				}
 			}

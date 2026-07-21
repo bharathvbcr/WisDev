@@ -14,6 +14,7 @@ open-source repository.
 - On Unix-like systems, the equivalent targets are `make test-go`,
   `make test-python-contract`, and `make smoke-local`.
 - From repo root: `.\wisdev.cmd check` (Windows) or `./wisdev check` (Unix).
+- DocGen offline smoke: `wisdev docgen --offline --intent report -q "test topic"` (should emit a scaffold Quick Report).
 - Before pushing OSS: `npm run ops:sync:wisdev-oss` (from ScholarLM root).
 - Confirm `rg -n "paperclip|stripe|billing" orchestrator sidecar config adapters README.md .env.example` has no active runtime hits.
 - Confirm `rg -n "(?i)rust_gateway|compute_rust|\\brust\\b" orchestrator sidecar config adapters README.md .env.example` only finds the no-Rust stack-contract guard.

@@ -1,15 +1,11 @@
 {
   "mcpServers": {
     "wisdev": {
-      "command": "go",
-      "args": [
-        "run",
-        "./cmd/wisdev",
-        "mcp",
-        "--provider",
-        "openalex,arxiv"
-      ],
-      "cwd": "C:\\path\\to\\wisdev-arc\\orchestrator"
+      "command": "/absolute/path/to/wisdev",
+      "args": ["mcp", "--provider", "openalex,arxiv"],
+      "env": {
+        "PATH": "/absolute/path/to/go/bin:/usr/local/bin:/usr/bin:/bin"
+      }
     }
   }
 }

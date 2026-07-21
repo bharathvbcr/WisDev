@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/citations"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/stackconfig"
 )
 
@@ -424,19 +425,20 @@ func formatCitations(req citationFormatRequest) (citationFormatResponse, error) 
 		return out, nil
 	}
 
-	if style != "apa" && style != "mla" && style != "chicago" {
-		return citationFormatResponse{}, fmt.Errorf("unsupported_style:%s", style)
+	styleParsed, err := citations.ParseStyle(style)
+	if err != nil {
+		return citationFormatResponse{}, err
 	}
 
 	formatted := make([]citationFormatResultItem, 0, len(req.Items))
-	for _, item := range req.Items {
-		text, err := localFormatCitation(style, item)
-		if err != nil {
-			return citationFormatResponse{}, err
+	for i, item := range req.Items {
+		entry, convErr := citationItemToEntry(item)
+		if convErr != nil {
+			return citationFormatResponse{}, convErr
 		}
 		formatted = append(formatted, citationFormatResultItem{
 			ID:   item.ID,
-			Text: text,
+			Text: citations.FormatEntry(entry, styleParsed, citations.FormatPlain, i+1),
 		})
 	}
 	return citationFormatResponse{
@@ -445,6 +447,41 @@ func formatCitations(req citationFormatRequest) (citationFormatResponse, error) 
 		Locale:    req.Locale,
 		Output:    req.Output,
 		Formatted: formatted,
-		Engine:    "go-fallback",
+		Engine:    "go-citations",
+	}, nil
+}
+
+func citationItemToEntry(item citationFormatItem) (citations.Entry, error) {
+	id := strings.TrimSpace(item.ID)
+	if id == "" {
+		return citations.Entry{}, errors.New("invalid_item_payload:missing_id")
+	}
+	title := strings.TrimSpace(item.Title)
+	if title == "" {
+		return citations.Entry{}, fmt.Errorf("invalid_item_payload:missing_title:%s", id)
+	}
+	year := 0
+	if item.Issued != nil && len(item.Issued.DateParts) > 0 && len(item.Issued.DateParts[0]) > 0 {
+		year = item.Issued.DateParts[0][0]
+	}
+	authors := make([]string, 0, len(item.Author))
+	for _, author := range item.Author {
+		label := strings.TrimSpace(strings.Join([]string{author.Given, author.Family}, " "))
+		if label == "" {
+			continue
+		}
+		authors = append(authors, label)
+	}
+	return citations.Entry{
+		ID:      id,
+		Authors: authors,
+		Year:    year,
+		Title:   title,
+		Journal: strings.TrimSpace(item.ContainerTitle),
+		Volume:  strings.TrimSpace(item.Volume),
+		Issue:   strings.TrimSpace(item.Issue),
+		Pages:   strings.TrimSpace(item.Page),
+		DOI:     strings.TrimSpace(item.DOI),
+		URL:     strings.TrimSpace(item.URL),
 	}, nil
 }

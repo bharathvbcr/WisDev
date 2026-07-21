@@ -1,12 +1,15 @@
 package cli
 
-// docgen.go implements `wisdev docgen` (aliases: docugen, paper): a one-shot
+// docgen.go implements `wisdev docgen` (alias: docugen): a one-shot
 // "search + DocuGen" command. It runs the local research loop to gather grounded
 // papers, feeds them through the manuscript pipeline (the same engine the
 // /full-paper HTTP route drives), and renders a grounded manuscript draft as
 // Markdown (or raw JSON). Section enrichment uses the Python sidecar when one is
 // reachable and falls back to grounded scaffolds when it is not, so the command
 // also works fully offline.
+//
+// NOTE: "paper" is deliberately NOT an alias — a bare question starting with the
+// word "paper" ("paper on transformers") must stay a search (see docgen_test.go).
 
 import (
 	"context"
@@ -18,12 +21,16 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/citations"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/docgen"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/telemetry"
 	internalwisdev "github.com/bharathvbcr/wisdev-arc/orchestrator/internal/wisdev"
@@ -31,32 +38,35 @@ import (
 )
 
 type docGenOptions struct {
-	query           string
-	format          string // "markdown" | "latex" | "json"
-	jsonOut         bool
-	quiet           bool
-	verbose         bool
-	showStages      bool
-	offline         bool
-	providers       []string
-	domain          string
-	pythonURL       string
-	outputPath      string
-	timeout         time.Duration
-	maxIterations   int
-	maxSearchTerms  int
-	hitsPerSearch   int
-	maxUniquePapers int
-	disableEnhance  bool
-	logFile         string
-	corpusDump      string
-	corpusFile      string
-	targetWords     int      // --words: manuscript-wide target word count (0 = model default)
-	minCitations    int      // --min-citations: minimum distinct sources to cite (0 = none)
-	sectionFlow     []string // --flow: ordered section plan (empty = default)
-	reviewRounds    int      // --review-rounds: agentic review→revise loop budget (0 = default)
-	genre           string   // --genre: manuscript genre (empty = narrative literature review)
-	allReferences   bool     // --all-references: list every retrieved source, not only cited ones
+	query            string
+	intent           string // "report" | "litreview" | "fullpaper"
+	citationStyle    string // "apa" | "mla" | ... (see internal/citations)
+	format           string // "markdown" | "latex" | "html" | "docx" | "json"
+	jsonOut          bool
+	quiet            bool
+	verbose          bool
+	showStages       bool
+	offline          bool
+	providers        []string
+	domain           string
+	pythonURL        string
+	outputPath       string
+	timeout          time.Duration
+	maxIterations    int
+	maxSearchTerms   int
+	hitsPerSearch    int
+	maxUniquePapers  int
+	disableEnhance   bool
+	logFile          string
+	corpusDump       string
+	corpusFile       string
+	targetWords      int      // --words: manuscript-wide target word count (0 = model default)
+	minCitations     int      // --min-citations: minimum distinct sources to cite (0 = none)
+	sectionFlow      []string // --flow: ordered section plan (empty = default)
+	reviewRounds     int      // --review-rounds: agentic review→revise loop budget (0 = default)
+	genre            string   // --genre: manuscript genre (empty = narrative literature review)
+	allReferences    bool     // --all-references: list every retrieved source, not only cited ones
+	autoMinCitations bool     // true when minCitations came from the smart default, not a flag
 }
 
 // manuscriptControls holds the granular DocGen knobs shared by the `docgen` and
@@ -100,8 +110,10 @@ func runDocGen(args []string, stdout, stderr io.Writer) error {
 	fs.BoolVar(verbose, "v", false, "show search queries and pipeline stages on stderr")
 	output := fs.String("output", "", "write the manuscript to this file instead of stdout")
 	fs.StringVar(output, "o", "", "write the manuscript to this file instead of stdout")
-	format := fs.String("format", "", "output format: markdown|latex|json (default: inferred from -o extension, else markdown)")
-	fs.StringVar(format, "f", "", "output format: markdown|latex|json")
+	format := fs.String("format", "", "output format: markdown|latex|html|docx|json (default: inferred from -o extension, else markdown)")
+	fs.StringVar(format, "f", "", "output format: markdown|latex|html|docx|json")
+	intent := fs.String("intent", "", "document type: report|litreview|fullpaper (default: fullpaper)")
+	citationStyle := fs.String("citation-style", "", "bibliography citation style: apa|mla|chicago|vancouver|ieee|harvard|nature (default: apa)")
 	offline := fs.Bool("offline", false, "disable network search providers (grounded scaffold only)")
 	stages := fs.Bool("stages", false, "stream search-loop stage events to stderr")
 	providers := fs.String("provider", "", "comma-separated built-in provider names for retrieval")
@@ -136,33 +148,57 @@ func runDocGen(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
+	// Validate intent + citation style up front so a typo fails fast before the
+	// (expensive) research loop runs. The canonical parsers live in the docgen
+	// and citations packages so every surface accepts the same vocabulary.
+	parsedIntent, err := docgen.ParseIntent(*intent)
+	if err != nil {
+		return err
+	}
+	parsedStyle, err := citations.ParseStyle(*citationStyle)
+	if err != nil {
+		return err
+	}
+
+	// Smart default: a manuscript with no citation floor reads thin. When the
+	// caller passes no --min-citations (and is not replaying a fixed corpus),
+	// apply a sane baseline; the explicit flag always wins.
+	autoMinCitations := false
+	if *minCitations == 0 && strings.TrimSpace(*corpusFile) == "" {
+		*minCitations = smartDocGenMinCitations
+		autoMinCitations = true
+	}
+
 	return runDocGenWithOptions(stdout, stderr, docGenOptions{
-		query:           query,
-		format:          resolvedFormat,
-		jsonOut:         *jsonOut,
-		quiet:           *quiet,
-		verbose:         *verbose,
-		showStages:      *stages || *verbose,
-		offline:         *offline,
-		providers:       splitCSV(*providers),
-		domain:          *domain,
-		pythonURL:       strings.TrimSpace(*pythonURL),
-		outputPath:      strings.TrimSpace(*output),
-		timeout:         *timeout,
-		maxIterations:   *maxIterations,
-		maxSearchTerms:  *maxSearchTerms,
-		hitsPerSearch:   *hitsPerSearch,
-		maxUniquePapers: *maxUniquePapers,
-		disableEnhance:  *noEnhance,
-		logFile:         strings.TrimSpace(*logFile),
-		corpusDump:      strings.TrimSpace(*corpusDump),
-		corpusFile:      strings.TrimSpace(*corpusFile),
-		targetWords:     *words,
-		minCitations:    *minCitations,
-		sectionFlow:     splitCSV(*flow),
-		reviewRounds:    *reviewRounds,
-		genre:           strings.TrimSpace(*genre),
-		allReferences:   *allReferences,
+		query:            query,
+		intent:           string(parsedIntent),
+		citationStyle:    string(parsedStyle),
+		format:           resolvedFormat,
+		jsonOut:          *jsonOut,
+		quiet:            *quiet,
+		verbose:          *verbose,
+		showStages:       *stages || *verbose,
+		offline:          *offline,
+		providers:        splitCSV(*providers),
+		domain:           *domain,
+		pythonURL:        strings.TrimSpace(*pythonURL),
+		outputPath:       strings.TrimSpace(*output),
+		timeout:          *timeout,
+		maxIterations:    *maxIterations,
+		maxSearchTerms:   *maxSearchTerms,
+		hitsPerSearch:    *hitsPerSearch,
+		maxUniquePapers:  *maxUniquePapers,
+		disableEnhance:   *noEnhance,
+		logFile:          strings.TrimSpace(*logFile),
+		corpusDump:       strings.TrimSpace(*corpusDump),
+		corpusFile:       strings.TrimSpace(*corpusFile),
+		targetWords:      *words,
+		minCitations:     *minCitations,
+		sectionFlow:      splitCSV(*flow),
+		reviewRounds:     *reviewRounds,
+		genre:            strings.TrimSpace(*genre),
+		allReferences:    *allReferences,
+		autoMinCitations: autoMinCitations,
 	})
 }
 
@@ -246,6 +282,9 @@ func runDocGenWithOptions(stdout, stderr io.Writer, opts docGenOptions) error {
 		default:
 			note(stderr, "  providers: all built-in")
 		}
+		if opts.autoMinCitations {
+			note(stderr, "  citations: auto floor of %d distinct sources (override with --min-citations)", opts.minCitations)
+		}
 		preflightSidecar(stderr, opts)
 		fmt.Fprintln(stderr)
 	}
@@ -286,55 +325,103 @@ func runDocGenWithOptions(stdout, stderr io.Writer, opts docGenOptions) error {
 		note(stderr, "  no papers retrieved — emitting a grounded scaffold manuscript")
 	}
 
-	// In offline mode, build a pipeline that never contacts the sidecar so the
-	// run does zero network I/O (sections fall back to grounded scaffolds).
-	pipeline := internalwisdev.NewManuscriptPipeline(opts.pythonURL)
-	if opts.offline && opts.pythonURL == "" {
-		pipeline = internalwisdev.NewManuscriptPipelineOffline()
+	// Generation now flows through internal/docgen: it dispatches by intent
+	// (report / litreview / fullpaper), owns the manuscript pipeline for the
+	// full-paper path, and produces the canonical Document envelope that every
+	// surface (CLI / TUI / MCP) renders. Offline mode keeps the pipeline off the
+	// sidecar so the run does zero network I/O (sections fall back to scaffolds).
+	renderFormat, err := docgen.ParseRenderFormat(opts.format)
+	if err != nil {
+		return err
 	}
-	applyManuscriptControls(pipeline, manuscriptControls{
-		targetWords:  opts.targetWords,
-		minCitations: opts.minCitations,
-		sectionFlow:  opts.sectionFlow,
-		reviewRounds: opts.reviewRounds,
-		genre:        opts.genre,
-	})
-	jobID := fmt.Sprintf("docgen_%d", time.Now().UnixMilli())
+	style, err := citations.ParseStyle(opts.citationStyle)
+	if err != nil {
+		return err
+	}
+	intent, err := docgen.ParseIntent(opts.intent)
+	if err != nil {
+		return err
+	}
 
-	var result internalwisdev.ManuscriptPipelineResult
-	err = runWithProgress(stderr, "Generating manuscript", func() error {
-		var runErr error
-		result, runErr = pipeline.Run(ctx, jobID, opts.query, papers)
-		return runErr
+	var genResult docgen.GenerateResult
+	err = runWithProgressUpdates(stderr, "Extracting evidence", func(update func(string)) error {
+		var genErr error
+		genResult, genErr = docgen.Generate(ctx, docgen.Options{
+			Query:          opts.query,
+			Intent:         intent,
+			CitationStyle:  style,
+			Papers:         papers,
+			Research:       research,
+			PythonURL:      opts.pythonURL,
+			Offline:        opts.offline,
+			IncludeUncited: includeUncitedReferences(opts),
+			Manuscript: docgen.ManuscriptControls{
+				TargetWords:  opts.targetWords,
+				MinCitations: opts.minCitations,
+				SectionFlow:  opts.sectionFlow,
+				ReviewRounds: opts.reviewRounds,
+				Genre:        opts.genre,
+			},
+			LLMClient: resolveResearchLLMClient(),
+			OnStage:   docGenProgressNotifier(update),
+			JobID:     fmt.Sprintf("docgen_%d", time.Now().UnixMilli()),
+		})
+		return genErr
 	})
 	if err != nil {
 		return fmt.Errorf("manuscript generation failed: %w", err)
 	}
+	result := genResult.Pipeline
 
-	var rendered string
-	switch opts.format {
-	case "json":
-		encoded, err := json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			return err
+	var (
+		rendered string
+		binary   []byte
+	)
+	switch {
+	case renderFormat == docgen.FormatJSON && intent == docgen.IntentFullPaper:
+		// Backward compat: full-paper JSON emits the raw manuscript pipeline
+		// result (the shape callers scripted against before the docgen port).
+		encoded, encErr := json.MarshalIndent(result, "", "  ")
+		if encErr != nil {
+			return encErr
 		}
 		rendered = string(encoded)
-	case "latex":
-		rendered = renderManuscriptLatex(opts.query, research, result, includeUncitedReferences(opts))
+	case renderFormat == docgen.FormatDOCX:
+		data, _, expErr := docgen.ExportBytes(genResult.Document, docgen.RenderOptions{Format: docgen.FormatDOCX, CitationStyle: style})
+		if expErr != nil {
+			return expErr
+		}
+		binary = data
 	default:
-		rendered = renderManuscriptMarkdown(opts.query, research, result, includeUncitedReferences(opts))
+		text, rErr := docgen.Render(genResult.Document, docgen.RenderOptions{Format: renderFormat, CitationStyle: style})
+		if rErr != nil {
+			return rErr
+		}
+		rendered = text
 	}
 
-	if opts.outputPath != "" {
+	switch {
+	case len(binary) > 0:
+		outPath := opts.outputPath
+		if outPath == "" {
+			outPath = docGenDefaultFilename(opts.query, opts.format, time.Now())
+		}
+		if err := os.WriteFile(outPath, binary, 0o644); err != nil {
+			return fmt.Errorf("failed to write manuscript to %s: %w", outPath, err)
+		}
+		note(stderr, "  manuscript (%s) saved → %s", opts.format, absPathOrSelf(outPath))
+	case opts.outputPath != "":
 		if err := os.WriteFile(opts.outputPath, []byte(rendered), 0o644); err != nil {
 			return fmt.Errorf("failed to write manuscript to %s: %w", opts.outputPath, err)
 		}
-		note(stderr, "  manuscript (%s) written to %s", opts.format, opts.outputPath)
-	} else {
+		note(stderr, "  manuscript (%s) saved → %s", opts.format, absPathOrSelf(opts.outputPath))
+	default:
 		fmt.Fprintln(stdout, rendered)
 	}
 
-	if !opts.quiet && opts.format != "json" {
+	// The pipeline summary only makes sense for the full-paper intent (report and
+	// litreview do not run the manuscript pipeline).
+	if !opts.quiet && opts.format != "json" && intent == docgen.IntentFullPaper {
 		printDocGenSummary(stderr, result)
 	}
 	return nil
@@ -351,43 +438,230 @@ func generateManuscriptFromResearch(
 	stderr io.Writer,
 	query string,
 	research *agent.YOLOResult,
-	format, pythonURL string,
+	intent, format, citationStyle, pythonURL string,
 	offline bool,
 	controls manuscriptControls,
 ) (string, internalwisdev.ManuscriptPipelineResult, error) {
 	papers := docGenPapersFromResult(research)
 
-	pipeline := internalwisdev.NewManuscriptPipeline(pythonURL)
-	if offline && pythonURL == "" {
-		pipeline = internalwisdev.NewManuscriptPipelineOffline()
+	parsedIntent, err := docgen.ParseIntent(intent)
+	if err != nil {
+		return "", internalwisdev.ManuscriptPipelineResult{}, err
 	}
-	applyManuscriptControls(pipeline, controls)
-	jobID := fmt.Sprintf("docgen_%d", time.Now().UnixMilli())
+	renderFormat, err := docgen.ParseRenderFormat(format)
+	if err != nil {
+		return "", internalwisdev.ManuscriptPipelineResult{}, err
+	}
+	style, err := citations.ParseStyle(citationStyle)
+	if err != nil {
+		return "", internalwisdev.ManuscriptPipelineResult{}, err
+	}
 
-	var result internalwisdev.ManuscriptPipelineResult
-	err := runWithProgress(stderr, "Generating manuscript", func() error {
-		var runErr error
-		result, runErr = pipeline.Run(ctx, jobID, query, papers)
-		return runErr
+	var genResult docgen.GenerateResult
+	err = runWithProgressUpdates(stderr, "Extracting evidence", func(update func(string)) error {
+		var genErr error
+		genResult, genErr = docgen.Generate(ctx, docgen.Options{
+			Query:         query,
+			Intent:        parsedIntent,
+			CitationStyle: style,
+			Papers:        papers,
+			Research:      research,
+			PythonURL:     pythonURL,
+			Offline:       offline,
+			Manuscript: docgen.ManuscriptControls{
+				TargetWords:  controls.targetWords,
+				MinCitations: controls.minCitations,
+				SectionFlow:  controls.sectionFlow,
+				ReviewRounds: controls.reviewRounds,
+				Genre:        controls.genre,
+			},
+			LLMClient: resolveResearchLLMClient(),
+			OnStage:   docGenProgressNotifier(update),
+			JobID:     fmt.Sprintf("docgen_%d", time.Now().UnixMilli()),
+		})
+		return genErr
 	})
 	if err != nil {
-		return "", result, err
+		return "", genResult.Pipeline, err
 	}
+	result := genResult.Pipeline
 
-	var rendered string
-	switch format {
-	case "json":
+	// Full-paper JSON keeps emitting the raw pipeline result for backward compat.
+	if renderFormat == docgen.FormatJSON && parsedIntent == docgen.IntentFullPaper {
 		encoded, encErr := json.MarshalIndent(result, "", "  ")
 		if encErr != nil {
 			return "", result, encErr
 		}
-		rendered = string(encoded)
-	case "latex":
-		rendered = renderManuscriptLatex(query, research, result, false)
-	default:
-		rendered = renderManuscriptMarkdown(query, research, result, false)
+		return string(encoded), result, nil
+	}
+	// DOCX is binary; Go strings are byte-preserving so os.WriteFile([]byte(s))
+	// round-trips the bytes exactly (docx always writes to a file, never stdout).
+	if renderFormat == docgen.FormatDOCX {
+		data, _, expErr := docgen.ExportBytes(genResult.Document, docgen.RenderOptions{Format: docgen.FormatDOCX, CitationStyle: style})
+		if expErr != nil {
+			return "", result, expErr
+		}
+		return string(data), result, nil
+	}
+	rendered, err := docgen.Render(genResult.Document, docgen.RenderOptions{Format: renderFormat, CitationStyle: style})
+	if err != nil {
+		return "", result, err
 	}
 	return rendered, result, nil
+}
+
+// wireMCPManuscriptGenerator registers the DocGen-backed generator with the MCP
+// server. Called once from the CLI before the MCP stdio loop starts. This is
+// the injection point that breaks the internal/wisdev ↔ internal/docgen import
+// cycle: wisdev exposes the hook; cli (which can import both) wires it.
+func wireMCPManuscriptGenerator() {
+	internalwisdev.SetMCPManuscriptGenerator(func(ctx context.Context, opts internalwisdev.MCPManuscriptOptions) (string, internalwisdev.ManuscriptPipelineResult, error) {
+		intent, err := docgen.ParseIntent(opts.Intent)
+		if err != nil {
+			return "", internalwisdev.ManuscriptPipelineResult{}, err
+		}
+		renderFormat, err := docgen.ParseRenderFormat(opts.Format)
+		if err != nil {
+			return "", internalwisdev.ManuscriptPipelineResult{}, err
+		}
+		style, err := citations.ParseStyle(opts.CitationStyle)
+		if err != nil {
+			return "", internalwisdev.ManuscriptPipelineResult{}, err
+		}
+
+		genResult, err := docgen.Generate(ctx, docgen.Options{
+			Query:             opts.Query,
+			Intent:            intent,
+			CitationStyle:     style,
+			Papers:            opts.Papers,
+			PythonURL:         opts.PythonURL,
+			VoiceInstructions: opts.Instructions,
+			Manuscript: docgen.ManuscriptControls{
+				TargetWords:  opts.TargetWords,
+				MinCitations: opts.MinCitations,
+				SectionFlow:  opts.SectionFlow,
+				ReviewRounds: opts.ReviewRounds,
+				Genre:        opts.Genre,
+			},
+			LLMClient: resolveResearchLLMClient(),
+			JobID:     fmt.Sprintf("mcp_docgen_%d", time.Now().UnixMilli()),
+		})
+		if err != nil {
+			return "", genResult.Pipeline, err
+		}
+
+		if renderFormat == docgen.FormatJSON && intent == docgen.IntentFullPaper {
+			encoded, encErr := json.MarshalIndent(genResult.Pipeline, "", "  ")
+			if encErr != nil {
+				return "", genResult.Pipeline, encErr
+			}
+			return string(encoded), genResult.Pipeline, nil
+		}
+		rendered, err := docgen.Render(genResult.Document, docgen.RenderOptions{Format: renderFormat, CitationStyle: style})
+		if err != nil {
+			return "", genResult.Pipeline, err
+		}
+		return rendered, genResult.Pipeline, nil
+	})
+}
+
+// ensureDocGenWired registers DocGen integrations (MCP tool + pkg/wisdev
+// embedding API) exactly once per process. Safe to call from any CLI entrypoint.
+func ensureDocGenWired() {
+	docGenWireOnce.Do(func() {
+		wireMCPManuscriptGenerator()
+		wirePublicDocumentGenerator()
+	})
+}
+
+var docGenWireOnce sync.Once
+
+// wirePublicDocumentGenerator registers the pkg/wisdev.GenerateDocument backend.
+func wirePublicDocumentGenerator() {
+	agent.SetDocumentGenerator(func(ctx context.Context, opts agent.DocumentOptions) (agent.DocumentResult, error) {
+		intent, err := docgen.ParseIntent(opts.Intent)
+		if err != nil {
+			return agent.DocumentResult{}, err
+		}
+		renderFormat, err := docgen.ParseRenderFormat(opts.Format)
+		if err != nil {
+			return agent.DocumentResult{}, err
+		}
+		style, err := citations.ParseStyle(opts.CitationStyle)
+		if err != nil {
+			return agent.DocumentResult{}, err
+		}
+
+		papers := docGenPapersFromResult(opts.Research)
+		if len(papers) == 0 && len(opts.Papers) > 0 {
+			for _, p := range opts.Papers {
+				if strings.TrimSpace(p.Title) == "" {
+					continue
+				}
+				papers = append(papers, search.Paper{
+					ID: p.ID, Title: p.Title, Authors: p.Authors, Year: p.Year,
+					Abstract: p.Abstract, Link: p.Link, DOI: p.DOI, Venue: p.Venue,
+					CitationCount: p.CitationCount, OpenAccessUrl: p.OpenAccessURL,
+				})
+			}
+		}
+
+		genResult, err := docgen.Generate(ctx, docgen.Options{
+			Query:             opts.Query,
+			Intent:            intent,
+			CitationStyle:     style,
+			Papers:            papers,
+			Research:          opts.Research,
+			PythonURL:         opts.PythonURL,
+			Offline:           opts.Offline,
+			IncludeUncited:    opts.IncludeUncited,
+			VoiceInstructions: opts.VoiceInstructions,
+			ReviewStyle:       opts.ReviewStyle,
+			Manuscript: docgen.ManuscriptControls{
+				TargetWords:  opts.TargetWords,
+				MinCitations: opts.MinCitations,
+				SectionFlow:  opts.SectionFlow,
+				ReviewRounds: opts.ReviewRounds,
+				Genre:        opts.Genre,
+			},
+			LLMClient: resolveResearchLLMClient(),
+			JobID:     fmt.Sprintf("docgen_%d", time.Now().UnixMilli()),
+		})
+		if err != nil {
+			return agent.DocumentResult{}, err
+		}
+
+		out := agent.DocumentResult{}
+		if docJSON, encErr := json.Marshal(genResult.Document); encErr != nil {
+			return agent.DocumentResult{}, encErr
+		} else {
+			out.Document = docJSON
+		}
+
+		if renderFormat == docgen.FormatJSON && intent == docgen.IntentFullPaper {
+			encoded, encErr := json.Marshal(genResult.Pipeline)
+			if encErr != nil {
+				return agent.DocumentResult{}, encErr
+			}
+			out.Pipeline = encoded
+			out.Rendered = string(encoded)
+			return out, nil
+		}
+		if renderFormat == docgen.FormatDOCX {
+			data, _, expErr := docgen.ExportBytes(genResult.Document, docgen.RenderOptions{Format: docgen.FormatDOCX, CitationStyle: style})
+			if expErr != nil {
+				return agent.DocumentResult{}, expErr
+			}
+			out.Rendered = string(data)
+			return out, nil
+		}
+		rendered, err := docgen.Render(genResult.Document, docgen.RenderOptions{Format: renderFormat, CitationStyle: style})
+		if err != nil {
+			return agent.DocumentResult{}, err
+		}
+		out.Rendered = rendered
+		return out, nil
+	})
 }
 
 // includeUncitedReferences reports whether the bibliography should list every
@@ -439,12 +713,16 @@ func resolveDocGenFormat(format, output string, jsonOut bool) (string, error) {
 		return "markdown", nil
 	case "latex", "tex":
 		return "latex", nil
+	case "html":
+		return "html", nil
+	case "docx":
+		return "docx", nil
 	case "json":
 		return "json", nil
 	case "":
 		// fall through to inference
 	default:
-		return "", fmt.Errorf("unknown --format %q (want markdown, latex, or json)", format)
+		return "", fmt.Errorf("unknown --format %q (want markdown, latex, html, docx, or json)", format)
 	}
 	if jsonOut {
 		return "json", nil
@@ -452,6 +730,10 @@ func resolveDocGenFormat(format, output string, jsonOut bool) (string, error) {
 	switch {
 	case hasSuffixFold(output, ".tex"), hasSuffixFold(output, ".latex"):
 		return "latex", nil
+	case hasSuffixFold(output, ".html"), hasSuffixFold(output, ".htm"):
+		return "html", nil
+	case hasSuffixFold(output, ".docx"):
+		return "docx", nil
 	case hasSuffixFold(output, ".json"):
 		return "json", nil
 	default:
@@ -461,6 +743,105 @@ func resolveDocGenFormat(format, output string, jsonOut bool) (string, error) {
 
 func hasSuffixFold(s, suffix string) bool {
 	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(s)), suffix)
+}
+
+// absPathOrSelf resolves a path for display, falling back to the input when the
+// working directory cannot be resolved.
+func absPathOrSelf(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
+}
+
+// smartDocGenMinCitations is the citation floor applied when the caller passes no
+// --min-citations / --doc-min-citations. A grounded manuscript that cites only two
+// or three sources reads thin; ten distinct sources is a sane review baseline that
+// the retrieval loop can comfortably satisfy (maxUniquePapers default is 20–30).
+// Explicit flags always win; corpus replays are exempt (the corpus IS the budget).
+const smartDocGenMinCitations = 10
+
+// docGenDefaultFilename derives a save path for a manuscript when the user did
+// not pass an output flag: a slug of the first few query words plus a timestamp,
+// with the extension matching the format (manuscript-llm-hallucinations-20260702-1504.md).
+func docGenDefaultFilename(query, format string, now time.Time) string {
+	words := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	})
+	if len(words) > 6 {
+		words = words[:6]
+	}
+	slug := strings.Join(words, "-")
+	if slug == "" {
+		slug = "untitled"
+	}
+	ext := ".md"
+	switch format {
+	case "latex":
+		ext = ".tex"
+	case "html":
+		ext = ".html"
+	case "docx":
+		ext = ".docx"
+	case "json":
+		ext = ".json"
+	}
+	return fmt.Sprintf("manuscript-%s-%s%s", slug, now.Format("20060102-1504"), ext)
+}
+
+// docGenStageLabel maps a completed manuscript-pipeline stage to the label for
+// the activity that runs NEXT, so the progress spinner always names what the
+// pipeline is currently doing rather than what it just finished.
+func docGenStageLabel(stage string) string {
+	switch stage {
+	case "build_raw_materials":
+		return "Planning sections"
+	case "plan_sections":
+		return "Coordinating section ownership"
+	case "coordination_plan":
+		return "Composing visuals"
+	case "compose_visuals":
+		return "Drafting sections"
+	case "write_sections":
+		return "Verifying grounding"
+	case "verify_blind.post_write":
+		return "Refining sections"
+	case "refine_sections", "verify_blind.post_refine":
+		return "Rewriting abstract"
+	case "regenerate_abstract", "dedupe_paragraphs", "verify_blind.post_dedupe":
+		return "Fact-checking claims"
+	case "fact_check.feed":
+		return "Review round 1: revising flagged sections"
+	case "review_revise.done", "coordinated_dedupe", "strip_self_methodology", "dedupe_sentences":
+		return "Final cleanup"
+	case "attach_uncited_specifics":
+		return "Final fact-check"
+	case "fact_check.score", "verify_blind.final":
+		return "Compiling peer review"
+	case "peer_review":
+		return "Adversarial review"
+	case "adversarial_review", "build_revision_tasks":
+		return "Rendering manuscript"
+	default:
+		return ""
+	}
+}
+
+// docGenProgressNotifier returns an OnStage callback for a manuscript pipeline
+// that feeds friendly labels to a spinner update function, numbering the agentic
+// review→revise rounds as they complete.
+func docGenProgressNotifier(update func(string)) func(string) {
+	round := 0
+	return func(stage string) {
+		if stage == "review_revise.round" {
+			round++
+			update(fmt.Sprintf("Review round %d done — re-reviewing", round))
+			return
+		}
+		if label := docGenStageLabel(stage); label != "" {
+			update(label)
+		}
+	}
 }
 
 // docGenRetrievePapers runs the local research loop and returns the retrieved

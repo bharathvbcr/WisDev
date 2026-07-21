@@ -11,64 +11,64 @@ import (
 )
 
 const (
-	ansiReset = "\033[0m"
-	ansiBold  = "\033[1m"
-	ansiDim   = "\033[2m"
-	ansiGreen = "\033[32m"
+	ansiReset  = "\033[0m"
+	ansiBold   = "\033[1m"
+	ansiDim    = "\033[2m"
+	ansiGreen  = "\033[32m"
 	ansiYellow = "\033[33m"
-	ansiRed   = "\033[31m"
+	ansiRed    = "\033[31m"
 
-	scholarLMProductURL  = "https://scholarlm-vbcr.web.app"
+	scholarLMProductURL  = "https://scholarlm-vbc.web.app"
 	scholarLMProductName = "ScholarLM"
 
 	// ScholarLM brand palette (tailwind primary #ea2a33, PWA #F52B3F).
-	scholarlmRed       = "\033[38;2;234;42;51m"
-	scholarlmRedBold   = "\033[1;38;2;234;42;51m"
-	scholarlmText      = "\033[38;2;243;231;232m"
-	scholarlmTextBold  = "\033[1;38;2;243;231;232m"
-	scholarlmDim       = "\033[2;38;2;160;160;160m"
-	scholarlmCrimson   = "\033[38;2;127;29;29m"
+	scholarlmRed         = "\033[38;2;234;42;51m"
+	scholarlmRedBold     = "\033[1;38;2;234;42;51m"
+	scholarlmText        = "\033[38;2;243;231;232m"
+	scholarlmTextBold    = "\033[1;38;2;243;231;232m"
+	scholarlmDim         = "\033[2;38;2;160;160;160m"
+	scholarlmCrimson     = "\033[38;2;127;29;29m"
 	scholarlmCrimsonBold = "\033[1;38;2;127;29;29m"
-	scholarlmWarn      = "\033[38;2;245;158;11m"
-	scholarlmWarnBold  = "\033[1;38;2;245;158;11m"
-	scholarlmHighlight = "\033[1;38;2;255;107;107m"
-	scholarlmBtnFill   = "\033[48;2;234;42;51m\033[38;2;243;231;232m\033[1m"
-	scholarlmBtnExit   = "\033[48;2;127;29;29m\033[38;2;243;231;232m\033[1m"
+	scholarlmWarn        = "\033[38;2;245;158;11m"
+	scholarlmWarnBold    = "\033[1;38;2;245;158;11m"
+	scholarlmHighlight   = "\033[1;38;2;255;107;107m"
+	scholarlmBtnFill     = "\033[48;2;234;42;51m\033[38;2;243;231;232m\033[1m"
+	scholarlmBtnExit     = "\033[48;2;127;29;29m\033[38;2;243;231;232m\033[1m"
 )
 
 // Back-compat alias used by non-TUI CLI output.
 var ansiScholarlm = scholarlmRedBold
 
 type tuiTheme struct {
-	Border          string
-	BorderLabel     string
-	InputActive     string
-	InputIdle       string
-	StatusInfo      string
-	StatusWarn      string
-	StatusError     string
-	ProviderOn      string
-	ProviderOff     string
-	ProviderFocus   string
-	TabActive       string
-	TabInactive     string
-	LogDebug        string
-	LogInfo         string
-	LogWarn         string
-	LogError        string
-	BtnPrimary      string
-	BtnDanger       string
-	ProgressFilled  string
-	ProgressEmpty   string
-	DimText         string
-	HintText        string
-	Accent          string
-	Scrollbar       string
-	Highlight       string
-	HealthOK        string
-	HealthWarn      string
-	HealthBad       string
-	HealthUnknown   string
+	Border         string
+	BorderLabel    string
+	InputActive    string
+	InputIdle      string
+	StatusInfo     string
+	StatusWarn     string
+	StatusError    string
+	ProviderOn     string
+	ProviderOff    string
+	ProviderFocus  string
+	TabActive      string
+	TabInactive    string
+	LogDebug       string
+	LogInfo        string
+	LogWarn        string
+	LogError       string
+	BtnPrimary     string
+	BtnDanger      string
+	ProgressFilled string
+	ProgressEmpty  string
+	DimText        string
+	HintText       string
+	Accent         string
+	Scrollbar      string
+	Highlight      string
+	HealthOK       string
+	HealthWarn     string
+	HealthBad      string
+	HealthUnknown  string
 }
 
 // scholarlmTheme matches ScholarLM web UI: crimson borders, warm text, red accents.
@@ -378,8 +378,34 @@ func withQuietAgentLogs(fn func() error) error {
 }
 
 func runWithProgress(stderr io.Writer, label string, fn func() error) error {
+	return runWithProgressUpdates(stderr, label, func(func(string)) error { return fn() })
+}
+
+// runWithProgressUpdates runs fn under the same spinner as runWithProgress, but
+// hands fn an update callback that swaps the spinner label live — used to surface
+// pipeline stage progress ("Drafting sections…", "Review round 2…") during long
+// runs so they never look stalled. The update callback is safe to call from any
+// goroutine and is a no-op in plain-UI mode.
+func runWithProgressUpdates(stderr io.Writer, label string, fn func(update func(string)) error) error {
 	if plainUI() || stderr == nil {
-		return fn()
+		return fn(func(string) {})
+	}
+	var (
+		mu      sync.Mutex
+		current = label
+		widest  = len(label)
+	)
+	update := func(next string) {
+		next = strings.TrimSpace(next)
+		if next == "" {
+			return
+		}
+		mu.Lock()
+		current = next
+		if len(next) > widest {
+			widest = len(next)
+		}
+		mu.Unlock()
 	}
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -393,15 +419,25 @@ func runWithProgress(stderr io.Writer, label string, fn func() error) error {
 		for {
 			select {
 			case <-stop:
-				fmt.Fprintf(stderr, "\r%s\r", strings.Repeat(" ", len(label)+4))
+				mu.Lock()
+				pad := widest
+				mu.Unlock()
+				fmt.Fprintf(stderr, "\r%s\r", strings.Repeat(" ", pad+4))
 				return
 			case <-ticker.C:
-				fmt.Fprintf(stderr, "\r%s %s", frames[i%len(frames)], label)
+				mu.Lock()
+				text := current
+				pad := widest - len(text)
+				mu.Unlock()
+				if pad < 0 {
+					pad = 0
+				}
+				fmt.Fprintf(stderr, "\r%s %s%s", frames[i%len(frames)], text, strings.Repeat(" ", pad))
 				i++
 			}
 		}
 	}()
-	err := fn()
+	err := fn(update)
 	close(stop)
 	wg.Wait()
 	return err
@@ -415,5 +451,3 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
-
-

@@ -68,7 +68,7 @@ func BuildRawMaterialSet(jobID string, query string, papers []search.Paper) (Man
 			continue
 		}
 
-		record := buildCanonicalRecord(paper)
+		record := BuildCanonicalRecord(paper)
 		canonical = append(canonical, record)
 
 		clusterID := fmt.Sprintf("cluster_%d_%d", now, idx+1)
@@ -84,6 +84,7 @@ func BuildRawMaterialSet(jobID string, query string, papers []search.Paper) (Man
 		}
 
 		clusterPacketIDs := make([]string, 0, len(claims))
+		visualPacketIDs := map[string][]string{}
 		for _, claim := range claims {
 			packetCounter++
 			packetID := fmt.Sprintf("evp_%d_%d", now, packetCounter)
@@ -126,13 +127,18 @@ func BuildRawMaterialSet(jobID string, query string, papers []search.Paper) (Man
 			}
 			if claim.visualID != "" {
 				packet.VisualEvidenceIDs = []string{claim.visualID}
+				visualPacketIDs[claim.visualID] = append(visualPacketIDs[claim.visualID], packetID)
 			}
 			claimPackets = append(claimPackets, packet)
 			clusterPacketIDs = append(clusterPacketIDs, packetID)
 		}
 
 		for _, visual := range visuals {
-			visual.SourcePacketIDs = append([]string{}, clusterPacketIDs...)
+			matched := visualPacketIDs[visual.VisualID]
+			if len(matched) == 0 {
+				matched = clusterPacketIDs
+			}
+			visual.SourcePacketIDs = append([]string{}, matched...)
 			visualEvidence = append(visualEvidence, visual)
 		}
 
@@ -243,7 +249,7 @@ func BuildRawMaterialSet(jobID string, query string, papers []search.Paper) (Man
 	return rawMaterialSet, dossier, nil
 }
 
-func buildCanonicalRecord(paper search.Paper) CanonicalCitationRecord {
+func BuildCanonicalRecord(paper search.Paper) CanonicalCitationRecord {
 	sourceIDs := CanonicalIDs{
 		DOI:      sanitizeString(paper.DOI, 256),
 		Arxiv:    sanitizeString(paper.ArxivID, 256),
@@ -281,6 +287,7 @@ func buildCanonicalRecord(paper search.Paper) CanonicalCitationRecord {
 		Year:                 validateYear(paper.Year),
 		Abstract:             sanitizeString(paper.Abstract, 4096),
 		LandingURL:           sanitizeURL(paper.Link),
+		CitationCount:        paper.CitationCount,
 		Resolved:             canonicalID != "",
 		ResolutionEngine:     "go-raw-material-assembler",
 		ResolutionConfidence: confidenceFromRecord(sourceIDs, title),
@@ -350,6 +357,11 @@ func extractClaimsFromPaper(paper search.Paper, record CanonicalCitationRecord) 
 		case strings.Contains(itemType, "table"):
 			visualCounter++
 			visualID := fmt.Sprintf("visual_%s_table_%d", hashID(record.CanonicalID), visualCounter)
+			headers := stringSliceValue(item["headers"])
+			rows := stringMatrixValue(item["rows"])
+			if len(rows) == 0 {
+				rows = stringMatrixValue(item["cells"])
+			}
 			visuals = append(visuals, VisualEvidence{
 				VisualID:          visualID,
 				SourceCanonicalID: record.CanonicalID,
@@ -357,6 +369,8 @@ func extractClaimsFromPaper(paper search.Paper, record CanonicalCitationRecord) 
 				Title:             firstNonEmpty(title, "Table Summary"),
 				Caption:           text,
 				Locator:           locator,
+				Headers:           headers,
+				Rows:              rows,
 			})
 			addClaim(text, title, "result", firstNonEmpty(section, "results"), locator, "table", visualID)
 		case strings.Contains(itemType, "figure"), strings.Contains(itemType, "diagram"), strings.Contains(itemType, "plot"):
@@ -980,4 +994,50 @@ func stringValue(value any) string {
 		return strings.TrimSpace(text)
 	}
 	return strings.TrimSpace(fmt.Sprintf("%v", value))
+}
+
+func stringSliceValue(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := sanitizeString(item, 512); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := sanitizeString(stringValue(item), 512); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func stringMatrixValue(value any) [][]string {
+	switch typed := value.(type) {
+	case [][]string:
+		out := make([][]string, 0, len(typed))
+		for _, row := range typed {
+			if parsed := stringSliceValue(row); len(parsed) > 0 {
+				out = append(out, parsed)
+			}
+		}
+		return out
+	case []any:
+		out := make([][]string, 0, len(typed))
+		for _, row := range typed {
+			if parsed := stringSliceValue(row); len(parsed) > 0 {
+				out = append(out, parsed)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }

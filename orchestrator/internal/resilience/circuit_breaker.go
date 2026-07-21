@@ -104,6 +104,11 @@ func (cb *CircuitBreaker) maybeTransitionHalfOpenLocked() {
 	)
 }
 
+// Allow is an alias for Admit used by Scholar-ported search call sites.
+func (cb *CircuitBreaker) Allow() bool {
+	return cb.Admit()
+}
+
 // Admit reports whether a request may proceed. It also transitions open breakers
 // to half-open once the reset timeout elapses so recovery is not blocked by
 // callers that only inspect State().
@@ -401,11 +406,15 @@ func NewCircuitBreakerWithFallback(breaker *CircuitBreaker, fallback FallbackStr
 // Call attempts the primary call, falling back on circuit breaker failure.
 func (cbf *CircuitBreakerWithFallback) Call(ctx context.Context, fn func(context.Context) error) error {
 	err := cbf.breaker.Call(ctx, fn)
+	if err == nil {
+		// A successful result is always returned as-is: a concurrent failure
+		// may have tripped the breaker while this call was in flight, and
+		// consulting the fallback here would silently discard the success.
+		return nil
+	}
 
-	// If circuit is open, try fallback
-	if cbf.breaker.State() == StateOpen && cbf.fallback != nil {
-		// Log that fallback is being used
-		// logger.Logger.Debugf("Circuit breaker %s is open, using fallback: %s", cbf.breaker.name, cbf.fallback.Name())
+	// Primary failed; use the fallback when the circuit is open.
+	if cbf.fallback != nil && cbf.breaker.State() == StateOpen {
 		return cbf.fallback.Fallback(ctx)
 	}
 

@@ -172,63 +172,6 @@ func TestImageHandler_HandleGenerate_Errors(t *testing.T) {
 	})
 }
 
-func TestDraftingHelpers(t *testing.T) {
-	t.Run("buildDraftingPrompt", func(t *testing.T) {
-		req := ManuscriptDraftHTTPRequest{
-			Title:            "Test",
-			ContextDocuments: []string{"Doc 1", "Doc 2"},
-			Findings:         []string{"F1", "F2"},
-		}
-		prompt := buildDraftingPrompt(req)
-		assert.Contains(t, prompt, "MANUSCRIPT TITLE: Test")
-		assert.Contains(t, prompt, "SUPPORTING SOURCES:")
-		assert.Contains(t, prompt, "KEY FINDINGS TO INCORPORATE:")
-	})
-
-	t.Run("estimateGrounding", func(t *testing.T) {
-		rebuttal := "The transformation of data is crucial for results."
-		paper := "The transformation of data showed significant results."
-		score := estimateGrounding(rebuttal, paper)
-		assert.Greater(t, score, 0.5)
-
-		assert.Equal(t, 0.5, estimateGrounding("", ""))
-	})
-
-	t.Run("resolveDraftingTraceID", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/draft?traceId=query-trace", nil)
-		assert.Equal(t, "header-trace", resolveDraftingTraceID(req, "  ", "header-trace", "fallback"))
-		assert.Equal(t, "query-trace", resolveDraftingTraceID(req))
-	})
-
-	t.Run("draftingTracePayload", func(t *testing.T) {
-		payload := map[string]any{"a": 1}
-		cloned := draftingTracePayload("trace-1", payload)
-		assert.Equal(t, "trace-1", cloned["traceId"])
-		assert.Equal(t, "trace-1", cloned["trace_id"])
-		assert.Equal(t, 1, cloned["a"])
-		assert.NotContains(t, payload, "traceId")
-	})
-
-	t.Run("addDraftingTraceFields", func(t *testing.T) {
-		var nilMap map[string]any
-		addDraftingTraceFields(nilMap, "trace-2")
-		payload := map[string]any{}
-		addDraftingTraceFields(payload, "trace-2")
-		assert.Equal(t, "trace-2", payload["traceId"])
-		assert.Equal(t, "trace-2", payload["trace_id"])
-	})
-
-	t.Run("buildRebuttalPrompt", func(t *testing.T) {
-		prompt := buildRebuttalPrompt(ReviewerRebuttalHTTPRequest{
-			PaperText:        "Paper text for rebuttal",
-			ReviewerComments: []string{" comment 1 ", "comment 2"},
-		})
-		assert.Contains(t, prompt, "Paper text for rebuttal")
-		assert.Contains(t, prompt, "Reviewer 1")
-		assert.Contains(t, prompt, "comment 1")
-		assert.Contains(t, prompt, "Reviewer 2")
-	})
-}
 
 func TestInternalOpsHelpers(t *testing.T) {
 	t.Run("statusLabel", func(t *testing.T) {

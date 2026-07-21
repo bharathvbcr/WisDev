@@ -20,11 +20,10 @@ func runGuide(stdout io.Writer) error {
 	note(stdout, `  wisdev yolo [flags] "question"   The research loop with full flag control`)
 	note(stdout, `  wisdev max "question"            Everything dialed up: 12 iterations, all sources, long-form report`)
 	note(stdout, `  wisdev docgen [-o paper.md] "q" Search + DocuGen: a grounded manuscript draft (alias: docugen)`)
-	note(stdout, `  wisdev demo [--offline]          Narrated demo run`)
 	fmt.Fprintln(stdout)
 
 	printSection(stdout, "Interactive")
-	note(stdout, `  wisdev tui [--demo]              Full-screen terminal UI: providers, settings, live logs (alias: ui)`)
+	note(stdout, `  wisdev tui                       Full-screen terminal UI: providers, settings, live logs (alias: ui)`)
 	fmt.Fprintln(stdout)
 
 	printSection(stdout, "Integrations")

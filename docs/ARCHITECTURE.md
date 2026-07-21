@@ -29,7 +29,7 @@ flowchart TB
     %% ---------- Tools / models ----------
     subgraph TOOLS["Tools & models"]
         FT["ADK function tools"]
-        MCPS["MCP server (JSON-RPC / stdio)<br/>wisdevSearchPapers · wisdevEvidenceSearch<br/>wisdevPaperLookup · wisdevAuthorSearch"]
+        MCPS["MCP server (JSON-RPC / stdio)<br/>wisdevSearchPapers · wisdevEvidenceSearch<br/>wisdevPaperLookup · wisdevAuthorSearch<br/>wisdevGenerateManuscript (DocGen)"]
         GEM["Gemini via Vertex AI<br/><i>light · standard · heavy tiers</i>"]
         RAG["Hybrid RAG + CAG pipeline"]
     end
@@ -88,11 +88,38 @@ flowchart TB
 - **ADK is the spine.** The ADK `Runner` orchestrates the autonomous YOLO loop
   (Plan → Search → Analyze → Critique → Synthesize) with human-in-the-loop tool
   confirmation, retry/reflect self-correction, and A2A remote delegation.
-- **MCP is the tool & distribution layer.** The four academic-search tools that
-  power the product are exposed over MCP, so the agent works in Cursor/Claude/CI,
-  not just our UI.
+- **MCP is the tool & distribution layer.** Academic-search tools and headless
+  ScholarDoc document generation (`wisdevGenerateManuscript`) are exposed over MCP,
+  so the agent works in Cursor/Claude/CI, not just our UI.
 - **Gemini via Vertex AI** does planning, critique, and long-form synthesis
   across light/standard/heavy tiers.
 - **Hosted vs. local.** The cloud path adds a Go orchestrator + Python sidecar on
   Cloud Run, Firebase Hosting, and Firestore; the local path is a single Go binary
   with no login required.
+
+## Headless document generation (DocGen)
+
+ScholarDoc-equivalent documents are generated headless through a shared Go layer:
+
+```text
+CLI / TUI / MCP / pkg/wisdev.GenerateDocument
+        │
+        ▼
+internal/docgen.Generate(intent, options)
+        │
+        ├── report     → Quick Report synthesis
+        ├── litreview  → Literature-review synthesis + grounded citations
+        └── fullpaper  → ManuscriptPipeline (plan → draft → review → fact-check)
+        │
+        ▼
+internal/docgen.Render(format, citationStyle)
+        │
+        ▼
+internal/citations (APA, MLA, Chicago, Vancouver, IEEE, Harvard, Nature)
+```
+
+Three **intents** (`report`, `litreview`, `fullpaper`) share one canonical `Document`
+envelope. Seven **citation styles** format bibliographies consistently across
+markdown, LaTeX, HTML, JSON, and DOCX (CLI) export. The Python sidecar enriches
+`fullpaper` section prose when reachable; all intents degrade to grounded scaffolds
+offline.

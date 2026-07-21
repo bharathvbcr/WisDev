@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
+	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/resilience"
 	"strings"
 	"time"
 )
@@ -22,6 +22,10 @@ var newRequestWithContext = http.NewRequestWithContext
 
 const semanticScholarPaperFields = "title,abstract,url,externalIds,authors,year,citationCount,influentialCitationCount,referenceCount,venue,openAccessPdf"
 const semanticScholarCitationFields = "citingPaper.title,citingPaper.abstract,citingPaper.url,citingPaper.externalIds,citingPaper.authors,citingPaper.year,citingPaper.citationCount,citingPaper.influentialCitationCount,citingPaper.referenceCount,citingPaper.venue,citingPaper.openAccessPdf"
+const semanticScholarReferenceFields = "citedPaper.title,citedPaper.abstract,citedPaper.url,citedPaper.externalIds,citedPaper.authors,citedPaper.year,citedPaper.citationCount,citedPaper.influentialCitationCount,citedPaper.referenceCount,citedPaper.venue,citedPaper.openAccessPdf"
+
+// Ensure Semantic Scholar satisfies the citation-graph contract (forward + backward).
+var _ CitationGraphProvider = (*SemanticScholarProvider)(nil)
 
 func NewSemanticScholarProvider() *SemanticScholarProvider {
 	return &SemanticScholarProvider{
@@ -37,6 +41,14 @@ func (s *SemanticScholarProvider) Tools() []string {
 
 func (s *SemanticScholarProvider) Domains() []string {
 	return []string{"medicine", "cs", "ai", "social", "physics", "engineering", "humanities", "biology", "neuro"}
+}
+
+func semanticScholarAPIKey(ctx context.Context) string {
+	apiKey, err := resilience.GetSecret(ctx, "SEMANTIC_SCHOLAR_API_KEY")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(apiKey)
 }
 
 // ... (existing S2Paper, S2Response, and Search method)
@@ -60,7 +72,7 @@ func (s *SemanticScholarProvider) SearchByPaperID(ctx context.Context, paperID s
 		return nil, err
 	}
 
-	apiKey := os.Getenv("SEMANTIC_SCHOLAR_API_KEY")
+	apiKey := semanticScholarAPIKey(ctx)
 	if apiKey != "" {
 		req.Header.Set("x-api-key", apiKey)
 	}
@@ -103,7 +115,7 @@ func (s *SemanticScholarProvider) GetCitations(ctx context.Context, paperID stri
 		return nil, err
 	}
 
-	apiKey := os.Getenv("SEMANTIC_SCHOLAR_API_KEY")
+	apiKey := semanticScholarAPIKey(ctx)
 	if apiKey != "" {
 		req.Header.Set("x-api-key", apiKey)
 	}
@@ -140,13 +152,66 @@ func (s *SemanticScholarProvider) GetCitations(ctx context.Context, paperID stri
 	return papers, nil
 }
 
+func (s *SemanticScholarProvider) GetReferences(ctx context.Context, paperID string, limit int) ([]Paper, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	id := strings.TrimPrefix(paperID, "s2:")
+	// Papers that this paper cites (citedPaper fields)
+	reqUrl := fmt.Sprintf("https://api.semanticscholar.org/graph/v1/paper/%s/references?limit=%d&fields=%s", url.PathEscape(id), limit, semanticScholarReferenceFields)
+
+	req, err := newRequestWithContext(ctx, http.MethodGet, reqUrl, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	apiKey := semanticScholarAPIKey(ctx)
+	if apiKey != "" {
+		req.Header.Set("x-api-key", apiKey)
+	}
+
+	resp, err := SharedHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		if providerHTTPErrorKind(resp) == "rate_limit" {
+			return nil, fmt.Errorf("S2 references failed: rate limit exceeded (%d)", resp.StatusCode)
+		}
+		if providerHTTPErrorKind(resp) == "upstream_5xx" {
+			return nil, fmt.Errorf("S2 references failed: upstream error (%d)", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("S2 references failed: %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Data []struct {
+			CitedPaper S2Paper `json:"citedPaper"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("S2 references failed to parse response: %w", err)
+	}
+
+	var papers []Paper
+	for _, entry := range result.Data {
+		if strings.TrimSpace(entry.CitedPaper.Title) == "" && strings.TrimSpace(entry.CitedPaper.PaperID) == "" {
+			continue
+		}
+		papers = append(papers, mapSemanticScholarPaper(entry.CitedPaper))
+	}
+	return papers, nil
+}
+
 func (s *SemanticScholarProvider) fetchS2Papers(ctx context.Context, reqUrl string) ([]Paper, error) {
 	req, err := newRequestWithContext(ctx, http.MethodGet, reqUrl, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	apiKey := os.Getenv("SEMANTIC_SCHOLAR_API_KEY")
+	apiKey := semanticScholarAPIKey(ctx)
 	if apiKey != "" {
 		req.Header.Set("x-api-key", apiKey)
 	}
@@ -213,7 +278,18 @@ func (s *SemanticScholarProvider) Search(ctx context.Context, query string, opts
 		limit = 10
 	}
 
-	reqUrl := fmt.Sprintf("%s?query=%s&limit=%d&fields=%s", s.baseURL, url.QueryEscape(query), limit, semanticScholarPaperFields)
+	providerQuery := buildSemanticScholarSearchQuery(query)
+	if providerQuery == "" {
+		providerQuery = strings.TrimSpace(query)
+	}
+	if providerQuery != strings.TrimSpace(query) {
+		logProviderSearchStage(ctx, "provider_query_normalized", s.Name(), query, opts,
+			"result", "normalized",
+			"provider_query_preview", queryPreview(providerQuery),
+		)
+	}
+
+	reqUrl := fmt.Sprintf("%s?query=%s&limit=%d&fields=%s", s.baseURL, url.QueryEscape(providerQuery), limit, semanticScholarPaperFields)
 
 	if opts.YearFrom > 0 {
 		if opts.YearTo > 0 {
@@ -229,7 +305,7 @@ func (s *SemanticScholarProvider) Search(ctx context.Context, query string, opts
 		return nil, providerError("semantic_scholar", "build request: %v", err)
 	}
 
-	apiKey := os.Getenv("SEMANTIC_SCHOLAR_API_KEY")
+	apiKey := semanticScholarAPIKey(ctx)
 	if apiKey != "" {
 		req.Header.Set("x-api-key", apiKey)
 	}
@@ -254,11 +330,267 @@ func (s *SemanticScholarProvider) Search(ctx context.Context, query string, opts
 
 	var papers []Paper
 	for _, p := range s2Res.Data {
+		if !isRelevantSemanticScholarPaper(query, p) {
+			continue
+		}
 		papers = append(papers, mapSemanticScholarPaper(p))
 	}
+	logSemanticScholarFilterApplied(ctx, query, opts, len(s2Res.Data), len(papers))
 
 	s.RecordSuccess()
 	return papers, nil
+}
+
+func buildSemanticScholarSearchQuery(query string) string {
+	terms := significantSemanticScholarQueryTerms(query)
+	if len(terms) < 2 {
+		return strings.TrimSpace(query)
+	}
+	return strings.Join(terms, " ")
+}
+
+func isRelevantSemanticScholarPaper(query string, paper S2Paper) bool {
+	return isRelevantProviderSearchText(query, paper.Title, paper.Abstract, paper.Venue)
+}
+
+func isRelevantProviderSearchText(query string, title string, abstract string, venue string) bool {
+	if strings.TrimSpace(title) == "" {
+		return false
+	}
+
+	terms := significantSemanticScholarQueryTerms(query)
+	if len(terms) < 2 {
+		return true
+	}
+
+	titleTokens := crossrefTextTokens(title + " " + venue)
+	textTokens := crossrefTextTokens(title + " " + abstract + " " + venue)
+	if len(textTokens) == 0 {
+		return false
+	}
+	if !providerPassesFocusedTunnelingChipEvidence(terms, titleTokens, textTokens) {
+		return false
+	}
+
+	matches := 0
+	anchorTerms := 0
+	anchorMatched := false
+	seen := make(map[string]struct{}, len(terms))
+	for _, term := range terms {
+		if _, exists := seen[term]; exists {
+			continue
+		}
+		seen[term] = struct{}{}
+		isAnchorTerm := anchorTerms < 2
+		anchorTerms++
+		if matched := crossrefTermMatches(term, textTokens); matched {
+			matches++
+			if isAnchorTerm {
+				anchorMatched = true
+			}
+		}
+	}
+
+	if len(seen) >= 3 && !anchorMatched {
+		return false
+	}
+	required := 2
+	if len(seen) >= 5 {
+		required = 3
+	}
+	return matches >= required
+}
+
+var semanticScholarTunnelContextTerms = map[string]struct{}{
+	"barrier": {}, "current": {}, "diode": {}, "effect": {}, "field": {}, "gate": {},
+	"junction": {}, "leakage": {}, "oxide": {}, "transistor": {},
+}
+
+var semanticScholarNanoscaleChipTerms = map[string]struct{}{
+	"1nm": {}, "2nm": {}, "3nm": {}, "4nm": {}, "5nm": {}, "chip": {}, "cmos": {},
+	"finfet": {}, "gate": {}, "nanogap": {}, "nanometer": {}, "nanopore": {},
+	"nanoscale": {}, "nm": {}, "oxide": {}, "semiconductor": {}, "soi": {},
+	"transistor": {},
+}
+
+var semanticScholarSemiconductorChipTerms = map[string]struct{}{
+	"channel": {}, "cmos": {}, "dielectric": {}, "fd": {}, "fet": {}, "finfet": {},
+	"gaa": {}, "gate": {}, "hardware": {}, "leakage": {}, "mos": {}, "mosfet": {},
+	"nanoelectronic": {}, "nmos": {}, "oxide": {}, "pmos": {}, "puf": {},
+	"semiconductor": {}, "silicon": {}, "soi": {}, "transistor": {}, "diode": {},
+}
+
+var semanticScholarSemiconductorChipTitleTerms = map[string]struct{}{
+	"channel": {}, "cmos": {}, "device": {}, "dielectric": {}, "diode": {}, "fd": {},
+	"fet": {}, "finfet": {}, "gaa": {}, "gate": {}, "hardware": {}, "leakage": {},
+	"mos": {}, "mosfet": {}, "nanoelectronic": {}, "nmos": {}, "oxide": {},
+	"pmos": {}, "puf": {}, "semiconductor": {}, "silicon": {}, "soi": {},
+	"transistor": {},
+}
+
+var semanticScholarChipHardwareContextTerms = map[string]struct{}{
+	"fingerprint": {}, "hardware": {}, "leakage": {}, "puf": {}, "security": {},
+}
+
+var semanticScholarQueryStopWords = map[string]struct{}{
+	"article": {}, "articles": {}, "find": {}, "give": {}, "paper": {}, "papers": {},
+	"please": {}, "publication": {}, "publications": {}, "research": {}, "show": {},
+	"study": {}, "studies": {}, "top": {},
+}
+
+func significantSemanticScholarQueryTerms(query string) []string {
+	tokens := crossrefTextTokens(query)
+	terms := make([]string, 0, len(tokens))
+	seen := make(map[string]struct{}, len(tokens))
+	for _, token := range tokens {
+		if semanticScholarStopWord(token) {
+			continue
+		}
+		token = normalizeCrossrefToken(token)
+		if len(token) < 2 {
+			continue
+		}
+		if semanticScholarStopWord(token) {
+			continue
+		}
+		if _, ok := seen[token]; ok {
+			continue
+		}
+		seen[token] = struct{}{}
+		terms = append(terms, token)
+	}
+	return terms
+}
+
+func semanticScholarStopWord(token string) bool {
+	if _, stop := crossrefQueryStopWords[token]; stop {
+		return true
+	}
+	_, stop := semanticScholarQueryStopWords[token]
+	return stop
+}
+
+func semanticScholarHasTunnelingEvidence(tokens []string) bool {
+	for i, token := range tokens {
+		normalized := normalizeCrossrefToken(token)
+		if normalized == "tunneling" {
+			return true
+		}
+		if normalized != "tunnel" {
+			continue
+		}
+		if semanticScholarNeighborIn(tokens, i, semanticScholarTunnelContextTerms) {
+			return true
+		}
+	}
+	return false
+}
+
+func semanticScholarHasNanoscaleChipIntent(terms []string) bool {
+	return crossrefHasNanoscaleTerm(terms) || crossrefHasAnyTerm(terms, "chip", "gate", "oxide", "transistor", "cmos", "finfet", "nanoelectronic")
+}
+
+func providerPassesFocusedTunnelingChipEvidence(terms []string, titleTokens []string, textTokens []string) bool {
+	hasTunnelingIntent := crossrefHasTerm(terms, "tunneling")
+	hasNanoscaleChipIntent := semanticScholarHasNanoscaleChipIntent(terms)
+	if hasTunnelingIntent && !semanticScholarHasTunnelingEvidence(textTokens) {
+		return false
+	}
+	if hasNanoscaleChipIntent && !semanticScholarHasNanoscaleChipEvidence(textTokens) {
+		return false
+	}
+	if hasTunnelingIntent && hasNanoscaleChipIntent {
+		if !semanticScholarHasSemiconductorChipEvidence(textTokens) {
+			return false
+		}
+		if !semanticScholarHasSemiconductorChipTitleEvidence(titleTokens) {
+			return false
+		}
+	}
+	return true
+}
+
+func semanticScholarHasNanoscaleChipEvidence(tokens []string) bool {
+	for i, token := range tokens {
+		normalized := normalizeCrossrefToken(token)
+		if _, ok := semanticScholarNanoscaleChipTerms[normalized]; ok {
+			return true
+		}
+		if strings.HasSuffix(normalized, "nm") {
+			return true
+		}
+		if normalized == "sub" && semanticScholarNeighborIn(tokens, i, semanticScholarNanoscaleChipTerms) {
+			return true
+		}
+	}
+	return false
+}
+
+func semanticScholarHasSemiconductorChipEvidence(tokens []string) bool {
+	for i, token := range tokens {
+		normalized := normalizeCrossrefToken(token)
+		if _, ok := semanticScholarSemiconductorChipTerms[normalized]; ok {
+			return true
+		}
+		if normalized == "chip" && semanticScholarNeighborInWindow(tokens, i, semanticScholarChipHardwareContextTerms, 3) {
+			return true
+		}
+	}
+	return false
+}
+
+func semanticScholarHasSemiconductorChipTitleEvidence(tokens []string) bool {
+	for i, token := range tokens {
+		normalized := normalizeCrossrefToken(token)
+		if _, ok := semanticScholarSemiconductorChipTitleTerms[normalized]; ok {
+			return true
+		}
+		if normalized == "chip" && semanticScholarNeighborInWindow(tokens, i, semanticScholarChipHardwareContextTerms, 3) {
+			return true
+		}
+	}
+	return false
+}
+
+func semanticScholarNeighborIn(tokens []string, index int, terms map[string]struct{}) bool {
+	for _, neighborIndex := range []int{index - 1, index + 1} {
+		if neighborIndex < 0 || neighborIndex >= len(tokens) {
+			continue
+		}
+		neighbor := normalizeCrossrefToken(tokens[neighborIndex])
+		if _, ok := terms[neighbor]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func semanticScholarNeighborInWindow(tokens []string, index int, terms map[string]struct{}, width int) bool {
+	if width < 1 {
+		return false
+	}
+	for neighborIndex := index - width; neighborIndex <= index+width; neighborIndex++ {
+		if neighborIndex < 0 || neighborIndex >= len(tokens) || neighborIndex == index {
+			continue
+		}
+		neighbor := normalizeCrossrefToken(tokens[neighborIndex])
+		if _, ok := terms[neighbor]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func logSemanticScholarFilterApplied(ctx context.Context, query string, opts SearchOpts, rawCount int, keptCount int) {
+	if rawCount <= keptCount {
+		return
+	}
+	logProviderSearchStage(ctx, "provider_result_filter_applied", "semantic_scholar", query, opts,
+		"result", "filtered",
+		"raw_result_count", rawCount,
+		"kept_count", keptCount,
+		"filtered_count", rawCount-keptCount,
+	)
 }
 
 func mapSemanticScholarPaper(p S2Paper) Paper {

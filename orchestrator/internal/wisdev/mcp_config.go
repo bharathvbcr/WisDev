@@ -58,6 +58,8 @@ const (
 	CfgManuscriptGenre        = "manuscript.genre"
 	CfgManuscriptSectionFlow  = "manuscript.sectionFlow"
 	CfgManuscriptFormat       = "manuscript.format"
+	CfgManuscriptIntent       = "manuscript.intent"
+	CfgManuscriptCitationStyle = "manuscript.citationStyle"
 
 	// Server-level knobs.
 	CfgServerTimeoutSeconds = "server.timeoutSeconds"
@@ -98,11 +100,13 @@ func knobRegistry() []configKnob {
 
 		{Key: CfgManuscriptMaxPapers, Kind: kindInt, Group: "manuscript", Description: "Default papers grounding a generated manuscript.", Min: intPtr(1), Max: intPtr(80), Default: 30},
 		{Key: CfgManuscriptTargetWords, Kind: kindInt, Group: "manuscript", Description: "Default target word count (0 = model chooses).", Min: intPtr(0), Max: intPtr(20000), Default: 0},
-		{Key: CfgManuscriptMinCitations, Kind: kindInt, Group: "manuscript", Description: "Default minimum distinct sources a manuscript must cite (0 = no minimum).", Min: intPtr(0), Max: intPtr(200), Default: 0},
+		{Key: CfgManuscriptMinCitations, Kind: kindInt, Group: "manuscript", Description: "Default minimum distinct sources a manuscript must cite when a call passes none (pass an explicit 0 for no minimum).", Min: intPtr(0), Max: intPtr(200), Default: 10},
 		{Key: CfgManuscriptReviewRounds, Kind: kindInt, Group: "manuscript", Description: "Default max generate→review→revise rounds (0 = pipeline default of 2).", Min: intPtr(0), Max: intPtr(5), Default: 0},
 		{Key: CfgManuscriptGenre, Kind: kindString, Group: "manuscript", Description: "Default manuscript genre, e.g. 'narrative literature review' or 'research paper'.", Default: ""},
 		{Key: CfgManuscriptSectionFlow, Kind: kindStringArray, Group: "manuscript", Description: "Default ordered section flow, e.g. [\"abstract\",\"introduction\",\"methods\",\"results\",\"discussion\",\"conclusion\"].", Default: []string{}},
-		{Key: CfgManuscriptFormat, Kind: kindString, Group: "manuscript", Description: "Default manuscript output format.", Enum: []string{"markdown", "json"}, Default: "markdown"},
+		{Key: CfgManuscriptFormat, Kind: kindString, Group: "manuscript", Description: "Default manuscript output format.", Enum: []string{"markdown", "json", "latex", "html"}, Default: "markdown"},
+		{Key: CfgManuscriptIntent, Kind: kindString, Group: "manuscript", Description: "Default document intent: report (quick synthesis), litreview (thematic review), or fullpaper (grounded manuscript pipeline).", Enum: []string{"fullpaper", "report", "litreview"}, Default: "fullpaper"},
+		{Key: CfgManuscriptCitationStyle, Kind: kindString, Group: "manuscript", Description: "Default bibliography citation style.", Enum: []string{"apa", "mla", "chicago", "vancouver", "ieee", "harvard", "nature"}, Default: "apa"},
 
 		{Key: CfgServerTimeoutSeconds, Kind: kindInt, Group: "server", Description: "Per-request MCP handler timeout in seconds.", Min: intPtr(5), Max: intPtr(300), Default: 30},
 	}

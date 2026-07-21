@@ -129,7 +129,8 @@ async def test_gemini_service_proxy_includes_service_tier():
 
     assert result == "ok"
     _, kwargs = client.post.call_args
-    assert kwargs["json"]["service_tier"] == "flex"
+    assert kwargs["json"]["serviceTier"] == "flex"
+    assert "service_tier" not in kwargs["json"]
 
 
 @pytest.mark.asyncio

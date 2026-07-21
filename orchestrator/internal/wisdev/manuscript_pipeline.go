@@ -1,13 +1,12 @@
 package wisdev
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -18,7 +17,6 @@ import (
 
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/evidence"
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
-	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/stackconfig"
 )
 
 type ManuscriptBlueprint struct {
@@ -91,25 +89,29 @@ type ContradictionMapRecord struct {
 }
 
 type SectionDraftArtifact struct {
-	ArtifactID         string                   `json:"artifactId"`
-	SectionID          string                   `json:"sectionId"`
-	Title              string                   `json:"title"`
-	WriterRole         string                   `json:"writerRole"`
-	Content            string                   `json:"content"`
-	Paragraphs         []SectionDraftParagraph  `json:"paragraphs"`
-	ClaimPacketIDs     []string                 `json:"claimPacketIds"`
-	SourceCanonicalIDs []string                 `json:"sourceCanonicalIds"`
-	SourceTitles       []string                 `json:"sourceTitles,omitempty"`
-	PlannedVisualIDs   []string                 `json:"plannedVisualIds,omitempty"`
-	UnresolvedIssues   []string                 `json:"unresolvedIssues,omitempty"`
-	ReviewStatus       string                   `json:"reviewStatus"`
-	LastReviewDecision string                   `json:"lastReviewDecision,omitempty"`
-	BlindVerifier      BlindVerifierReport      `json:"blindVerifier"`
-	ClaimProvenance    []ClaimProvenanceRecord  `json:"claimProvenance,omitempty"`
-	ContradictionMap   []ContradictionMapRecord `json:"contradictionMap,omitempty"`
-	Version            int                      `json:"version"`
-	CreatedAt          int64                    `json:"createdAt"`
-	UpdatedAt          int64                    `json:"updatedAt"`
+	ArtifactID         string                  `json:"artifactId"`
+	SectionID          string                  `json:"sectionId"`
+	Title              string                  `json:"title"`
+	WriterRole         string                  `json:"writerRole"`
+	Content            string                  `json:"content"`
+	Paragraphs         []SectionDraftParagraph `json:"paragraphs"`
+	ClaimPacketIDs     []string                `json:"claimPacketIds"`
+	SourceCanonicalIDs []string                `json:"sourceCanonicalIds"`
+	SourceTitles       []string                `json:"sourceTitles,omitempty"`
+	PlannedVisualIDs   []string                `json:"plannedVisualIds,omitempty"`
+	UnresolvedIssues   []string                `json:"unresolvedIssues,omitempty"`
+	ReviewStatus       string                  `json:"reviewStatus"`
+	LastReviewDecision string                  `json:"lastReviewDecision,omitempty"`
+	// UserEdited marks a section that a human edited manually. The autonomous
+	// revision stages must NOT regenerate/overwrite it (the manual edit wins).
+	UserEdited       bool                     `json:"userEdited,omitempty"`
+	EditedBy         string                   `json:"editedBy,omitempty"`
+	BlindVerifier    BlindVerifierReport      `json:"blindVerifier"`
+	ClaimProvenance  []ClaimProvenanceRecord  `json:"claimProvenance,omitempty"`
+	ContradictionMap []ContradictionMapRecord `json:"contradictionMap,omitempty"`
+	Version          int                      `json:"version"`
+	CreatedAt        int64                    `json:"createdAt"`
+	UpdatedAt        int64                    `json:"updatedAt"`
 }
 
 type VisualArtifact struct {
@@ -142,46 +144,121 @@ type ManuscriptPipelineResult struct {
 }
 
 type ManuscriptPipeline struct {
+	// pythonBaseURL, when set, points the section writers / reviewer / coordinated
+	// dedup at the Python sidecar (real LLM prose via the manuscript_llm selector,
+	// which honors a configured local model). Empty = scaffold-only (no network):
+	// every section falls back to its grounded scaffold.
 	pythonBaseURL string
 	httpClient    *http.Client
-	// TargetWords, when > 0, asks the section writers to aim for roughly this many
-	// words across the whole manuscript. It is forwarded to the sidecar as a
-	// per-section budget hint; 0 leaves section length to the model's defaults.
+	// TargetWords, when > 0, is a manuscript-wide target word count forwarded to the
+	// sidecar as a per-section budget hint.
 	TargetWords int
-	// MinCitations, when > 0, is the minimum number of distinct sources the
-	// manuscript should cite. It is forwarded to the sidecar as a breadth directive;
-	// callers should also ensure at least this many papers are retrieved.
+	// MinCitations, when > 0, is the minimum number of distinct sources the manuscript
+	// should cite; forwarded to the sidecar as a breadth directive.
 	MinCitations int
-	// SectionFlow, when non-empty, overrides the default section plan with this
-	// ordered list of section ids/titles (e.g. ["introduction","methods","results",
-	// "discussion"]). Unknown ids become generic synthesis sections. Empty = default.
-	SectionFlow []string
-	// ReviewRounds bounds the agentic review→revise loop: each round re-reviews the
-	// current draft and rewrites flagged sections, stopping early when the review
-	// converges (no changes). 0 = pipeline default (defaultReviewRounds).
-	ReviewRounds int
-	// Genre is the manuscript genre passed to the adversarial reviewer (e.g.
-	// "narrative literature review" or "research paper"). It controls whether
-	// first-person voice is penalized. Empty = narrative literature review.
+	// Genre is passed to the adversarial reviewer (e.g. "narrative literature review"
+	// or "research paper"); controls whether first-person voice is penalized.
 	Genre string
+	// SectionFlow, when non-empty, overrides the default section plan with this ordered
+	// list of section ids/titles. Unknown ids become generic synthesis sections.
+	SectionFlow []string
+	// ReviewRounds bounds the agentic review→revise loop (review the draft, revise
+	// flagged sections, re-review, repeat). 0 = pipeline default (defaultReviewRounds).
+	ReviewRounds int
+	// CustomInstructions, when non-empty, is free-text author steering (tone, audience,
+	// emphasis, terminology, structure) forwarded to every content-producing sidecar
+	// call (generate/refine/revise/abstract) as a high-priority directive. It overrides
+	// stylistic defaults but never the grounding/attribution/no-fabrication rules.
+	CustomInstructions string
+	// OnStage, when set, is called with the name of each completed pipeline stage
+	// (build_raw_materials, plan_sections, write_sections, review_revise.round, …)
+	// so callers can render live progress. Called synchronously from Run — keep it
+	// fast and never block. Nil = no progress callbacks (default).
+	OnStage func(stage string)
+	// Checkpoints, when set, persists each completed section draft during Run so a
+	// crashed or canceled run loses no finished sections: a later Run with the SAME
+	// jobID and the same pipeline config restores the checkpointed drafts and skips
+	// their sidecar drafting (see manuscript_checkpoint.go). Restored drafts predate
+	// any manual edit (UserEdited always false), so the user-edit invariant on Run
+	// is unaffected. Nil = checkpointing disabled (default).
+	Checkpoints CheckpointStore
 }
 
-// defaultReviewRounds is the review→revise loop budget when the caller does not
-// set one. Each round early-exits once the review stops finding changes, so this
-// is an upper bound, not a fixed cost.
+// trimmedCustomInstructions returns the sanitized author steering text, or "".
+func (p *ManuscriptPipeline) trimmedCustomInstructions() string {
+	return strings.TrimSpace(p.CustomInstructions)
+}
+
+// defaultReviewRounds is the review→revise loop budget when the caller sets none.
+// Each round early-exits once no section needs revision, so it is an upper bound.
 const defaultReviewRounds = 2
 
-// reviewRounds returns the effective review→revise loop budget (clamped to a sane
-// ceiling so a misconfigured caller cannot run an unbounded number of LLM passes).
+// maxReviewRoundsCap bounds reviewRounds(). The default 5 preserves the historical
+// ceiling; MANUSCRIPT_MAX_REVIEW_ROUNDS raises it for exhaustive "max mode" runs.
+// Each round still early-exits once no section needs revision, so a higher cap only
+// ever adds rounds when the review keeps finding real issues. Clamped to [1,20] so a
+// malformed env value can neither disable review nor spin unbounded.
+func maxReviewRoundsCap() int {
+	limit := EnvInt("MANUSCRIPT_MAX_REVIEW_ROUNDS", 5)
+	if limit < 1 {
+		return 1
+	}
+	if limit > 20 {
+		return 20
+	}
+	return limit
+}
+
 func (p *ManuscriptPipeline) reviewRounds() int {
 	rounds := p.ReviewRounds
 	if rounds <= 0 {
 		rounds = defaultReviewRounds
 	}
-	if rounds > 5 {
-		rounds = 5
+	if limit := maxReviewRoundsCap(); rounds > limit {
+		rounds = limit
 	}
 	return rounds
+}
+
+// sectionsContentFingerprint returns a deterministic signature of section bodies so
+// the review→revise loop can detect convergence (a round that changed nothing).
+func sectionsContentFingerprint(sections []SectionDraftArtifact) string {
+	var b strings.Builder
+	for i := range sections {
+		b.WriteString(sections[i].SectionID)
+		b.WriteByte(0)
+		b.WriteString(sections[i].Content)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// anySectionNeedsRevision reports whether the latest review flagged any section for
+// rewrite — the loop's "review found issues" signal.
+func anySectionNeedsRevision(sections []SectionDraftArtifact) bool {
+	for i := range sections {
+		if sections[i].ReviewStatus == "needs_revision" && len(sections[i].UnresolvedIssues) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// sectionIsUserEdited reports whether a human manually edited this section (via
+// /full-paper/edit-section). Such a section is authoritative and MUST NOT be
+// regenerated/overwritten by any content-mutating pipeline stage — the manual
+// edit wins (P4 merge rule).
+//
+// Invariant (why edits are safe today): ManuscriptPipeline.Run always builds
+// sections fresh from the blueprint (writeSections) and never reloads prior job
+// state, so UserEdited is always false inside a Run. Manual edits live only on
+// the detached job map and survive because the pipeline never re-runs over a
+// started job. If a resume/re-revise path that reloads workspace sections is
+// ever added, EVERY content-mutating stage (refineSections, reviseSectionsWithReview,
+// regenerateAbstractFromBody, factCheckSections, the dedupe/strip passes, and the
+// coordination revise) must guard on this helper the way reviseSectionsWithReview does.
+func sectionIsUserEdited(section SectionDraftArtifact) bool {
+	return section.UserEdited
 }
 
 func NewManuscriptPipeline(pythonBaseURL string) *ManuscriptPipeline {
@@ -195,19 +272,15 @@ func NewManuscriptPipeline(pythonBaseURL string) *ManuscriptPipeline {
 	}
 }
 
-// NewManuscriptPipelineOffline returns a pipeline that never contacts the Python
-// sidecar: postSectionContent short-circuits on the empty base URL, so every
-// section falls back to its grounded scaffold with zero network I/O. Used by the
-// CLI's offline document-generation path so `--offline` makes no network calls.
+// NewManuscriptPipelineOffline returns a pipeline that never contacts the sidecar:
+// every section falls back to its grounded scaffold with zero network I/O.
 func NewManuscriptPipelineOffline() *ManuscriptPipeline {
-	return &ManuscriptPipeline{
-		pythonBaseURL: "",
-		httpClient:    &http.Client{Timeout: 120 * time.Second},
-	}
+	return &ManuscriptPipeline{httpClient: &http.Client{Timeout: 120 * time.Second}}
 }
 
 func (p *ManuscriptPipeline) Run(ctx context.Context, jobID string, query string, papers []search.Paper) (ManuscriptPipelineResult, error) {
 	log := newStageLogger(jobID)
+	log.notify = p.OnStage
 	slog.Info("manuscript pipeline start",
 		"component", manuscriptLogComponent, "operation", manuscriptLogOp, "job_id", jobID,
 		"query", truncForLog(query, 160), "papers", len(papers),
@@ -236,10 +309,10 @@ func (p *ManuscriptPipeline) Run(ctx context.Context, jobID string, query string
 		return ManuscriptPipelineResult{}, err
 	}
 
-	// Concept-level cross-section coordination: an LLM editor assigns each salient
-	// named stat/study/taxonomy/example to ONE owning section so it is developed in
-	// full in one place only. No-op offline (OwnershipConcepts stays nil -> writers
-	// fall back to today's behavior).
+	// Concept-level cross-section coordination: an LLM editor assigns each salient named
+	// stat/study/taxonomy/example to ONE owning section so it is developed in full in one
+	// place only. No-op offline (OwnershipConcepts stays nil -> writers fall back to today's
+	// behavior).
 	blueprint.OwnershipConcepts = p.fetchCoordinationPlan(ctx, blueprint, rawMaterials)
 	log.stage("coordination_plan", "ownership_concepts", len(blueprint.OwnershipConcepts))
 	if err := ctx.Err(); err != nil {
@@ -249,7 +322,18 @@ func (p *ManuscriptPipeline) Run(ctx context.Context, jobID string, query string
 	visuals := p.composeVisuals(jobID, query, rawMaterials, blueprint)
 	log.stage("compose_visuals", "visuals", len(visuals))
 
-	sections := p.writeSections(ctx, jobID, rawMaterials, blueprint)
+	// Checkpoint/resume: restore any section drafts a previous interrupted run of
+	// this jobID already completed (same pipeline config only), so a crash or
+	// cancellation mid-manuscript never loses finished sections.
+	checkpointConfig := p.checkpointConfigFingerprint(query)
+	resumedSections := p.loadManuscriptCheckpoint(ctx, jobID, checkpointConfig)
+	checkpoints := p.newManuscriptCheckpointer(jobID, checkpointConfig, resumedSections)
+	if len(resumedSections) > 0 {
+		log.stage("checkpoint.resume", "resumed_sections", len(resumedSections), "config_fingerprint", checkpointConfig)
+	}
+
+	// GENERATE the first draft, then REVIEW it.
+	sections := p.writeSections(ctx, jobID, rawMaterials, blueprint, resumedSections, checkpoints)
 	log.stage("write_sections", sectionsMetrics(sections)...)
 	for i := range sections {
 		if strings.TrimSpace(sections[i].Content) == "" {
@@ -266,11 +350,6 @@ func (p *ManuscriptPipeline) Run(ctx context.Context, jobID string, query string
 	sections = p.verifySectionsBlind(sections)
 	log.stage("verify_blind.post_refine", groundingMetrics(sections)...)
 
-	// Redraft the abstract LAST, summarizing the now-finalized body (so it does not
-	// pre-introduce or duplicate the sections it should summarize).
-	sections = p.regenerateAbstractFromBody(ctx, sections, rawMaterials, blueprint)
-	log.stage("regenerate_abstract", sectionsMetrics(sections)...)
-
 	// Drop paragraphs that recycle content already stated in an earlier section,
 	// then re-verify so the peer-review grounding ratio reflects the trimmed draft.
 	sections = dedupeCrossSectionParagraphs(sections)
@@ -279,18 +358,19 @@ func (p *ManuscriptPipeline) Run(ctx context.Context, jobID string, query string
 	sections = p.verifySectionsBlind(sections)
 	log.stage("verify_blind.post_dedupe", groundingMetrics(sections)...)
 
-	// FEED pass: prose-vs-source entailment fact-check whose flags become
-	// UnresolvedIssues (section-level, so they survive the paragraph rebuild the next
-	// rewrite performs) and drive the aggressive revise below. Not score-bearing.
+	// FEED pass: prose-vs-source entailment fact-check whose flags become UnresolvedIssues
+	// (section-level, so they survive the paragraph rebuild the next rewrite performs) and
+	// drive the aggressive revise below. Not score-bearing. No-op offline.
 	sections = p.factCheckSections(ctx, sections, rawMaterials, false)
 	log.stage("fact_check.feed", sectionsMetrics(sections)...)
-	// Agentic generate → review → revise LOOP. Each round runs an LLM peer review
-	// (+ the ownership plan and entailment flags) that drives a per-section rewrite
-	// cutting cross-section repetition, raising density, strengthening
-	// synthesis/attribution, and re-grounding flagged sentences; it then re-verifies
-	// and re-runs the entailment fact-check so the next round targets the freshly
-	// rewritten prose. The loop stops as soon as a round makes no changes (the review
-	// converged) or the round budget (reviewRounds) is exhausted.
+
+	// Agentic generate → review → revise LOOP. Each round runs an LLM peer review whose
+	// fabrication/attribution/redundancy/recommendation findings (plus the ownership plan
+	// and entailment flags) drive a per-section rewrite that cuts cross-section repetition,
+	// raises density, strengthens synthesis/attribution, and re-grounds flagged sentences;
+	// it then re-verifies and re-runs the entailment fact-check so the next round targets
+	// the freshly rewritten prose. The loop stops as soon as a round makes no change (the
+	// review converged) or the round budget (reviewRounds) is exhausted.
 	budget := p.reviewRounds()
 	roundsRun, converged := 0, false
 	for round := 0; round < budget; round++ {
@@ -317,28 +397,36 @@ func (p *ManuscriptPipeline) Run(ctx context.Context, jobID string, query string
 	}
 
 	// Coordinated whole-manuscript dedup (#9): one pass over ALL sections resolves the
-	// cross-section redundancy the per-section revise can't (it only sees one section
-	// at a time), keeping each repeated point in a single owning section.
+	// cross-section redundancy the per-section revise can't (it only sees one section at a
+	// time), keeping each repeated point in a single owning section.
 	sections = p.coordinatedDedupeRevise(ctx, query, blueprint, rawMaterials, sections)
 	log.stage("coordinated_dedupe", sectionsMetrics(sections)...)
 
-	// Deterministic genre backstop: delete any sentence that (re)introduced a claim of
-	// THIS review's own systematic-search/PRISMA methodology — the model keeps
-	// resurfacing these across rewrites despite the prompt + first-draft detector.
+	// Deterministic genre backstop: delete any sentence that (re)introduced a claim of THIS
+	// review's own systematic-search/PRISMA methodology — the model keeps resurfacing these
+	// across rewrites despite the prompt + first-draft detector.
 	sections = p.stripSelfMethodology(sections, rawMaterials)
 	log.stage("strip_self_methodology", sectionsMetrics(sections)...)
 
-	// Drop sentences that near-verbatim restate one already made in an earlier section
-	// (the sentence-level counterpart to the paragraph dedup above), on the final post-
-	// rewrite content.
+	// Drop sentences that near-verbatim restate one already made in an earlier section (the
+	// sentence-level counterpart to the paragraph dedup above), on the final post-rewrite content.
 	sections = p.dedupeCrossSectionSentences(sections, rawMaterials)
 	log.stage("dedupe_sentences", sectionsMetrics(sections)...)
 
-	// Attach the correct citation to a real-but-uncited specific (a named model, a
-	// "2,400 cases" count) that uniquely matches one of the section's packets, so source
-	// facts the writer left uncited read as attributed rather than fabricated.
+	// Attach the correct citation to a real-but-uncited specific (a named model, a "2,400
+	// cases" count) that uniquely matches one of the section's packets, so source facts the
+	// writer left uncited read as attributed rather than fabricated.
 	sections = p.attachUncitedSpecifics(sections, rawMaterials)
 	log.stage("attach_uncited_specifics", sectionsMetrics(sections)...)
+
+	// Redraft the abstract LAST — after the review loop, coordinated dedupe, and
+	// sentence-level trims have finalized the body — so it summarizes the text the
+	// reader will actually get, not a draft the loop then rewrote. Must stay ABOVE
+	// the SCORE fact-check below (it rebuilds the abstract's paragraphs, and the
+	// score pass must be the last paragraph-affecting stage).
+	sections = p.regenerateAbstractFromBody(ctx, sections, rawMaterials, blueprint)
+	log.stage("regenerate_abstract", sectionsMetrics(sections)...)
+
 	// SCORE pass: re-run the entailment fact-check AFTER the last paragraph rebuild so
 	// EntailmentChecked/Score persist onto the final paragraphs; the verify below then
 	// honestly downgrades any prose still not entailed by its cited sources.
@@ -361,13 +449,12 @@ func (p *ManuscriptPipeline) Run(ctx context.Context, jobID string, query string
 	stageStates := p.buildStageStates(len(rawMaterials.ClaimPackets), len(sections), len(visuals), len(revisionTasks))
 	log.stage("build_revision_tasks", "revision_tasks", len(revisionTasks), "stage_states", len(stageStates))
 
-	finalGrounding := groundingMetrics(sections)
 	slog.Info("manuscript pipeline complete",
 		append([]any{
 			"component", manuscriptLogComponent, "operation", manuscriptLogOp, "job_id", jobID,
 			"total_ms", time.Since(log.started).Milliseconds(), "mode", p.pipelineMode(),
 			"sections", len(sections), "visuals", len(visuals), "revision_tasks", len(revisionTasks),
-		}, finalGrounding...)...)
+		}, groundingMetrics(sections)...)...)
 
 	return ManuscriptPipelineResult{
 		Dossier:         dossier,
@@ -379,115 +466,6 @@ func (p *ManuscriptPipeline) Run(ctx context.Context, jobID string, query string
 		RevisionTasks:   revisionTasks,
 		StageStates:     stageStates,
 	}, nil
-}
-
-type sectionTemplate struct {
-	id         string
-	title      string
-	goal       string
-	writerRole string
-}
-
-// defaultSectionTemplates is the standard narrative-review section plan.
-func defaultSectionTemplates() []sectionTemplate {
-	return []sectionTemplate{
-		{id: "abstract", title: "Abstract", goal: "Summarize, as a literature review, the strongest findings reported across the reviewed sources.", writerRole: "abstract_writer"},
-		{id: "introduction", title: "Introduction", goal: "Frame the research problem, scope, and motivation drawn from the reviewed literature.", writerRole: "framing_writer"},
-		{id: "literature_review", title: "Literature Review", goal: "Synthesize prior work and thematic clusters from the reviewed sources, attributing claims to their authors.", writerRole: "literature_reviewer"},
-		{id: "methods", title: "Methodological Approaches in the Reviewed Literature", goal: "Describe and CONTRAST the methodological approaches the reviewed STUDIES used (how prior work designed, built, and evaluated their systems), each attributed to its source paper. This is a narrative review: do NOT describe a methodology of THIS review, do NOT imply a systematic search or PRISMA process, and do NOT explain technical architecture as if it were this paper's own method.", writerRole: "methods_writer"},
-		{id: "results", title: "Synthesis of Findings", goal: "Synthesize and COMPARE the key findings reported across the reviewed studies, each EXPLICITLY attributed to its source (e.g. 'Busch et al. reviewed 89 studies across 29 specialties'). Do NOT present any reported finding as a result of THIS review.", writerRole: "results_writer"},
-		{id: "discussion", title: "Discussion", goal: "Compare, reconcile, and critique the evidence, preserving unresolved conflicts.", writerRole: "discussion_writer"},
-		{id: "conclusion", title: "Conclusion", goal: "Close with supported takeaways, limits, and open gaps for the next pass.", writerRole: "conclusion_writer"},
-	}
-}
-
-// resolveSectionTemplates returns the section plan: the caller-supplied SectionFlow
-// (mapped onto the known templates, with unknown ids becoming generic synthesis
-// sections in the requested order) when set, otherwise the default plan.
-func (p *ManuscriptPipeline) resolveSectionTemplates() []sectionTemplate {
-	all := defaultSectionTemplates()
-	if len(p.SectionFlow) == 0 {
-		return all
-	}
-	byID := make(map[string]sectionTemplate, len(all))
-	for _, t := range all {
-		byID[t.id] = t
-	}
-	out := make([]sectionTemplate, 0, len(p.SectionFlow))
-	seen := make(map[string]struct{}, len(p.SectionFlow))
-	for _, raw := range p.SectionFlow {
-		id := normalizeSectionID(raw)
-		if id == "" {
-			continue
-		}
-		if _, dup := seen[id]; dup {
-			continue
-		}
-		seen[id] = struct{}{}
-		if t, ok := byID[id]; ok {
-			out = append(out, t)
-			continue
-		}
-		out = append(out, sectionTemplate{
-			id:         id,
-			title:      humanizeSectionID(raw),
-			goal:       fmt.Sprintf("Synthesize the reviewed literature relevant to '%s', attributing every claim to its source. This is a narrative review with no protocol of its own.", strings.TrimSpace(raw)),
-			writerRole: "literature_reviewer",
-		})
-	}
-	if len(out) == 0 {
-		return all
-	}
-	return out
-}
-
-// normalizeSectionID lower-cases a section id/title and slugs spaces to underscores
-// so "Literature Review" and "literature_review" map to the same template.
-func normalizeSectionID(raw string) string {
-	s := strings.ToLower(strings.TrimSpace(raw))
-	s = strings.ReplaceAll(s, " ", "_")
-	s = strings.ReplaceAll(s, "-", "_")
-	return s
-}
-
-// humanizeSectionID renders a section id/title for display (Title Case).
-func humanizeSectionID(raw string) string {
-	s := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(raw), "_", " "), "-", " ")
-	if s == "" {
-		return "Section"
-	}
-	return strings.Title(s) //nolint:staticcheck // ASCII section titles; strings.Title is sufficient here.
-}
-
-// minimizeEmDashes rewrites em-dashes to lighter punctuation so the manuscript
-// avoids the "—" connector the docGen style guide discourages. It is a
-// deterministic safety net on top of the sidecar prompt directive: a spaced
-// connector ("word — word") becomes a comma clause, and any stray em-dash becomes
-// a comma, with whitespace/comma artifacts tidied.
-func minimizeEmDashes(s string) string {
-	if !strings.Contains(s, "—") {
-		return s
-	}
-	s = strings.ReplaceAll(s, " — ", ", ")
-	s = strings.ReplaceAll(s, "—", ", ")
-	s = strings.ReplaceAll(s, " ,", ",")
-	s = strings.ReplaceAll(s, ",,", ",")
-	s = strings.ReplaceAll(s, "  ", " ")
-	return s
-}
-
-// sectionsContentFingerprint returns a deterministic signature of the section
-// bodies so the agentic review→revise loop can detect convergence (a round that
-// changed nothing and can therefore stop early). Section id + body is sufficient.
-func sectionsContentFingerprint(sections []SectionDraftArtifact) string {
-	var b strings.Builder
-	for i := range sections {
-		b.WriteString(sections[i].SectionID)
-		b.WriteByte(0)
-		b.WriteString(sections[i].Content)
-		b.WriteByte('\n')
-	}
-	return b.String()
 }
 
 func (p *ManuscriptPipeline) planSections(jobID string, query string, raw evidence.ManuscriptRawMaterialSet) ManuscriptBlueprint {
@@ -502,30 +480,39 @@ func (p *ManuscriptPipeline) planSections(jobID string, query string, raw eviden
 	// next specific section prefers distinct evidence (reduces cross-section
 	// redundancy). Synthesis sections neither consume nor are constrained by it.
 	assigned := map[string]int{}
+	forceDiversify := p.MinCitations > 0 || diversifyPacketSources()
 	for _, template := range templates {
-		relevantPackets := selectRelevantPackets(raw.ClaimPackets, template.id, sectionPacketLimit(template.id), assigned)
-		if !isBroadSynthesisSection(template.id) {
+		relevantPackets := selectRelevantPackets(
+			raw.ClaimPackets,
+			template.id,
+			sectionPacketLimit(template.id, p.MinCitations),
+			assigned,
+			forceDiversify,
+		)
+		// When source diversification is on (or MinCitations>0), EVERY section (broad
+		// included) records the sources it used into a shared cross-section tally ("src:"
+		// keys) so later sections prefer as-yet-uncited sources — spreading a large corpus
+		// across the whole manuscript instead of every section converging on the same top
+		// handful. Packet-id tallies keep the default per-section distinct-evidence behavior
+		// for specific sections.
+		if forceDiversify || !isBroadSynthesisSection(template.id) {
 			for _, packet := range relevantPackets {
 				assigned[packet.PacketID]++
+				if forceDiversify {
+					if src := packetPrimarySource(packet); src != "" {
+						assigned["src:"+src]++
+					}
+				}
 			}
 		}
-		sourceIDs := make([]string, 0, len(relevantPackets))
-		sourceTitles := make([]string, 0, len(relevantPackets))
-		claimPacketIDs := make([]string, 0, len(relevantPackets))
+		claimPacketIDs, sourceCanonicalIDs, sourceTitles := parallelPacketSourceMeta(relevantPackets, sourceTitleByCanonicalID)
 		unresolvedIssues := make([]string, 0)
 		for _, packet := range relevantPackets {
-			claimPacketIDs = append(claimPacketIDs, packet.PacketID)
 			if packet.VerifierStatus != "verified" {
 				unresolvedIssues = append(unresolvedIssues, fmt.Sprintf("Packet %s requires blind verification follow-up.", packet.PacketID))
 			}
 			if len(packet.ContradictionPacketIDs) > 0 {
 				unresolvedIssues = append(unresolvedIssues, fmt.Sprintf("Packet %s has unresolved contradiction links.", packet.PacketID))
-			}
-			for _, span := range packet.EvidenceSpans {
-				sourceIDs = append(sourceIDs, span.SourceCanonicalID)
-				if title := sourceTitleByCanonicalID[span.SourceCanonicalID]; title != "" {
-					sourceTitles = append(sourceTitles, title)
-				}
 			}
 		}
 		plannedVisuals := plannedVisualIDs(raw.VisualEvidence, claimPacketIDs)
@@ -540,9 +527,9 @@ func (p *ManuscriptPipeline) planSections(jobID string, query string, raw eviden
 			Title:                  template.title,
 			Goal:                   template.goal,
 			WriterRole:             template.writerRole,
-			RequiredClaimPacketIDs: uniqueStrings(claimPacketIDs),
-			SourceCanonicalIDs:     uniqueStrings(sourceIDs),
-			SourceTitles:           uniqueStrings(sourceTitles),
+			RequiredClaimPacketIDs: claimPacketIDs,
+			SourceCanonicalIDs:     sourceCanonicalIDs,
+			SourceTitles:           sourceTitles,
 			PlannedVisualIDs:       uniqueStrings(plannedVisuals),
 			UnresolvedIssues:       uniqueStrings(unresolvedIssues),
 			Status:                 sectionStatusFromClaims(relevantPackets),
@@ -574,334 +561,7 @@ func containsPrimaryResearchVoice(content string) bool {
 	return primaryResearchVoicePattern.MatchString(content)
 }
 
-// selfAttributedProtocolPattern matches a NARRATIVE review claiming it performed a
-// systematic-review protocol of its own ("This review employs a PRISMA-compliant
-// search strategy", "the present study conducted a database search", "This review
-// synthesizes 30 peer-reviewed studies identified through a systematic search"). The
-// subject is restricted to self-references (this/our/the present + [narrative/...] +
-// review/study/...) with the method verb close behind, so it does NOT match a protocol
-// correctly attributed to a cited source ("the systematic review by [3] applied PRISMA").
-var selfAttributedProtocolPattern = regexp.MustCompile(`(?i)\b(this|the present|our)\s+(?:narrative\s+|systematic\s+|scoping\s+|comprehensive\s+|present\s+)?(review|study|paper|analysis|survey)\b[^.]{0,18}\b(employ\w*|use[sd]?|using|conduct\w*|perform\w*|appl(?:y|ies|ied)|follow\w*|adopt\w*|utiliz\w+|implement\w*|synthesiz\w*|quer(?:y|ies|ied|ying))\b[^.]{0,70}\b(prisma|systematic search|systematic review|search strateg\w+|database search|literature search|inclusion criteria|selection criteria|search protocol|screened|meta-analysis|pubmed|scopus|embase|medline|peer-reviewed (?:studies|literature|articles))\b`)
-
-// selfConductPassivePattern matches the passive/active self-conduct claim ("This
-// narrative review was conducted", "the study was performed"). Narrative reviews
-// synthesize/examine/discuss — they are not "conducted/performed" like a study.
-var selfConductPassivePattern = regexp.MustCompile(`(?i)\b(this|the|our)\s+(?:narrative\s+|systematic\s+|scoping\s+|comprehensive\s+|present\s+)?(review|study|analysis|survey)\b[^.]{0,20}\b(was|were|is|has been|have been)\s+(conduct\w*|perform\w*|undertak\w*|carried out|completed|executed)\b`)
-
-// selfProtocolGerundPattern matches the same self-attribution in a gerund clause that
-// drops the explicit subject ("Utilizing a PRISMA-compliant search strategy to ...",
-// "...conducted by querying PubMed and Scopus").
-var selfProtocolGerundPattern = regexp.MustCompile(`(?i)\b(utilizing|employing|using|adopting|following|conducting|performing|leveraging|querying|searching|queried|searched)\b[^.]{0,25}\b(prisma-compliant|systematic search strateg\w+|systematic literature search|prisma (?:2020|guidelines?|framework|methodolog\w+)|systematic review methodolog\w+|pubmed|scopus|embase|medline)\b`)
-
-// ownSearchStrategyPattern matches the review describing its OWN literature-gathering
-// process ("The search strategy focused on peer-reviewed databases", "Search
-// strategies utilized ..."). The literature-gathering verbs (focused/utilized/
-// comprised/...) distinguish it from the TOPICAL sense on this retrieval-heavy subject
-// ("RAG's search strategy retrieves documents from a vector database").
-var ownSearchStrategyPattern = regexp.MustCompile(`(?i)\bsearch strateg(?:y|ies)\b\s+(?:\w+\s+){0,3}(focused|focuses|utilized|utilizes|included|includes|comprised|comprises|involved|involves|targeted|targets|prioritized|prioritizes|encompassed|encompasses|consisted|spanned|covered|combined|drew)\b`)
-
-// criteriaMethodologyPattern matches the review describing its own study-selection
-// criteria ("The selection criteria focused on peer-reviewed literature", "Inclusion
-// criteria mandated empirical validation"). A literature/study object is required so it
-// does NOT match the topical sense ("model selection criteria prioritize latency").
-var criteriaMethodologyPattern = regexp.MustCompile(`(?i)\b(selection|inclusion|exclusion|eligibility)\s+criteria\b[^.]{0,40}\b(focused|focuses|mandated|required|prioriti[sz]ed|included|comprised|specified|restricted|limited|encompassed|stipulated|consisted|emphasi[sz]ed)\b[^.]{0,40}\b(stud(?:y|ies)|literature|paper|article|publication|peer-reviewed|empirical|evidence base|research articles)\b`)
-
-// methodsSubsectionHeadingPattern matches a heading line for a systematic-review methods
-// subsection a narrative review must not have. Requires a markdown/bold heading marker so
-// it never matches ordinary prose that merely starts with one of these words.
-var methodsSubsectionHeadingPattern = regexp.MustCompile(`(?im)^[ \t]*(?:#{1,6}[ \t]*|\*\*[ \t]*)(search strateg(?:y|ies)|selection criteria|inclusion(?: and exclusion)? criteria|exclusion criteria|eligibility criteria|study selection|data extraction(?: and synthesis)?|search and selection|literature search(?: strategy)?|methodology|methods)\b[^\n]*$`)
-
-// claimsOwnSystematicMethodology reports whether the prose claims THIS review ran a
-// systematic-search/PRISMA protocol or describes its own literature-search/selection
-// process — a genre violation for a narrative review.
-func claimsOwnSystematicMethodology(content string) bool {
-	return selfAttributedProtocolPattern.MatchString(content) ||
-		selfConductPassivePattern.MatchString(content) ||
-		selfProtocolGerundPattern.MatchString(content) ||
-		ownSearchStrategyPattern.MatchString(content) ||
-		criteriaMethodologyPattern.MatchString(content)
-}
-
-// strongProtocolTermPattern matches a systematic-review-protocol term that a NARRATIVE
-// review can only legitimately mention when attributing it to a cited source — PRISMA, a
-// systematic review/search, inclusion/exclusion criteria, a screened record count, or a
-// LITERATURE database (PubMed/Embase/...; never the topical "vector database" of RAG).
-var strongProtocolTermPattern = regexp.MustCompile(`(?i)\bPRISMA\b|\bsystematic (?:literature )?(?:review|search)\b|\bSLR\b|\binclusion criteria\b|\bexclusion criteria\b|\bscreened \d+\b|\b(?:pubmed|embase|scopus|medline|cochrane|ieee xplore)\b`)
-
-// citationOrAttributionPattern reports whether a sentence attributes its claim to a
-// source — a bracketed citation, "et al.", or "by <Author>".
-var citationOrAttributionPattern = regexp.MustCompile(`\[\s*(?:\d|evp_)|(?i)\bet al\b|\bby [A-Z][a-z]+`)
-
-// isUncitedProtocolSentence is the ROBUST genre check: a sentence stating a strong
-// systematic-protocol term with NO citation/attribution is the review claiming the
-// protocol as its own — regardless of how the subject/verb is phrased. An attributed
-// mention ("the systematic review by Smith et al. [3] applied PRISMA") is spared.
-func isUncitedProtocolSentence(sentence string) bool {
-	return strongProtocolTermPattern.MatchString(sentence) &&
-		!citationOrAttributionPattern.MatchString(sentence)
-}
-
-// contentClaimsOwnMethodology combines the subject/verb patterns with the robust
-// uncited-protocol-sentence check across the content's sentences.
-func contentClaimsOwnMethodology(content string) bool {
-	if claimsOwnSystematicMethodology(content) {
-		return true
-	}
-	if !strongProtocolTermPattern.MatchString(content) {
-		return false
-	}
-	for _, s := range citationSafeProseSentences(content, 0) {
-		if isUncitedProtocolSentence(s) {
-			return true
-		}
-	}
-	return false
-}
-
-// stripSelfMethodologySentences deterministically removes the methods-subsection headings
-// the model inserts AND every sentence claiming THIS review's own systematic-search/
-// selection methodology. The model reintroduces these across rewrites despite the prompt
-// + first-draft detector, so this is the final backstop. Paragraph-aware (preserves the
-// section's paragraph structure), drops a wholly-methodological paragraph, and never
-// empties a section. Safe because the detector has no false positives on attributed-source
-// or topical prose.
-func stripSelfMethodologySentences(content string) string {
-	if strings.TrimSpace(content) == "" {
-		return content
-	}
-	cleaned := methodsSubsectionHeadingPattern.ReplaceAllString(content, "")
-	if cleaned == content && !contentClaimsOwnMethodology(content) {
-		return content
-	}
-	paragraphs := strings.Split(cleaned, "\n\n")
-	out := make([]string, 0, len(paragraphs))
-	for _, para := range paragraphs {
-		p := strings.TrimSpace(para)
-		if p == "" {
-			continue
-		}
-		if !contentClaimsOwnMethodology(p) {
-			out = append(out, p)
-			continue
-		}
-		kept := make([]string, 0)
-		for _, s := range citationSafeProseSentences(p, 0) {
-			if claimsOwnSystematicMethodology(s) || isUncitedProtocolSentence(s) {
-				continue
-			}
-			kept = append(kept, s)
-		}
-		if len(kept) > 0 {
-			out = append(out, strings.Join(kept, " "))
-		}
-	}
-	if len(out) == 0 {
-		return content // never empty a section
-	}
-	result := strings.Join(out, "\n\n")
-	if strings.TrimSpace(result) == strings.TrimSpace(content) {
-		return content
-	}
-	return result
-}
-
-// stripSelfMethodology applies stripSelfMethodologySentences to every section AFTER the
-// last rewrite stage and rebuilds the paragraph lineage for any section it changed.
-func (p *ManuscriptPipeline) stripSelfMethodology(sections []SectionDraftArtifact, raw evidence.ManuscriptRawMaterialSet) []SectionDraftArtifact {
-	for i := range sections {
-		stripped := stripSelfMethodologySentences(sections[i].Content)
-		if stripped == sections[i].Content {
-			continue
-		}
-		claimPackets := claimPacketsByIDs(raw.ClaimPackets, sections[i].ClaimPacketIDs)
-		sections[i].Content = stripped
-		if rebuilt := buildContentParagraphs(sections[i].SectionID, stripped, claimPackets); len(rebuilt) > 0 {
-			sections[i].Paragraphs = rebuilt
-		}
-		sections[i].ClaimProvenance = buildClaimProvenance(sections[i].Paragraphs, claimPackets)
-		sections[i].ContradictionMap = buildContradictionMap(sections[i].Paragraphs, claimPackets)
-		sections[i].Version++
-		sections[i].UpdatedAt = time.Now().UnixMilli()
-	}
-	return sections
-}
-
-// distinctiveSpecificPattern matches a distinctive, checkable specific — a CamelCase
-// product/model name (LiVersa, FactScore, RadGraph-F1), a thousands-separated number
-// (2,400), or a bare 3-digit count (314). 4+ digit bare numbers (years, DOIs) are
-// deliberately excluded to avoid spurious matches.
-var distinctiveSpecificPattern = regexp.MustCompile(`\b[A-Z][a-z]+[A-Z][A-Za-z0-9-]*\b|\b\d{1,3},\d{3}\b|\b\d{3}\b`)
-
-// anyCitationMarkerPattern reports whether a sentence already carries a citation.
-var anyCitationMarkerPattern = regexp.MustCompile(`\[\s*(?:\d|evp_)`)
-
-func isASCIIWordByte(b byte) bool {
-	return b == '_' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
-}
-
-// containsSpecificWord reports a word-boundary (not mere substring) occurrence of
-// specificLower in haystackLower.
-func containsSpecificWord(haystackLower, specificLower string) bool {
-	if specificLower == "" {
-		return false
-	}
-	for idx := strings.Index(haystackLower, specificLower); idx >= 0; {
-		before := idx == 0 || !isASCIIWordByte(haystackLower[idx-1])
-		end := idx + len(specificLower)
-		after := end >= len(haystackLower) || !isASCIIWordByte(haystackLower[end])
-		if before && after {
-			return true
-		}
-		next := strings.Index(haystackLower[idx+1:], specificLower)
-		if next < 0 {
-			break
-		}
-		idx += 1 + next
-	}
-	return false
-}
-
-func packetMatchesSpecific(packet evidence.EvidencePacket, specificLower string) bool {
-	if containsSpecificWord(strings.ToLower(packet.ClaimText), specificLower) {
-		return true
-	}
-	for _, span := range packet.EvidenceSpans {
-		if containsSpecificWord(strings.ToLower(span.Snippet), specificLower) {
-			return true
-		}
-	}
-	return false
-}
-
-// uniquePacketForSpecifics returns the 1-based positional index of the section packet
-// that UNIQUELY contains one of the sentence's distinctive specifics, or 0 when none is
-// unambiguous (so a citation is only added when it is clearly correct).
-func uniquePacketForSpecifics(specifics []string, ordered []evidence.EvidencePacket) int {
-	for _, spec := range specifics {
-		specLower := strings.ToLower(spec)
-		matchK, count := 0, 0
-		for k := 1; k <= len(ordered); k++ {
-			if packetMatchesSpecific(ordered[k-1], specLower) {
-				count++
-				matchK = k
-			}
-		}
-		if count == 1 {
-			return matchK
-		}
-	}
-	return 0
-}
-
-// numberUnitPattern matches a count + study-unit noun ("30 studies", "30 guidance
-// documents", "89 papers"). A unit NOUN is required, so "30%", "30 ms", "30 minutes" do
-// not match.
-var numberUnitPattern = regexp.MustCompile(`(?i)\b(\d{2,4})\s+(?:[a-z][a-z-]*\s+){0,2}(stud(?:y|ies)|papers?|cases?|patients?|questions?|documents?|guidelines?|trials?|participants?|specialties|records?|vignettes?|reviews?|articles?|publications?)\b`)
-
-// uniquePacketForNumberUnit cites the packet that uniquely contains BOTH a sentence's
-// count and its study-unit (e.g. a "review of 30 studies" -> the survey packet), or 0.
-func uniquePacketForNumberUnit(sentence string, ordered []evidence.EvidencePacket) int {
-	for _, m := range numberUnitPattern.FindAllStringSubmatch(sentence, -1) {
-		num := strings.ToLower(m[1])
-		unit := strings.ToLower(m[2])
-		stem := unit
-		if len(stem) > 4 {
-			stem = stem[:4]
-		}
-		matchK, count := 0, 0
-		for k := 1; k <= len(ordered); k++ {
-			text := strings.ToLower(ordered[k-1].ClaimText)
-			for _, span := range ordered[k-1].EvidenceSpans {
-				text += " " + strings.ToLower(span.Snippet)
-			}
-			if containsSpecificWord(text, num) && strings.Contains(text, stem) {
-				count++
-				matchK = k
-			}
-		}
-		if count == 1 {
-			return matchK
-		}
-	}
-	return 0
-}
-
-func appendCitationMarker(sentence string, k int) string {
-	s := strings.TrimRight(sentence, " ")
-	marker := " [" + strconv.Itoa(k) + "]"
-	if n := len(s); n > 0 {
-		if last := s[n-1]; last == '.' || last == '!' || last == '?' {
-			return s[:n-1] + marker + string(last)
-		}
-	}
-	return s + marker
-}
-
-// attachUncitedSpecificCitations adds the correct positional [k] marker to a sentence
-// that states a distinctive specific (a named model, a 2,400-style count) but carries NO
-// citation, when exactly one of the section's packets contains that specific. Real facts
-// from the sources that the writer left uncited then read as attributed, not fabricated.
-func attachUncitedSpecificCitations(content string, ordered []evidence.EvidencePacket) string {
-	if content == "" || len(ordered) == 0 {
-		return content
-	}
-	paragraphs := strings.Split(content, "\n\n")
-	changed := false
-	for pi := range paragraphs {
-		sentences := citationSafeProseSentences(paragraphs[pi], 0)
-		if len(sentences) == 0 {
-			continue
-		}
-		edited := false
-		for si := range sentences {
-			if anyCitationMarkerPattern.MatchString(sentences[si]) {
-				continue
-			}
-			k := uniquePacketForSpecifics(distinctiveSpecificPattern.FindAllString(sentences[si], -1), ordered)
-			if k == 0 {
-				k = uniquePacketForNumberUnit(sentences[si], ordered)
-			}
-			if k > 0 {
-				sentences[si] = appendCitationMarker(sentences[si], k)
-				edited = true
-			}
-		}
-		if edited {
-			paragraphs[pi] = strings.Join(sentences, " ")
-			changed = true
-		}
-	}
-	if !changed {
-		return content
-	}
-	return strings.Join(paragraphs, "\n\n")
-}
-
-// attachUncitedSpecifics applies attachUncitedSpecificCitations to every section and
-// rebuilds the paragraph lineage so the added citations count toward grounding.
-func (p *ManuscriptPipeline) attachUncitedSpecifics(sections []SectionDraftArtifact, raw evidence.ManuscriptRawMaterialSet) []SectionDraftArtifact {
-	for i := range sections {
-		ordered := claimPacketsByIDs(raw.ClaimPackets, sections[i].ClaimPacketIDs)
-		if len(ordered) == 0 {
-			continue
-		}
-		updated := attachUncitedSpecificCitations(sections[i].Content, ordered)
-		if updated == sections[i].Content {
-			continue
-		}
-		sections[i].Content = updated
-		if rebuilt := buildContentParagraphs(sections[i].SectionID, updated, ordered); len(rebuilt) > 0 {
-			sections[i].Paragraphs = rebuilt
-		}
-		sections[i].ClaimProvenance = buildClaimProvenance(sections[i].Paragraphs, ordered)
-		sections[i].ContradictionMap = buildContradictionMap(sections[i].Paragraphs, ordered)
-		sections[i].Version++
-		sections[i].UpdatedAt = time.Now().UnixMilli()
-	}
-	return sections
-}
-
-func (p *ManuscriptPipeline) writeSections(ctx context.Context, _ string, raw evidence.ManuscriptRawMaterialSet, blueprint ManuscriptBlueprint) []SectionDraftArtifact {
+func (p *ManuscriptPipeline) writeSections(ctx context.Context, _ string, raw evidence.ManuscriptRawMaterialSet, blueprint ManuscriptBlueprint, resumed map[string]manuscriptSectionCheckpoint, checkpoints *manuscriptCheckpointer) []SectionDraftArtifact {
 	now := time.Now().UnixMilli()
 	packetIndex := packetIndexByID(raw.ClaimPackets)
 	sections := make([]SectionDraftArtifact, len(blueprint.Sections))
@@ -911,6 +571,18 @@ func (p *ManuscriptPipeline) writeSections(ctx context.Context, _ string, raw ev
 		wg.Add(1)
 		go func(index int, sectionBrief SectionBrief) {
 			defer wg.Done()
+
+			// Resume path: a previous interrupted run of this job already completed
+			// this section under the same pipeline config — restore it and skip the
+			// sidecar draft entirely.
+			if restored, ok := resumed[sectionBrief.SectionID]; ok {
+				slog.Info("manuscript section restored from checkpoint — skipping draft",
+					"component", manuscriptLogComponent, "operation", "checkpoint.skip",
+					"section_id", sectionBrief.SectionID, "stage", restored.Stage,
+					"content_fingerprint", restored.Fingerprint)
+				sections[index] = restored.Artifact
+				return
+			}
 
 			paragraphs, scaffoldContent, claimPackets := buildSectionScaffold(sectionBrief, packetIndex, blueprint.Query)
 			content := scaffoldContent
@@ -947,6 +619,8 @@ func (p *ManuscriptPipeline) writeSections(ctx context.Context, _ string, raw ev
 				reviewStatus = "needs_revision"
 			}
 
+			titleByCanonicalID := sourceTitleIndex(raw.CanonicalSources)
+			claimPacketIDs, sourceCanonicalIDs, sourceTitles := parallelPacketSourceMeta(claimPackets, titleByCanonicalID)
 			sections[index] = SectionDraftArtifact{
 				ArtifactID: fmt.Sprintf("section_%d_%d", now, index+1),
 				SectionID:  sectionBrief.SectionID,
@@ -954,11 +628,11 @@ func (p *ManuscriptPipeline) writeSections(ctx context.Context, _ string, raw ev
 				WriterRole: sectionBrief.WriterRole,
 				Content:    content,
 				Paragraphs: paragraphs,
-				// Use the FILTERED, ordered packets the sidecar numbered against, so a
-				// rendered [n] maps to the same packet the writer cited.
-				ClaimPacketIDs:     uniquePacketIDs(claimPackets),
-				SourceCanonicalIDs: uniqueStrings(sectionBrief.SourceCanonicalIDs),
-				SourceTitles:       uniqueStrings(sectionBrief.SourceTitles),
+				// Parallel rows from the same ordered claimPackets the writer numbered
+				// against, so rendered [n] maps to that packet's primary source.
+				ClaimPacketIDs:     claimPacketIDs,
+				SourceCanonicalIDs: sourceCanonicalIDs,
+				SourceTitles:       sourceTitles,
 				PlannedVisualIDs:   uniqueStrings(sectionBrief.PlannedVisualIDs),
 				UnresolvedIssues:   unresolved,
 				ReviewStatus:       reviewStatus,
@@ -967,6 +641,14 @@ func (p *ManuscriptPipeline) writeSections(ctx context.Context, _ string, raw ev
 				Version:            1,
 				CreatedAt:          now,
 				UpdatedAt:          now,
+			}
+
+			// Persist the completed draft so an interrupted run resumes without
+			// re-drafting it. Skipped once the run is canceled: a scaffold produced
+			// only because ctx aborted the sidecar call must not be checkpointed as
+			// a completed section.
+			if ctx.Err() == nil {
+				checkpoints.saveSection(ctx, "write_sections", sections[index])
 			}
 		}(idx, brief)
 	}
@@ -1019,6 +701,15 @@ func (p *ManuscriptPipeline) generateSectionContent(
 	claimPackets []evidence.EvidencePacket,
 	blueprint ManuscriptBlueprint,
 ) (string, error) {
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	default:
+	}
+	scaffold := buildGroundedSectionContent(brief, claimPackets, blueprint.Query)
+	if strings.TrimSpace(p.pythonBaseURL) == "" {
+		return scaffold, nil // scaffold-only: no sidecar configured
+	}
 	payload := map[string]any{
 		"section_id":      brief.SectionID,
 		"writer_role":     brief.WriterRole,
@@ -1030,34 +721,43 @@ func (p *ManuscriptPipeline) generateSectionContent(
 		"thesis":          blueprint.Thesis,
 		"section_outline": blueprintSectionTitles(blueprint),
 	}
-	if directive := renderOwnershipForSection(brief.SectionID, blueprint.OwnershipConcepts); directive != "" {
-		payload["ownership_directive"] = directive
-	}
 	if budget := p.sectionWordBudget(len(blueprint.Sections)); budget > 0 {
 		payload["target_words"] = budget
 	}
 	if p.MinCitations > 0 {
 		payload["min_citations"] = p.MinCitations
 	}
-	return p.postSectionContent(ctx, "/wisdev/manuscript/section/generate", payload)
+	if ci := p.trimmedCustomInstructions(); ci != "" {
+		payload["custom_instructions"] = ci
+	}
+	if directive := renderOwnershipForSection(brief.SectionID, blueprint.OwnershipConcepts); directive != "" {
+		payload["ownership_directive"] = directive
+	}
+	// Real LLM prose via the sidecar (manuscript_llm selector → local model or Gemini);
+	// fall back to the grounded scaffold when the sidecar is unreachable or returns empty.
+	content, err := p.postSectionContent(ctx, "/wisdev/manuscript/section/generate", payload)
+	if err != nil || strings.TrimSpace(content) == "" {
+		return scaffold, nil
+	}
+	return content, nil
 }
 
-// sectionWordBudget splits the manuscript-wide TargetWords evenly across the
-// section count so each section writer receives a per-section word target. It
-// returns 0 when no target is set (or no sections), leaving length to the model.
-func (p *ManuscriptPipeline) sectionWordBudget(sectionCount int) int {
-	if p.TargetWords <= 0 || sectionCount <= 0 {
-		return 0
+// manuscriptThesis builds a one-line thesis (query + leading thematic clusters).
+// minimizeEmDashes rewrites em-dashes to lighter punctuation so the manuscript
+// avoids the "—" connector the docGen style guide discourages (deterministic
+// safety net on top of the sidecar prompt directive).
+func minimizeEmDashes(s string) string {
+	if !strings.Contains(s, "—") {
+		return s
 	}
-	budget := p.TargetWords / sectionCount
-	if budget < 1 {
-		budget = 1
-	}
-	return budget
+	s = strings.ReplaceAll(s, " — ", ", ")
+	s = strings.ReplaceAll(s, "—", ", ")
+	s = strings.ReplaceAll(s, " ,", ",")
+	s = strings.ReplaceAll(s, ",,", ",")
+	s = strings.ReplaceAll(s, "  ", " ")
+	return s
 }
 
-// manuscriptThesis builds a one-line thesis (query + leading thematic clusters)
-// passed to every section writer so the sections argue toward a shared claim.
 func manuscriptThesis(query string, raw evidence.ManuscriptRawMaterialSet) string {
 	themes := make([]string, 0, 3)
 	for _, cluster := range raw.SourceClusters {
@@ -1075,18 +775,10 @@ func manuscriptThesis(query string, raw evidence.ManuscriptRawMaterialSet) strin
 	return thesis + "."
 }
 
-func blueprintSectionTitles(blueprint ManuscriptBlueprint) []string {
-	titles := make([]string, 0, len(blueprint.Sections))
-	for _, brief := range blueprint.Sections {
-		titles = append(titles, firstNonEmptyInPipeline(brief.Title, brief.SectionID))
-	}
-	return titles
-}
-
-// regenerateAbstractFromBody redrafts the Abstract LAST, summarizing the verified
-// body sections (passed as prior_sections), so it no longer runs as a parallel
-// section over raw packets and pre-introduces/duplicates the body. No-op offline
-// or when the sidecar/body is unavailable.
+// regenerateAbstractFromBody redrafts the Abstract LAST from the finalized body
+// (passed as prior_sections) so it summarizes the written sections instead of being
+// drafted in parallel over raw packets. Sidecar-backed; a no-op when no sidecar is
+// configured or there is no abstract/body, so the original abstract stands.
 func (p *ManuscriptPipeline) regenerateAbstractFromBody(ctx context.Context, sections []SectionDraftArtifact, raw evidence.ManuscriptRawMaterialSet, blueprint ManuscriptBlueprint) []SectionDraftArtifact {
 	if strings.TrimSpace(p.pythonBaseURL) == "" {
 		return sections
@@ -1106,7 +798,7 @@ func (p *ManuscriptPipeline) regenerateAbstractFromBody(ctx context.Context, sec
 		return sections
 	}
 	claimPackets := claimPacketsByIDs(raw.ClaimPackets, sections[abstractIdx].ClaimPacketIDs)
-	payload := map[string]any{
+	abstractPayload := map[string]any{
 		"section_id":      "abstract",
 		"writer_role":     sections[abstractIdx].WriterRole,
 		"section_goal":    "Summarize the drafted manuscript into a faithful abstract.",
@@ -1117,11 +809,15 @@ func (p *ManuscriptPipeline) regenerateAbstractFromBody(ctx context.Context, sec
 		"section_outline": blueprintSectionTitles(blueprint),
 		"prior_sections":  prior,
 	}
-	content, err := p.postSectionContent(ctx, "/wisdev/manuscript/section/generate", payload)
+	if ci := p.trimmedCustomInstructions(); ci != "" {
+		abstractPayload["custom_instructions"] = ci
+	}
+	content, err := p.postSectionContent(ctx, "/wisdev/manuscript/section/generate", abstractPayload)
 	if err != nil || strings.TrimSpace(content) == "" {
 		return sections
 	}
 	sections[abstractIdx].Content = minimizeEmDashes(strings.TrimSpace(content))
+	applyCitationMarkerHygiene(&sections[abstractIdx], claimPackets)
 	if rebuilt := buildContentParagraphs("abstract", sections[abstractIdx].Content, claimPackets); len(rebuilt) > 0 {
 		sections[abstractIdx].Paragraphs = rebuilt
 	}
@@ -1177,75 +873,8 @@ func dedupeCrossSectionParagraphs(sections []SectionDraftArtifact) []SectionDraf
 				texts = append(texts, paragraph.Text)
 			}
 			sections[si].Content = strings.Join(texts, "\n\n")
+			applyCitationMarkerHygiene(&sections[si], nil)
 		}
-	}
-	return sections
-}
-
-// dedupeCrossSectionSentences drops a sentence that NEAR-VERBATIM restates one already
-// kept in an EARLIER section (keyword-token Jaccard >= 0.80) — the sentence-level
-// counterpart to dedupeCrossSectionParagraphs, which only catches whole-paragraph dups.
-// 0.80 on content keywords is high enough that distinct on-topic claims (which share few
-// keyword tokens) are never dropped, only verbatim/near-verbatim repeats. Skips the
-// abstract (it legitimately summarizes the body), preserves paragraph structure, and
-// never empties a section. Runs on the FINAL post-rewrite content.
-func (p *ManuscriptPipeline) dedupeCrossSectionSentences(sections []SectionDraftArtifact, raw evidence.ManuscriptRawMaterialSet) []SectionDraftArtifact {
-	kept := make([]map[string]struct{}, 0)
-	for si := range sections {
-		if sections[si].SectionID == "abstract" || strings.TrimSpace(sections[si].Content) == "" {
-			continue
-		}
-		paragraphs := strings.Split(sections[si].Content, "\n\n")
-		outParas := make([]string, 0, len(paragraphs))
-		thisSection := make([]map[string]struct{}, 0)
-		changed := false
-		for _, para := range paragraphs {
-			sentences := citationSafeProseSentences(para, 0)
-			if len(sentences) == 0 {
-				continue
-			}
-			keptSentences := make([]string, 0, len(sentences))
-			for _, s := range sentences {
-				tokens := keywordTokenSet(s)
-				if len(tokens) < 6 { // too short/generic to judge as a restatement
-					keptSentences = append(keptSentences, s)
-					continue
-				}
-				isDup := false
-				for _, prior := range kept {
-					if jaccardTokens(tokens, prior) >= 0.80 {
-						isDup = true
-						break
-					}
-				}
-				if isDup {
-					changed = true
-					continue
-				}
-				keptSentences = append(keptSentences, s)
-				thisSection = append(thisSection, tokens)
-			}
-			if len(keptSentences) > 0 {
-				outParas = append(outParas, strings.Join(keptSentences, " "))
-			}
-		}
-		if len(outParas) == 0 { // never empty a section: leave it (and seed nothing new)
-			continue
-		}
-		kept = append(kept, thisSection...)
-		if !changed {
-			continue
-		}
-		newContent := strings.Join(outParas, "\n\n")
-		ordered := claimPacketsByIDs(raw.ClaimPackets, sections[si].ClaimPacketIDs)
-		sections[si].Content = newContent
-		if rebuilt := buildContentParagraphs(sections[si].SectionID, newContent, ordered); len(rebuilt) > 0 {
-			sections[si].Paragraphs = rebuilt
-		}
-		sections[si].ClaimProvenance = buildClaimProvenance(sections[si].Paragraphs, ordered)
-		sections[si].ContradictionMap = buildContradictionMap(sections[si].Paragraphs, ordered)
-		sections[si].Version++
-		sections[si].UpdatedAt = time.Now().UnixMilli()
 	}
 	return sections
 }
@@ -1267,162 +896,8 @@ func jaccardTokens(a, b map[string]struct{}) float64 {
 	return float64(inter) / float64(union)
 }
 
-type manuscriptReviewResult struct {
-	ContentScore      float64  `json:"content_score"`
-	AttributionIssues []string `json:"attribution_issues"`
-	FabricationRisks  []string `json:"fabrication_risks"`
-	Redundancy        []string `json:"redundancy"`
-	Recommendations   []string `json:"recommendations"`
-}
-
-// fetchAdversarialReview runs the LLM peer review over the drafted sections,
-// returning nil offline or on any error so callers degrade gracefully.
-func (p *ManuscriptPipeline) fetchAdversarialReview(ctx context.Context, query string, blueprint ManuscriptBlueprint, raw evidence.ManuscriptRawMaterialSet, sections []SectionDraftArtifact) *manuscriptReviewResult {
-	if strings.TrimSpace(p.pythonBaseURL) == "" {
-		return nil
-	}
-	body := make([]map[string]any, 0, len(sections))
-	packetIDSet := make(map[string]struct{})
-	for _, section := range sections {
-		if content := strings.TrimSpace(section.Content); content != "" {
-			body = append(body, map[string]any{"title": section.Title, "text": content})
-		}
-		for _, id := range section.ClaimPacketIDs {
-			packetIDSet[id] = struct{}{}
-		}
-	}
-	if len(body) == 0 {
-		return nil
-	}
-	// Send the resolved sources behind the [n] markers so the reviewer can tell a
-	// grounded, cited claim from an actual fabrication (citation-blind reviewers were
-	// false-flagging valid prose). De-duplicated across all reviewed sections.
-	packetIDs := make([]string, 0, len(packetIDSet))
-	for id := range packetIDSet {
-		packetIDs = append(packetIDs, id)
-	}
-	claimPackets := claimPacketsByIDs(raw.ClaimPackets, packetIDs)
-	review, err := p.postManuscriptReview(ctx, map[string]any{
-		"query":         query,
-		"thesis":        blueprint.Thesis,
-		"genre":         p.reviewGenre(),
-		"sections":      body,
-		"claim_packets": claimPackets,
-	})
-	if err != nil {
-		slog.Warn("manuscript adversarial review failed — degrading to lineage critique",
-			"component", manuscriptLogComponent, "operation", "adversarial_review",
-			"genre", p.reviewGenre(), "reviewed_sections", len(body), "error", err.Error())
-		return nil
-	}
-	if review != nil {
-		slog.Debug("manuscript adversarial review",
-			"component", manuscriptLogComponent, "operation", "adversarial_review",
-			"genre", p.reviewGenre(), "reviewed_sections", len(body),
-			"content_score", review.ContentScore,
-			"redundancy", len(review.Redundancy), "attribution_issues", len(review.AttributionIssues),
-			"fabrication_risks", len(review.FabricationRisks), "recommendations", len(review.Recommendations))
-	}
-	return review
-}
-
-// reviewGenre is the manuscript genre passed to the adversarial reviewer so it
-// applies the right voice rules. Defaults to a narrative literature review (the
-// pipeline's section briefs), overridable via the Genre field.
-func (p *ManuscriptPipeline) reviewGenre() string {
-	if g := strings.TrimSpace(p.Genre); g != "" {
-		return g
-	}
-	return "narrative literature review"
-}
-
-// reviewFindings flattens a review's issue lists into revision instructions.
-func reviewFindings(review *manuscriptReviewResult) []string {
-	if review == nil {
-		return nil
-	}
-	findings := make([]string, 0, len(review.Redundancy)+len(review.AttributionIssues)+len(review.FabricationRisks)+len(review.Recommendations))
-	findings = append(findings, review.Redundancy...)
-	findings = append(findings, review.AttributionIssues...)
-	findings = append(findings, review.FabricationRisks...)
-	findings = append(findings, review.Recommendations...)
-	return findings
-}
-
-// otherSectionsContext returns the OTHER drafted sections (title + content) so a
-// revision can see — and avoid repeating — what they already cover.
-func otherSectionsContext(sections []SectionDraftArtifact, skip int) []map[string]any {
-	out := make([]map[string]any, 0, len(sections))
-	for i, section := range sections {
-		if i == skip {
-			continue
-		}
-		if content := strings.TrimSpace(section.Content); content != "" {
-			out = append(out, map[string]any{"title": section.Title, "text": content})
-		}
-	}
-	return out
-}
-
-// reviseSectionsWithReview runs an AGGRESSIVE, review-guided rewrite of every
-// section: it fetches the adversarial review, then asks the sidecar to rewrite each
-// section to cut cross-section repetition, raise information density, strengthen
-// synthesis, and fix attribution — using the review findings + the other sections
-// as context. No-op offline / when the review is empty / on any per-section error.
-func (p *ManuscriptPipeline) reviseSectionsWithReview(ctx context.Context, query string, blueprint ManuscriptBlueprint, raw evidence.ManuscriptRawMaterialSet, sections []SectionDraftArtifact) []SectionDraftArtifact {
-	if strings.TrimSpace(p.pythonBaseURL) == "" {
-		return sections
-	}
-	findings := reviewFindings(p.fetchAdversarialReview(ctx, query, blueprint, raw, sections))
-	// Run the rewrite when the review found issues OR there is a canonical ownership
-	// plan to enforce OR any section carries entailment flags — otherwise the
-	// ownership/entailment directives would be silently skipped by the old
-	// findings-only early return.
-	if len(findings) == 0 && len(blueprint.OwnershipConcepts) == 0 && !anySectionHasEntailmentFlags(sections) {
-		slog.Debug("manuscript revise skipped — no review findings, ownership plan, or entailment flags",
-			"component", manuscriptLogComponent, "operation", "review_revise")
-		return sections
-	}
-	slog.Debug("manuscript revise pass starting",
-		"component", manuscriptLogComponent, "operation", "review_revise",
-		"review_findings", len(findings), "ownership_concepts", len(blueprint.OwnershipConcepts),
-		"entailment_flags", anySectionHasEntailmentFlags(sections))
-	revisedCount := 0
-	for i := range sections {
-		content := strings.TrimSpace(sections[i].Content)
-		if content == "" {
-			continue
-		}
-		claimPackets := claimPacketsByIDs(raw.ClaimPackets, sections[i].ClaimPacketIDs)
-		payload := map[string]any{
-			"section_id":       sections[i].SectionID,
-			"original_content": content,
-			"claim_packets":    claimPackets,
-			"thesis":           blueprint.Thesis,
-			"prior_sections":   otherSectionsContext(sections, i),
-			"review_findings":  mergeReviseFindings(findings, sections[i], blueprint.OwnershipConcepts),
-			"max_tokens":       32768,
-		}
-		revised, err := p.postSectionContent(ctx, "/wisdev/manuscript/section/revise", payload)
-		if err != nil || strings.TrimSpace(revised) == "" {
-			continue
-		}
-		revisedCount++
-		sections[i].Content = minimizeEmDashes(strings.TrimSpace(revised))
-		if rebuilt := buildContentParagraphs(sections[i].SectionID, sections[i].Content, claimPackets); len(rebuilt) > 0 {
-			sections[i].Paragraphs = rebuilt
-		}
-		sections[i].ClaimProvenance = buildClaimProvenance(sections[i].Paragraphs, claimPackets)
-		sections[i].ContradictionMap = buildContradictionMap(sections[i].Paragraphs, claimPackets)
-		sections[i].Version++
-		sections[i].UpdatedAt = time.Now().UnixMilli()
-	}
-	slog.Debug("manuscript revise pass complete",
-		"component", manuscriptLogComponent, "operation", "review_revise",
-		"sections_revised", revisedCount, "sections_total", len(sections))
-	return sections
-}
-
+// applyAdversarialReview is a no-op in the backend tree (scaffold-only, no sidecar);
+// the wisdev-arc tree augments the critique with an LLM content review.
 // applyAdversarialReview augments the lineage-based critique with an LLM peer
 // review (misattribution / fabrication / redundancy + a content score) and blends
 // the content score into the overall score. No-op offline or on any sidecar error,
@@ -1438,6 +913,7 @@ func (p *ManuscriptPipeline) applyAdversarialReview(ctx context.Context, query s
 	appendCritiqueList(critique, "weaknesses", review.AttributionIssues)
 	appendCritiqueList(critique, "weaknesses", review.FabricationRisks)
 	appendCritiqueList(critique, "weaknesses", review.Redundancy)
+	appendCritiqueList(critique, "weaknesses", review.ReadabilityIssues)
 	appendCritiqueList(critique, "recommendations", review.Recommendations)
 	critique["contentReviewScore"] = review.ContentScore
 	critique["verificationMode"] = "citation-lineage + adversarial LLM content review"
@@ -1449,266 +925,79 @@ func (p *ManuscriptPipeline) applyAdversarialReview(ctx context.Context, query s
 	return critique
 }
 
-func appendCritiqueList(critique map[string]any, key string, extra []string) {
-	if len(extra) == 0 {
-		return
-	}
-	existing, _ := critique[key].([]string)
-	critique[key] = uniqueStrings(append(append([]string{}, existing...), extra...))
-}
-
-func (p *ManuscriptPipeline) postManuscriptReview(ctx context.Context, payload map[string]any) (*manuscriptReviewResult, error) {
-	if strings.TrimSpace(p.pythonBaseURL) == "" {
-		return nil, fmt.Errorf("python sidecar base URL is not configured")
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.pythonBaseURL+"/wisdev/manuscript/review", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Caller-Service", "go_orchestrator")
-	if key := stackconfig.ResolveInternalServiceKey(); key != "" {
-		req.Header.Set("X-Internal-Service-Key", key)
-		req.Header.Set("Authorization", "Bearer "+key)
-	}
-	client := p.httpClient
-	if client == nil {
-		client = &http.Client{Timeout: 120 * time.Second}
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("manuscript review returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-	var result manuscriptReviewResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
-// coordinateDedupeResult is the /manuscript/coordinate-dedupe response: each
-// section's full revised text after whole-manuscript redundancy resolution.
-type coordinateDedupeResult struct {
-	Sections []struct {
-		SectionID string `json:"section_id"`
-		Text      string `json:"text"`
-	} `json:"sections"`
-}
-
-// coordinatedDedupeRevise (#9) runs a single whole-manuscript pass that sees ALL
-// sections at once, so it can resolve the cross-section redundancy the per-section
-// revise cannot — keeping each repeated point in one owning section and removing it
-// from the others. It is gated on the reviewer actually flagging redundancies and is
-// best-effort: any failure leaves the per-section draft untouched.
-func (p *ManuscriptPipeline) coordinatedDedupeRevise(ctx context.Context, query string, blueprint ManuscriptBlueprint, raw evidence.ManuscriptRawMaterialSet, sections []SectionDraftArtifact) []SectionDraftArtifact {
-	if strings.TrimSpace(p.pythonBaseURL) == "" || len(sections) < 2 {
-		return sections
-	}
-	review := p.fetchAdversarialReview(ctx, query, blueprint, raw, sections)
-	if review == nil || len(review.Redundancy) == 0 {
-		return sections
-	}
-	payloadSections := make([]map[string]any, 0, len(sections))
-	for _, s := range sections {
-		if strings.TrimSpace(s.Content) == "" {
-			continue
-		}
-		payloadSections = append(payloadSections, map[string]any{
-			"section_id": s.SectionID, "title": s.Title, "text": s.Content,
-		})
-	}
-	if len(payloadSections) < 2 {
-		return sections
-	}
-	slog.Debug("manuscript coordinated dedupe starting",
-		"component", manuscriptLogComponent, "operation", "coordinated_dedupe",
-		"redundancies", len(review.Redundancy), "sections", len(payloadSections))
-	result, err := p.postCoordinateDedupe(ctx, map[string]any{
-		"query":        query,
-		"thesis":       blueprint.Thesis,
-		"genre":        p.reviewGenre(),
-		"sections":     payloadSections,
-		"redundancies": review.Redundancy,
-	})
-	if err != nil || result == nil {
-		if err != nil {
-			slog.Warn("manuscript coordinated dedupe failed — keeping pre-dedupe sections",
-				"component", manuscriptLogComponent, "operation", "coordinated_dedupe", "error", err.Error())
-		}
-		return sections
-	}
-	revisedByID := make(map[string]string, len(result.Sections))
-	for _, rs := range result.Sections {
-		if id := strings.TrimSpace(rs.SectionID); id != "" && strings.TrimSpace(rs.Text) != "" {
-			revisedByID[id] = strings.TrimSpace(rs.Text)
-		}
-	}
-	dedupedCount := 0
-	for i := range sections {
-		revised, ok := revisedByID[sections[i].SectionID]
-		if !ok {
-			continue
-		}
-		dedupedCount++
-		revised = minimizeEmDashes(revised)
-		claimPackets := claimPacketsByIDs(raw.ClaimPackets, sections[i].ClaimPacketIDs)
-		sections[i].Content = revised
-		if rebuilt := buildContentParagraphs(sections[i].SectionID, revised, claimPackets); len(rebuilt) > 0 {
-			sections[i].Paragraphs = rebuilt
-		}
-		sections[i].ClaimProvenance = buildClaimProvenance(sections[i].Paragraphs, claimPackets)
-		sections[i].ContradictionMap = buildContradictionMap(sections[i].Paragraphs, claimPackets)
-		sections[i].Version++
-		sections[i].UpdatedAt = time.Now().UnixMilli()
-	}
-	slog.Debug("manuscript coordinated dedupe complete",
-		"component", manuscriptLogComponent, "operation", "coordinated_dedupe", "sections_rewritten", dedupedCount)
-	return sections
-}
-
-func (p *ManuscriptPipeline) postCoordinateDedupe(ctx context.Context, payload map[string]any) (*coordinateDedupeResult, error) {
-	if strings.TrimSpace(p.pythonBaseURL) == "" {
-		return nil, fmt.Errorf("python sidecar base URL is not configured")
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.pythonBaseURL+"/wisdev/manuscript/coordinate-dedupe", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Caller-Service", "go_orchestrator")
-	if key := stackconfig.ResolveInternalServiceKey(); key != "" {
-		req.Header.Set("X-Internal-Service-Key", key)
-		req.Header.Set("Authorization", "Bearer "+key)
-	}
-	client := p.httpClient
-	if client == nil {
-		client = &http.Client{Timeout: 120 * time.Second}
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("manuscript coordinate-dedupe returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-	var result coordinateDedupeResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
 func (p *ManuscriptPipeline) refineSectionContent(
 	ctx context.Context,
 	section SectionDraftArtifact,
 	raw evidence.ManuscriptRawMaterialSet,
 ) (string, error) {
-	payload := map[string]any{
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	default:
+	}
+	claimPackets := claimPacketsByIDs(raw.ClaimPackets, section.ClaimPacketIDs)
+	scaffold := buildRefinedSectionContent(section, claimPackets)
+	if strings.TrimSpace(p.pythonBaseURL) == "" {
+		return scaffold, nil
+	}
+	refinePayload := map[string]any{
 		"section_id":        section.SectionID,
 		"original_content":  section.Content,
 		"unresolved_issues": section.UnresolvedIssues,
-		"claim_packets":     claimPacketsByIDs(raw.ClaimPackets, section.ClaimPacketIDs),
+		"claim_packets":     claimPackets,
 		"max_tokens":        32768,
 	}
-	return p.postSectionContent(ctx, "/wisdev/manuscript/section/refine", payload)
+	if ci := p.trimmedCustomInstructions(); ci != "" {
+		refinePayload["custom_instructions"] = ci
+	}
+	content, err := p.postSectionContent(ctx, "/wisdev/manuscript/section/refine", refinePayload)
+	if err != nil || strings.TrimSpace(content) == "" {
+		return scaffold, nil
+	}
+	return content, nil
 }
 
-func (p *ManuscriptPipeline) postSectionContent(ctx context.Context, path string, payload map[string]any) (string, error) {
-	sectionID, _ := payload["section_id"].(string)
-	logSidecarCall := func(outcome string, started time.Time, status int, chars int, errMsg string) {
-		attrs := []any{
-			"component", manuscriptLogComponent, "operation", "sidecar.section",
-			"path", path, "section_id", sectionID, "outcome", outcome,
-			"latency_ms", time.Since(started).Milliseconds(),
+func buildGroundedSectionContent(brief SectionBrief, claimPackets []evidence.EvidencePacket, query string) string {
+	parts := []string{
+		fmt.Sprintf("%s. %s", strings.TrimSpace(brief.Title), strings.TrimSpace(brief.Goal)),
+	}
+	for _, packet := range claimPackets {
+		claim := strings.TrimSpace(packet.ClaimText)
+		if claim == "" {
+			continue
 		}
-		if status != 0 {
-			attrs = append(attrs, "http_status", status)
+		sourceIDs := sourceIDsFromPacket(packet)
+		if len(sourceIDs) > 0 {
+			parts = append(parts, fmt.Sprintf("%s Grounding sources: %s.", claim, strings.Join(sourceIDs, ", ")))
+			continue
 		}
-		if chars > 0 {
-			attrs = append(attrs, "content_chars", chars)
+		parts = append(parts, claim)
+	}
+	if len(parts) == 1 {
+		parts = append(parts, fmt.Sprintf("This section remains a scaffold pending grounded source packets for the query: %s.", strings.TrimSpace(query)))
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func buildRefinedSectionContent(section SectionDraftArtifact, claimPackets []evidence.EvidencePacket) string {
+	content := strings.TrimSpace(section.Content)
+	if content == "" {
+		content = fmt.Sprintf("%s requires revision against the grounded evidence set.", strings.TrimSpace(section.Title))
+	}
+	issueSummary := strings.Join(uniqueStrings(section.UnresolvedIssues), "; ")
+	if issueSummary != "" {
+		content = fmt.Sprintf("%s\n\nRevision focus: %s.", content, issueSummary)
+	}
+	supportingClaims := make([]string, 0, len(claimPackets))
+	for _, packet := range claimPackets {
+		if claim := strings.TrimSpace(packet.ClaimText); claim != "" {
+			supportingClaims = append(supportingClaims, claim)
 		}
-		if errMsg != "" {
-			attrs = append(attrs, "error", errMsg)
-			slog.Warn("manuscript sidecar call failed", attrs...)
-			return
-		}
-		slog.Debug("manuscript sidecar call", attrs...)
 	}
-
-	if strings.TrimSpace(p.pythonBaseURL) == "" {
-		// Not an error worth a stack: the offline pipeline expects this and falls back
-		// to grounded scaffolds. Logged at debug so the fallback is still traceable.
-		slog.Debug("manuscript sidecar skipped (no base url) — section falls back to scaffold",
-			"component", manuscriptLogComponent, "operation", "sidecar.section", "path", path, "section_id", sectionID)
-		return "", fmt.Errorf("python sidecar base URL is not configured")
+	if len(supportingClaims) > 0 {
+		content = fmt.Sprintf("%s\n\nGrounded support retained: %s", content, strings.Join(supportingClaims, " "))
 	}
-
-	started := time.Now()
-	body, err := json.Marshal(payload)
-	if err != nil {
-		logSidecarCall("marshal_error", started, 0, 0, err.Error())
-		return "", err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.pythonBaseURL+path, bytes.NewReader(body))
-	if err != nil {
-		logSidecarCall("request_error", started, 0, 0, err.Error())
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Caller-Service", "go_orchestrator")
-	if key := stackconfig.ResolveInternalServiceKey(); key != "" {
-		req.Header.Set("X-Internal-Service-Key", key)
-		req.Header.Set("Authorization", "Bearer "+key)
-	}
-
-	client := p.httpClient
-	if client == nil {
-		client = &http.Client{Timeout: 120 * time.Second}
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		// Transport failure (sidecar down, timeout) — the caller falls back to scaffold.
-		logSidecarCall("transport_error", started, 0, 0, err.Error())
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		logSidecarCall("http_error", started, resp.StatusCode, 0, truncForLog(string(respBody), 200))
-		return "", fmt.Errorf("python sidecar returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-
-	var result struct {
-		Content string `json:"content"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		logSidecarCall("decode_error", started, resp.StatusCode, 0, err.Error())
-		return "", err
-	}
-	if strings.TrimSpace(result.Content) == "" {
-		logSidecarCall("empty_content", started, resp.StatusCode, 0, "sidecar returned empty content")
-		return "", fmt.Errorf("python sidecar returned empty section content")
-	}
-	logSidecarCall("ok", started, resp.StatusCode, len(result.Content), "")
-	return result.Content, nil
+	return content
 }
 
 func buildSectionScaffold(
@@ -2143,7 +1432,7 @@ func (p *ManuscriptPipeline) composeVisuals(jobID string, query string, raw evid
 	sourceTitles := sourceTitleIndex(raw.CanonicalSources)
 	out := make([]VisualArtifact, 0, len(raw.VisualEvidence)+1)
 	for idx, visual := range raw.VisualEvidence {
-		specType, spec := buildVisualSpec(visual, packetIndex)
+		specType, spec := BuildVisualSpec(visual, packetIndex)
 		reviewStatus := "ready_for_review"
 		unresolvedIssues := make([]string, 0)
 		if len(visual.SourcePacketIDs) == 0 {
@@ -2211,7 +1500,7 @@ func (p *ManuscriptPipeline) composeVisuals(jobID string, query string, raw evid
 
 	// Synthesize a thematic evidence-summary table from the source clusters so the
 	// Results section has a real data artifact even for a text-only corpus.
-	if table, tableDrawn := buildEvidenceSummaryTable(raw); len(table.Rows) >= 2 {
+	if table, tableDrawn := BuildEvidenceSummaryTable(raw); len(table.Rows) >= 1 {
 		out = append(out, VisualArtifact{
 			ArtifactID:      fmt.Sprintf("visual_artifact_%d_table", now),
 			SectionID:       "results",
@@ -2316,11 +1605,11 @@ type ManuscriptTableSpec struct {
 	Rows    [][]string `json:"rows"`
 }
 
-// buildEvidenceSummaryTable synthesizes a thematic evidence table (theme / key
+// BuildEvidenceSummaryTable synthesizes a thematic evidence table (theme / key
 // finding / source) from the strongest packet of each source cluster, so a
 // text-only corpus (which yields no extracted figures/tables) still produces a
 // real data artifact. Returns the spec and the packet IDs it drew on.
-func buildEvidenceSummaryTable(raw evidence.ManuscriptRawMaterialSet) (ManuscriptTableSpec, []string) {
+func BuildEvidenceSummaryTable(raw evidence.ManuscriptRawMaterialSet) (ManuscriptTableSpec, []string) {
 	packetIndex := packetIndexByID(raw.ClaimPackets)
 	sourceTitles := sourceTitleIndex(raw.CanonicalSources)
 	spec := ManuscriptTableSpec{Headers: []string{"Theme", "Key finding", "Source"}}
@@ -2578,7 +1867,19 @@ func (p *ManuscriptPipeline) buildStageStates(claimCount int, sectionCount int, 
 	}
 }
 
-func buildVisualSpec(visual evidence.VisualEvidence, packets map[string]evidence.EvidencePacket) (string, any) {
+func BuildVisualSpec(visual evidence.VisualEvidence, packets map[string]evidence.EvidencePacket) (string, any) {
+	if strings.EqualFold(visual.Kind, "table") {
+		if len(visual.Headers) > 0 && len(visual.Rows) > 0 {
+			return "table", ManuscriptTableSpec{Headers: visual.Headers, Rows: visual.Rows}
+		}
+		title := firstNonEmptyInPipeline(visual.Title, "Table")
+		caption := visual.Caption
+		return "table", ManuscriptTableSpec{
+			Headers: []string{"Item", "Summary"},
+			Rows:    [][]string{{title, caption}},
+		}
+	}
+
 	if value := extractFirstNumericValue(visual.Caption); value != nil {
 		return "vega_lite", map[string]any{
 			"$schema": "https://vega.github.io/schema/vega-lite/v5.json",
@@ -2674,7 +1975,10 @@ func sourceTitleIndex(sources []evidence.CanonicalCitationRecord) map[string]str
 	return out
 }
 
-func selectRelevantPackets(packets []evidence.EvidencePacket, sectionID string, limit int, assigned map[string]int) []evidence.EvidencePacket {
+func selectRelevantPackets(packets []evidence.EvidencePacket, sectionID string, limit int, assigned map[string]int, forceDiversify bool) []evidence.EvidencePacket {
+	if forceDiversify || diversifyPacketSources() {
+		return selectRelevantPacketsSourceDiverse(packets, sectionID, limit, assigned)
+	}
 	selected := make([]evidence.EvidencePacket, 0, limit)
 	seen := make(map[string]struct{}, limit)
 	isAssigned := func(p evidence.EvidencePacket) bool { return assigned != nil && assigned[p.PacketID] > 0 }
@@ -2738,34 +2042,175 @@ func selectRelevantPackets(packets []evidence.EvidencePacket, sectionID string, 
 	return selected
 }
 
-// sectionPacketLimit is how many claim packets a section may draw on. Broad
-// synthesis sections get a larger budget (they cite across the whole corpus);
-// specific sections get a smaller but still wide one. Larger limits let the prose
-// engage many more distinct sources, so the cited bibliography is not tiny.
-func sectionPacketLimit(sectionID string) int {
-	if isBroadSynthesisSection(sectionID) {
-		return 18
-	}
-	return 14
-}
-
 // isBroadSynthesisSection reports whether a section legitimately synthesizes the
 // whole corpus (and may therefore draw on packets relevant to any section).
 func isBroadSynthesisSection(sectionID string) bool {
 	switch sectionID {
 	case "abstract", "introduction", "literature_review", "discussion", "conclusion":
 		return true
-	default:
-		return false
 	}
+	return extraBroadSynthesisSections()[sectionID]
+}
+
+// extraBroadSynthesisSections lets an operator mark additional section IDs as
+// whole-corpus synthesizers via MANUSCRIPT_BROAD_SECTIONS (comma-separated). The
+// default (empty) preserves the built-in narrative-review structure exactly. This
+// exists so a research-synopsis flow (objectives, hypotheses, methodology, analysis
+// plan, expected outcomes, limitations) can ground its sections in the reviewed
+// literature that legitimately motivates the proposed design and instruments, instead
+// of starving for packets and being pruned to citation-less stubs by the grounding
+// guards. IDs are normalized so "Analysis Plan"/"analysis-plan"/"analysis_plan" match.
+func extraBroadSynthesisSections() map[string]bool {
+	raw := strings.TrimSpace(os.Getenv("MANUSCRIPT_BROAD_SECTIONS"))
+	if raw == "" {
+		return nil
+	}
+	out := make(map[string]bool)
+	for _, part := range strings.Split(raw, ",") {
+		if id := normalizeSectionID(part); id != "" {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+// diversifyPacketSources reports whether packet selection should maximize the number
+// of DISTINCT cited sources per section (MANUSCRIPT_DIVERSIFY_SOURCES=1). Default off
+// preserves the relevance-ordered selection exactly. Turning it on spreads a section's
+// evidence across as many distinct sources as the limit allows, which — combined with
+// the cross-section `assigned` dedup — lets a large corpus contribute a correspondingly
+// large, non-repeating reference list instead of collapsing onto the same top sources.
+func diversifyPacketSources() bool {
+	v := strings.TrimSpace(os.Getenv("MANUSCRIPT_DIVERSIFY_SOURCES"))
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
+func packetPrimarySource(p evidence.EvidencePacket) string {
+	for _, span := range p.EvidenceSpans {
+		if s := strings.TrimSpace(span.SourceCanonicalID); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// parallelPacketSourceMeta builds 1:1 claimPacketIds / sourceCanonicalIds /
+// sourceTitles rows from the writer-ordered claimPackets slice. Order is preserved
+// and duplicate sources across packets are allowed — no uniqueStrings/sort.
+func parallelPacketSourceMeta(
+	claimPackets []evidence.EvidencePacket,
+	titleByCanonicalID map[string]string,
+) (claimPacketIDs, sourceCanonicalIDs, sourceTitles []string) {
+	claimPacketIDs = make([]string, len(claimPackets))
+	sourceCanonicalIDs = make([]string, len(claimPackets))
+	sourceTitles = make([]string, len(claimPackets))
+	for i, packet := range claimPackets {
+		claimPacketIDs[i] = packet.PacketID
+		canonicalID := packetPrimarySource(packet)
+		sourceCanonicalIDs[i] = canonicalID
+		sourceTitles[i] = titleByCanonicalID[canonicalID]
+	}
+	return claimPacketIDs, sourceCanonicalIDs, sourceTitles
+}
+
+// selectRelevantPacketsSourceDiverse picks up to `limit` packets that span as many
+// distinct sources as possible, in the same priority order as the default selector
+// (section-relevant unassigned → relevant assigned → back-fill unassigned → assigned,
+// honoring the broad/specific back-fill rule). It admits one packet per source before
+// allowing any source a second, so distinct sources are exhausted first. Sourceless
+// packets never block diversity (they are keyed by packet id).
+func selectRelevantPacketsSourceDiverse(packets []evidence.EvidencePacket, sectionID string, limit int, assigned map[string]int) []evidence.EvidencePacket {
+	broad := isBroadSynthesisSection(sectionID)
+	isAssigned := func(p evidence.EvidencePacket) bool { return assigned != nil && assigned[p.PacketID] > 0 }
+	var matchU, matchA, fillU, fillA []evidence.EvidencePacket
+	for _, packet := range packets {
+		if containsString(packet.SectionRelevance, sectionID) {
+			if isAssigned(packet) {
+				matchA = append(matchA, packet)
+			} else {
+				matchU = append(matchU, packet)
+			}
+			continue
+		}
+		if !broad && len(packet.SectionRelevance) > 0 {
+			continue
+		}
+		if isAssigned(packet) {
+			fillA = append(fillA, packet)
+		} else {
+			fillU = append(fillU, packet)
+		}
+	}
+	candidates := make([]evidence.EvidencePacket, 0, len(matchU)+len(matchA)+len(fillU)+len(fillA))
+	candidates = append(candidates, matchU...)
+	candidates = append(candidates, matchA...)
+	candidates = append(candidates, fillU...)
+	candidates = append(candidates, fillA...)
+
+	sourceKey := func(packet evidence.EvidencePacket) string {
+		if k := packetPrimarySource(packet); k != "" {
+			return k
+		}
+		return "pkt:" + packet.PacketID
+	}
+	// crossUse is how many earlier sections already cited a source; adding it to the
+	// within-section count means a source used elsewhere is only revisited once every
+	// fresher source has been offered, so the union of cited sources grows with the
+	// section count instead of saturating at one section's worth. maxDepth is bounded by
+	// the largest cross-section usage so the loop keeps raising the threshold (rather than
+	// stopping the moment one depth adds nothing) until as-yet-lightly-used sources become
+	// eligible — otherwise later sections, whose every candidate source is already used,
+	// would starve to zero packets.
+	maxDepth := limit
+	if assigned != nil {
+		for _, packet := range candidates {
+			if c := assigned["src:"+sourceKey(packet)]; c+1 > maxDepth {
+				maxDepth = c + 1
+			}
+		}
+	}
+	selected := make([]evidence.EvidencePacket, 0, limit)
+	seenPkt := make(map[string]struct{}, limit)
+	perSource := make(map[string]int)
+	for depth := 1; len(selected) < limit && depth <= maxDepth; depth++ {
+		for _, packet := range candidates {
+			if len(selected) >= limit {
+				break
+			}
+			if _, dup := seenPkt[packet.PacketID]; dup {
+				continue
+			}
+			key := sourceKey(packet)
+			crossUse := 0
+			if assigned != nil {
+				crossUse = assigned["src:"+key]
+			}
+			if perSource[key]+crossUse >= depth {
+				continue
+			}
+			seenPkt[packet.PacketID] = struct{}{}
+			perSource[key]++
+			selected = append(selected, packet)
+		}
+	}
+	return selected
 }
 
 func uniquePacketIDs(packets []evidence.EvidencePacket) []string {
 	out := make([]string, 0, len(packets))
+	seen := map[string]struct{}{}
 	for _, packet := range packets {
-		out = append(out, packet.PacketID)
+		id := strings.TrimSpace(packet.PacketID)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
 	}
-	return uniqueStrings(out)
+	return out
 }
 
 func plannedVisualIDs(visuals []evidence.VisualEvidence, claimPacketIDs []string) []string {

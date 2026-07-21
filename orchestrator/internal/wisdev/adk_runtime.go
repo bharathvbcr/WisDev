@@ -12,19 +12,19 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/agent/remoteagent"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/plugin"
-	"google.golang.org/adk/plugin/loggingplugin"
-	"google.golang.org/adk/plugin/retryandreflect"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
-	adktool "google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/remoteagent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/plugin/loggingplugin"
+	"google.golang.org/adk/v2/plugin/retryandreflect"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
+	adktool "google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 	"google.golang.org/genai"
 	"gopkg.in/yaml.v3"
 
@@ -129,7 +129,7 @@ var (
 	resolveADKGoogleAPIKey       = llm.ResolveGoogleAPIKey
 )
 
-const officialADKModule = "google.golang.org/adk"
+const officialADKModule = "google.golang.org/adk/v2"
 
 func DefaultADKRuntimeConfig() ADKRuntimeConfig {
 	return ADKRuntimeConfig{
@@ -367,7 +367,7 @@ func (r *ADKRuntime) ExecuteDelegatedAction(
 	result["adkRunnerExecuted"] = true
 	result["adkInvocationId"] = invocationID
 	result["adkEventAuthor"] = eventAuthor
-	result["adkRuntime"] = "google.golang.org/adk"
+	result["adkRuntime"] = "google.golang.org/adk/v2"
 	return result, true, err
 }
 
@@ -400,7 +400,7 @@ func (r *ADKRuntime) ExecuteProgrammaticAction(
 	result["adkRunnerExecuted"] = true
 	result["adkInvocationId"] = invocationID
 	result["adkEventAuthor"] = eventAuthor
-	result["adkRuntime"] = "google.golang.org/adk"
+	result["adkRuntime"] = "google.golang.org/adk/v2"
 	result["resultOrigin"] = route.ResultOrigin
 	result["resultFusionIntent"] = route.ResultFusionIntent
 	return result, err
@@ -430,11 +430,11 @@ func (r *ADKRuntime) executeDelegatedActionWithRunner(
 				}
 				result = ensureExecutionResultMap(result)
 				result["adkRunnerInternal"] = payload["adkRunnerInternal"]
-				event := session.NewEvent(invocation.InvocationID())
+				event := session.NewEvent(invocation, invocation.InvocationID())
 				event.Author = actionAgentName
 				event.Content = genai.NewContentFromText("Delegated WisDev action completed.", genai.RoleModel)
 				event.Actions.StateDelta["delegatedResult"] = result
-				event.Actions.StateDelta["adkRuntime"] = "google.golang.org/adk"
+				event.Actions.StateDelta["adkRuntime"] = "google.golang.org/adk/v2"
 				event.Actions.StateDelta["adkSubAgent"] = actionAgentName
 				event.TurnComplete = true
 				yield(event, nil)
@@ -694,7 +694,7 @@ func planEventFromADKEvent(event *session.Event, sessionState *AgentSession) Pla
 	metadata["adkRunnerExecuted"] = true
 	metadata["adkInvocationId"] = event.InvocationID
 	metadata["adkEventAuthor"] = event.Author
-	metadata["adkRuntime"] = "google.golang.org/adk"
+	metadata["adkRuntime"] = "google.golang.org/adk/v2"
 	return PlanExecutionEvent{
 		Type:               eventType,
 		TraceID:            traceID,
@@ -1044,7 +1044,7 @@ func (r *ADKRuntime) wrapGatewayTool(gateway *AgentGateway, toolDef ToolDefiniti
 		Name:                        toolDef.Name,
 		Description:                 toolDef.Description,
 		RequireConfirmationProvider: confirmationProvider,
-	}, func(toolCtx adktool.Context, input adkToolInput) (adkToolResult, error) {
+	}, func(toolCtx agent.Context, input adkToolInput) (adkToolResult, error) {
 		payload := map[string]any{}
 		for key, value := range input.Payload {
 			payload[key] = value
@@ -1065,7 +1065,7 @@ func (r *ADKRuntime) wrapGatewayTool(gateway *AgentGateway, toolDef ToolDefiniti
 	})
 }
 
-func adkToolExecutionContext(toolCtx adktool.Context) context.Context {
+func adkToolExecutionContext(toolCtx agent.Context) context.Context {
 	if toolCtx == nil {
 		return context.Background()
 	}

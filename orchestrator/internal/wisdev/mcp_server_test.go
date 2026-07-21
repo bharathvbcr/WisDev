@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
@@ -34,6 +35,50 @@ func TestMCPServerInitialize(t *testing.T) {
 	info, _ := result["serverInfo"].(map[string]any)
 	if info["name"] != "wisdev-mcp" {
 		t.Errorf("serverInfo.name want wisdev-mcp got %v", info["name"])
+	}
+	instructions, _ := result["instructions"].(string)
+	if !strings.Contains(instructions, "wisdevSearchPapers") {
+		t.Errorf("expected agent instructions mentioning wisdevSearchPapers, got %q", instructions)
+	}
+	caps, _ := result["capabilities"].(map[string]any)
+	if _, ok := caps["prompts"]; !ok {
+		t.Errorf("expected prompts capability, got %#v", caps)
+	}
+	if _, ok := caps["resources"]; !ok {
+		t.Errorf("expected resources capability, got %#v", caps)
+	}
+}
+
+func TestMCPServerPromptsListAndGet(t *testing.T) {
+	srv := NewMCPServer(nil)
+	rr := mcpPost(t, srv, `{"jsonrpc":"2.0","id":10,"method":"prompts/list"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d", rr.Code)
+	}
+	var resp mcpResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	result, _ := resp.Result.(map[string]any)
+	prompts, _ := result["prompts"].([]any)
+	if len(prompts) < 3 {
+		t.Fatalf("expected at least 3 prompts, got %d", len(prompts))
+	}
+
+	rr = mcpPost(t, srv, `{"jsonrpc":"2.0","id":11,"method":"prompts/get","params":{"name":"wisdev_docgen","arguments":{"query":"RAG for papers","intent":"report"}}}`)
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode get: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("prompts/get error: %v", resp.Error)
+	}
+	getResult, _ := resp.Result.(map[string]any)
+	messages, _ := getResult["messages"].([]any)
+	if len(messages) == 0 {
+		t.Fatal("expected prompt messages")
 	}
 }
 
@@ -251,6 +296,43 @@ func TestMCPGenerateManuscriptToolRegistered(t *testing.T) {
 	required, _ := def.InputSchema["required"].([]string)
 	if len(required) != 1 || required[0] != "query" {
 		t.Errorf("expected query to be the only required field, got %v", required)
+	}
+	// New DocGen params: intent, citationStyle, expanded format enum.
+	if _, ok := props["intent"]; !ok {
+		t.Error("wisdevGenerateManuscript should expose 'intent'")
+	}
+	if _, ok := props["citationStyle"]; !ok {
+		t.Error("wisdevGenerateManuscript should expose 'citationStyle'")
+	}
+	formatProp, ok := props["format"].(map[string]any)
+	if !ok {
+		t.Fatal("format property missing or wrong type")
+	}
+	formatEnum, _ := formatProp["enum"].([]string)
+	wantFormats := map[string]bool{"markdown": false, "json": false, "latex": false, "html": false}
+	for _, f := range formatEnum {
+		wantFormats[f] = true
+	}
+	for f, found := range wantFormats {
+		if !found {
+			t.Errorf("format enum missing %q (got %v)", f, formatEnum)
+		}
+	}
+}
+
+func TestMCPManuscriptConfigKnobs(t *testing.T) {
+	index := knobByKey()
+	for _, key := range []string{CfgManuscriptIntent, CfgManuscriptCitationStyle} {
+		if _, ok := index[key]; !ok {
+			t.Errorf("missing knob %q in registry", key)
+		}
+	}
+	cfg := NewRuntimeConfig()
+	if cfg.String(CfgManuscriptIntent) != "fullpaper" {
+		t.Errorf("default intent=%q", cfg.String(CfgManuscriptIntent))
+	}
+	if cfg.String(CfgManuscriptCitationStyle) != "apa" {
+		t.Errorf("default citation style=%q", cfg.String(CfgManuscriptCitationStyle))
 	}
 }
 

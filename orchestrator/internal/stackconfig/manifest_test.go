@@ -10,6 +10,10 @@ import (
 
 func TestStackConfigResolution(t *testing.T) {
 	t.Run("defaults from manifest", func(t *testing.T) {
+		t.Setenv("PORT", "")
+		t.Setenv("INTERNAL_METRICS_PORT", "")
+		t.Setenv("GO_INTERNAL_GRPC_ADDR", "")
+		t.Setenv("WISDEV_AUTO_PORT", "")
 		service, ok := Manifest.Services["go_orchestrator"]
 		require.True(t, ok)
 		grpcTarget, ok := Manifest.GRPCTargets["go_internal"]

@@ -109,11 +109,37 @@ func (tb *TokenBudget) RecordUsage(operation string, tokensUsed int) error {
 	return nil
 }
 
+// ConsumeUsage records tokens for work that has already completed. Unlike
+// RecordUsage it never rejects the spend: usage is clamped at the allocation
+// and the exceeded flag is set when the recorded work reaches or crosses the
+// limit. Agent loops use this so post-hoc accounting is never lost.
+// Returns true when the budget is exhausted after recording.
+func (tb *TokenBudget) ConsumeUsage(operation string, tokensUsed int) bool {
+	if tokensUsed < 0 {
+		tokensUsed = 0
+	}
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	tb.usedTokens += tokensUsed
+	if tb.usedTokens >= tb.allocatedTokens {
+		tb.usedTokens = tb.allocatedTokens
+		atomic.StoreInt32(&tb.exceeded, 1)
+	}
+	return atomic.LoadInt32(&tb.exceeded) == 1
+}
+
 // Remaining returns tokens still available.
 func (tb *TokenBudget) Remaining() int {
 	tb.mu.RLock()
 	defer tb.mu.RUnlock()
 	return tb.allocatedTokens - tb.usedTokens
+}
+
+// Allocated returns the total token allocation for this budget.
+func (tb *TokenBudget) Allocated() int {
+	tb.mu.RLock()
+	defer tb.mu.RUnlock()
+	return tb.allocatedTokens
 }
 
 // Usage returns current token usage.
@@ -209,10 +235,19 @@ func NewBudgetAwareAgentLoop(budget *TokenBudget, maxIterations, tokenPerIter in
 	}
 }
 
+// Budget returns the token budget backing this loop.
+func (bal *BudgetAwareAgentLoop) Budget() *TokenBudget {
+	return bal.budget
+}
+
 // CanIterate returns true if loop can continue.
-// Checks both iteration count and token budget.
+// Checks iteration count, the exceeded flag, and remaining tokens.
 func (bal *BudgetAwareAgentLoop) CanIterate() bool {
 	if bal.iterationCount >= bal.maxIterations {
+		return false
+	}
+
+	if bal.budget.Exceeded() {
 		return false
 	}
 

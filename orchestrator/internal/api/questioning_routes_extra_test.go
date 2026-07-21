@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -48,6 +49,159 @@ func TestDynamicQuestionOptionsSingleflightKey(t *testing.T) {
 	assert.Equal(t,
 		dynamicQuestionOptionsSingleflightKey("s1", "q5_study_types", session),
 		dynamicQuestionOptionsSingleflightKey("s1", "q5_study_types", sameSelectionsDifferentOrder),
+	)
+
+	evidenceContext := map[string]any{
+		"answers": map[string]any{
+			"q4_subtopics": map[string]any{
+				"values": []any{"safety signals", "patient selection"},
+			},
+			"q5_study_types": map[string]any{
+				"values": []any{"randomized controlled trial", "cohort study"},
+			},
+		},
+	}
+	assert.Equal(t,
+		"s1:q7_evidence_quality:q4:patient selection|safety signals;q5:cohort study|randomized controlled trial",
+		dynamicQuestionOptionsSingleflightKey("s1", "q7_evidence_quality", evidenceContext),
+	)
+	assert.Equal(t,
+		"s1:q8_output_focus:q4:patient selection|safety signals;q5:cohort study|randomized controlled trial",
+		dynamicQuestionOptionsSingleflightKey("s1", "q8_output_focus", evidenceContext),
+	)
+
+	changedEvidenceContext := map[string]any{
+		"answers": map[string]any{
+			"q4_subtopics": map[string]any{
+				"values": []any{"safety signals", "patient selection"},
+			},
+			"q5_study_types": map[string]any{
+				"values": []any{"observational study"},
+			},
+		},
+	}
+	assert.NotEqual(t,
+		dynamicQuestionOptionsSingleflightKey("s1", "q7_evidence_quality", evidenceContext),
+		dynamicQuestionOptionsSingleflightKey("s1", "q7_evidence_quality", changedEvidenceContext),
+	)
+
+	staleQuestion := map[string]any{
+		"id":                "q7_evidence_quality",
+		"optionsContextKey": "speculative",
+		"options": []any{
+			map[string]any{"value": "peer_reviewed_evidence", "label": "Peer-reviewed evidence"},
+		},
+	}
+	assert.True(t, dynamicQuestionOptionsNeedRefresh(evidenceContext, staleQuestion, "q7_evidence_quality"))
+	staleQuestion["optionsContextKey"] = "q4:patient selection|safety signals;q5:cohort study|randomized controlled trial"
+	assert.False(t, dynamicQuestionOptionsNeedRefresh(evidenceContext, staleQuestion, "q7_evidence_quality"))
+}
+
+func TestAgentSessionIncludesQuestion(t *testing.T) {
+	session := map[string]any{
+		"questions": []any{
+			map[string]any{"id": "q5_study_types"},
+		},
+		"questionSequence": []any{"q7_evidence_quality"},
+	}
+
+	assert.True(t, agentSessionIncludesQuestion(session, "q5_study_types"))
+	assert.True(t, agentSessionIncludesQuestion(session, "q7_evidence_quality"))
+	assert.False(t, agentSessionIncludesQuestion(session, "q8_output_focus"))
+	assert.False(t, agentSessionIncludesQuestion(session, " "))
+	assert.False(t, agentSessionIncludesQuestion(nil, "q5_study_types"))
+}
+
+func assertOptionsHaveDescriptions(t *testing.T, options []map[string]any) {
+	t.Helper()
+	require.NotEmpty(t, options)
+	for _, option := range options {
+		assert.NotEmpty(t, wisdev.AsOptionalString(option["label"]))
+		assert.NotEmpty(t, wisdev.AsOptionalString(option["description"]), "option %q should include a UI description", wisdev.AsOptionalString(option["label"]))
+	}
+}
+
+func optionLabels(options []map[string]any) []string {
+	labels := make([]string, 0, len(options))
+	for _, option := range options {
+		if label := strings.TrimSpace(wisdev.AsOptionalString(option["label"])); label != "" {
+			labels = append(labels, label)
+		}
+	}
+	return labels
+}
+
+func TestDynamicQuestionOptionPayloadAddsDescriptionsForQ4ThroughQ8(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		questionID string
+		value      string
+		label      string
+	}{
+		{name: "q4 subtopic", questionID: "q4_subtopics", value: "Reward Modeling", label: "Reward Modeling"},
+		{name: "q5 study type", questionID: "q5_study_types", value: "benchmark study", label: "Benchmark Study"},
+		{name: "q7 evidence quality", questionID: "q7_evidence_quality", value: "peer_reviewed_evidence", label: "Peer-reviewed evidence"},
+		{name: "q8 output focus", questionID: "q8_output_focus", value: "best_papers_first", label: "Best papers first"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			option := dynamicQuestionOptionPayload(tc.questionID, tc.value, tc.label, "RLHF benchmark comparison", "ai")
+			assert.Equal(t, tc.value, option["value"])
+			assert.Equal(t, tc.label, option["label"])
+			assert.NotEmpty(t, wisdev.AsOptionalString(option["description"]))
+		})
+	}
+}
+
+func TestDynamicQuestionFallbackOptionsUseQuestionContext(t *testing.T) {
+	subtopics := []string{"reward modeling", "policy optimization"}
+	studyTypes := []string{"benchmark study"}
+
+	qualityOptions := defaultEvidenceQualityOptions("RLHF benchmark comparison", "ai", subtopics, studyTypes)
+	assert.Contains(t, qualityOptions, "Human preference label reliability")
+	assert.Contains(t, qualityOptions, "Reward model validation benchmarks")
+	assert.Contains(t, qualityOptions, "Policy-optimization ablation evidence")
+	assert.Contains(t, qualityOptions, "Benchmark protocol reproducibility")
+	assert.Contains(t, qualityOptions, "Reward Modeling validation evidence")
+	assert.Contains(t, qualityOptions, "Reward Modeling vs Policy Optimization evidence quality")
+	assert.NotContains(t, qualityOptions, "Peer-reviewed evidence")
+	assert.NotContains(t, qualityOptions, "Recent evidence")
+	assert.NotEqual(t, "Peer-reviewed evidence", qualityOptions[0])
+
+	outputOptions := defaultOutputFocusOptions("RLHF benchmark comparison", "ai", subtopics, studyTypes)
+	assert.Contains(t, outputOptions, "Reward-model comparison takeaways")
+	assert.Contains(t, outputOptions, "Preference-data failure modes")
+	assert.Contains(t, outputOptions, "Benchmark leaderboard caveats")
+	assert.Contains(t, outputOptions, "Reward Modeling evidence map")
+	assert.Contains(t, outputOptions, "Reward Modeling vs Policy Optimization comparison")
+	assert.NotContains(t, outputOptions, "Best papers first")
+	assert.NotContains(t, outputOptions, "Broad coverage map")
+	assert.NotEqual(t, "Best papers first", outputOptions[0])
+
+	bioQuality := defaultEvidenceQualityOptions("EGFR inhibitor response in lung cancer", "biomedical", []string{"EGFR inhibitor response"})
+	assert.Contains(t, bioQuality, "EGFR Inhibitor Response validation evidence")
+	assert.NotContains(t, bioQuality, "Peer-reviewed evidence")
+
+	bioOutput := defaultOutputFocusOptions("EGFR inhibitor response in lung cancer", "biomedical", []string{"EGFR inhibitor response"})
+	assert.Contains(t, bioOutput, "EGFR Inhibitor Response evidence map")
+	assert.NotContains(t, bioOutput, "Best papers first")
+}
+
+func TestDynamicQuestionOptionDescriptionsAreDomainSpecific(t *testing.T) {
+	assert.Contains(t,
+		dynamicQuestionOptionDescription("q4_subtopics", "Reward Modeling", "RLHF benchmark comparison", "ai"),
+		"reward models",
+	)
+	assert.Contains(t,
+		dynamicQuestionOptionDescription("q5_study_types", "human evaluation study", "RLHF benchmark comparison", "ai"),
+		"human judgments",
+	)
+	assert.Contains(t,
+		dynamicQuestionOptionDescription("q7_evidence_quality", "Reward model validation benchmarks", "RLHF benchmark comparison", "ai"),
+		"held-out preferences",
+	)
+	assert.Contains(t,
+		dynamicQuestionOptionDescription("q8_output_focus", "Benchmark leaderboard caveats", "RLHF benchmark comparison", "ai"),
+		"headline benchmark scores",
 	)
 }
 
@@ -241,8 +395,9 @@ func TestRegisterQuestioningRoutes_WithSeededSession(t *testing.T) {
 				"optionsSource": "stored",
 			},
 			map[string]any{
-				"id":   "q5_study_types",
-				"type": "study_types",
+				"id":                "q5_study_types",
+				"type":              "study_types",
+				"optionsContextKey": "q4:background",
 				"options": []any{
 					map[string]any{"value": "empirical", "label": "Empirical Evaluation"},
 				},
@@ -280,15 +435,188 @@ func TestRegisterQuestioningRoutes_WithSeededSession(t *testing.T) {
 		mux.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Body.String(), `"questionId":"q5_study_types"`)
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &payload))
+		assertOptionsHaveDescriptions(t, sliceAnyMap(payload["options"]))
 	})
 
 	t.Run("question options generate dynamically for subtopics", func(t *testing.T) {
+		originalClient := gw.LLMClient
+		gw.LLMClient = nil
+		t.Cleanup(func() { gw.LLMClient = originalClient })
+
 		req := httptest.NewRequest(http.MethodGet, "/wisdev/question/options?sessionId="+sessionID+"&questionId=q4_subtopics", nil)
 		req = req.WithContext(context.WithValue(req.Context(), contextKey("user_id"), userID))
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Body.String(), `"questionId":"q4_subtopics"`)
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &payload))
+		assertOptionsHaveDescriptions(t, sliceAnyMap(payload["options"]))
+	})
+
+	t.Run("question options refresh stale context-sensitive stored options", func(t *testing.T) {
+		originalClient := gw.LLMClient
+		gw.LLMClient = nil
+		t.Cleanup(func() { gw.LLMClient = originalClient })
+
+		staleSessionID := "sess-questioning-stale-q5-options"
+		stalePayload := map[string]any{
+			"sessionId":      staleSessionID,
+			"userId":         userID,
+			"correctedQuery": "RLHF benchmark comparison",
+			"originalQuery":  "RLHF benchmark comparison",
+			"detectedDomain": "ai",
+			"questions": []any{
+				map[string]any{
+					"id":                "q5_study_types",
+					"type":              "study_types",
+					"optionsContextKey": "speculative",
+					"options": []any{
+						map[string]any{"value": "generic_stale", "label": "Generic stale option"},
+					},
+				},
+			},
+			"answers": map[string]any{
+				"q4_subtopics": map[string]any{
+					"values": []any{"reward modeling", "policy optimization"},
+				},
+			},
+		}
+		require.NoError(t, gw.StateStore.PersistAgentSessionMutation(staleSessionID, userID, stalePayload, wisdev.RuntimeJournalEntry{
+			EventID:   "evt-questioning-stale-q5-options",
+			SessionID: staleSessionID,
+			UserID:    userID,
+			Status:    "completed",
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/wisdev/question/options?sessionId="+staleSessionID+"&questionId=q5_study_types", nil)
+		req = req.WithContext(context.WithValue(req.Context(), contextKey("user_id"), userID))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.NotContains(t, w.Body.String(), "Generic stale option")
+
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &payload))
+		options := sliceAnyMap(payload["options"])
+		assertOptionsHaveDescriptions(t, options)
+		assert.Contains(t, optionLabels(options), "Reward Modeling benchmark study")
+
+		latest, err := gw.StateStore.LoadAgentSession(staleSessionID)
+		require.NoError(t, err)
+		for _, question := range sliceAnyMap(latest["questions"]) {
+			if wisdev.AsOptionalString(question["id"]) == "q5_study_types" {
+				assert.Equal(t, "q4:policy optimization|reward modeling", wisdev.AsOptionalString(question["optionsContextKey"]))
+				assert.Contains(t, optionLabels(sliceAnyMap(question["options"])), "Reward Modeling benchmark study")
+				return
+			}
+		}
+		t.Fatal("q5_study_types question not persisted")
+	})
+
+	t.Run("question options first read uses structured ai for subtopics and study types", func(t *testing.T) {
+		t.Setenv("INTERNAL_SERVICE_KEY", "test-key")
+		q4SessionID := "sess-questioning-ai-q4-first-read"
+		q4Payload := map[string]any{
+			"sessionId":      q4SessionID,
+			"userId":         userID,
+			"correctedQuery": "single-cell CRISPR perturbation biomarkers in glioblastoma",
+			"originalQuery":  "single-cell CRISPR perturbation biomarkers in glioblastoma",
+			"detectedDomain": "biomedical research",
+			"questions": []any{
+				map[string]any{"id": "q4_subtopics", "type": "subtopics", "options": []any{}},
+			},
+			"answers": map[string]any{},
+		}
+		require.NoError(t, gw.StateStore.PersistAgentSessionMutation(q4SessionID, userID, q4Payload, wisdev.RuntimeJournalEntry{
+			EventID:   "evt-questioning-ai-q4-first-read",
+			SessionID: q4SessionID,
+			UserID:    userID,
+			Status:    "completed",
+		}))
+
+		q5SessionID := "sess-questioning-ai-q5-first-read"
+		q5Payload := map[string]any{
+			"sessionId":      q5SessionID,
+			"userId":         userID,
+			"correctedQuery": "single-cell CRISPR perturbation biomarkers in glioblastoma",
+			"originalQuery":  "single-cell CRISPR perturbation biomarkers in glioblastoma",
+			"detectedDomain": "biomedical research",
+			"questions": []any{
+				map[string]any{"id": "q5_study_types", "type": "study_types", "options": []any{}},
+			},
+			"answers": map[string]any{
+				"q4_subtopics": map[string]any{
+					"values": []any{"single-cell perturbation screens", "glioblastoma biomarkers"},
+				},
+			},
+		}
+		require.NoError(t, gw.StateStore.PersistAgentSessionMutation(q5SessionID, userID, q5Payload, wisdev.RuntimeJournalEntry{
+			EventID:   "evt-questioning-ai-q5-first-read",
+			SessionID: q5SessionID,
+			UserID:    userID,
+			Status:    "completed",
+		}))
+
+		prompts := []string{}
+		llmServer := newLoopbackTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, http.MethodPost, r.Method)
+			assert.Equal(t, "/llm/structured-output", r.URL.Path)
+			var captured structuredRequestCapture
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&captured))
+			prompts = append(prompts, captured.Prompt)
+			switch {
+			case strings.Contains(captured.Prompt, "research subtopics"):
+				require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+					"jsonResult": `{"subtopics":["Single-cell perturbation screens","Glioblastoma biomarker validation","Tumor subtype context"],"keywords":["CRISPR","single-cell","glioblastoma"],"queryVariations":["single-cell CRISPR perturbation biomarkers validation","glioblastoma subtype biomarker perturbation screens"],"explanation":"AI inferred subtopics from the biomedical query."}`,
+					"modelUsed":  "mock-biomedical-q4",
+				}))
+			case strings.Contains(captured.Prompt, "methodological study types"):
+				require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+					"jsonResult": `{"studyTypes":["single-cell perturbation experiment","prospective cohort validation study","case-control biomarker study"],"matchedSignals":["single-cell screens","biomarker validation"],"explanation":"AI inferred study designs from selected subtopics."}`,
+					"modelUsed":  "mock-biomedical-q5",
+				}))
+			default:
+				t.Fatalf("unexpected structured prompt: %s", captured.Prompt)
+			}
+		}))
+		defer llmServer.Close()
+
+		client := llm.NewClientWithTimeout(2 * time.Second)
+		clientValue := reflect.ValueOf(client).Elem()
+		transportField := clientValue.FieldByName("transport")
+		reflect.NewAt(transportField.Type(), unsafe.Pointer(transportField.UnsafeAddr())).Elem().SetString("http-json")
+		baseURLField := clientValue.FieldByName("httpBaseURL")
+		reflect.NewAt(baseURLField.Type(), unsafe.Pointer(baseURLField.UnsafeAddr())).Elem().SetString(llmServer.URL)
+		originalClient := gw.LLMClient
+		gw.LLMClient = client
+		t.Cleanup(func() { gw.LLMClient = originalClient })
+
+		q4Req := httptest.NewRequest(http.MethodGet, "/wisdev/question/options?sessionId="+q4SessionID+"&questionId=q4_subtopics", nil)
+		q4Req = q4Req.WithContext(context.WithValue(q4Req.Context(), contextKey("user_id"), userID))
+		q4W := httptest.NewRecorder()
+		mux.ServeHTTP(q4W, q4Req)
+		require.Equal(t, http.StatusOK, q4W.Code)
+		var q4Response map[string]any
+		require.NoError(t, json.Unmarshal(q4W.Body.Bytes(), &q4Response))
+		assert.Equal(t, "llm_structured", q4Response["source"])
+		assert.Contains(t, optionLabels(sliceAnyMap(q4Response["options"])), "Single-cell perturbation screens")
+
+		q5Req := httptest.NewRequest(http.MethodGet, "/wisdev/question/options?sessionId="+q5SessionID+"&questionId=q5_study_types", nil)
+		q5Req = q5Req.WithContext(context.WithValue(q5Req.Context(), contextKey("user_id"), userID))
+		q5W := httptest.NewRecorder()
+		mux.ServeHTTP(q5W, q5Req)
+		require.Equal(t, http.StatusOK, q5W.Code)
+		var q5Response map[string]any
+		require.NoError(t, json.Unmarshal(q5W.Body.Bytes(), &q5Response))
+		assert.Equal(t, "llm_structured", q5Response["source"])
+		assert.Contains(t, optionLabels(sliceAnyMap(q5Response["options"])), "single-cell perturbation experiment")
+
+		require.Len(t, prompts, 2)
+		assert.Contains(t, prompts[0], "single-cell CRISPR perturbation biomarkers")
+		assert.Contains(t, prompts[1], "single-cell perturbation screens")
 	})
 
 	t.Run("question options missing question returns empty payload", func(t *testing.T) {
@@ -614,6 +942,15 @@ func TestRegisterQuestioningRoutes_WithSeededSession(t *testing.T) {
 	})
 
 	t.Run("question recommendations dynamically seed empty options", func(t *testing.T) {
+		originalBrain := gw.Brain
+		originalClient := gw.LLMClient
+		gw.Brain = nil
+		gw.LLMClient = nil
+		t.Cleanup(func() {
+			gw.Brain = originalBrain
+			gw.LLMClient = originalClient
+		})
+
 		dynSessionID := "sess-questioning-dynamic-rec"
 		dynPayload := map[string]any{
 			"sessionId":      dynSessionID,
@@ -646,8 +983,9 @@ func TestRegisterQuestioningRoutes_WithSeededSession(t *testing.T) {
 		var payload map[string]any
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &payload))
 		assert.Equal(t, true, payload["fallbackTriggered"])
-		assert.Equal(t, "options_unavailable", payload["fallbackReason"])
-		assert.Equal(t, "options_unavailable", w.Header().Get("X-Fallback-Reason"))
+		assert.Equal(t, "ai_unavailable", payload["fallbackReason"])
+		assert.Equal(t, "ai_unavailable", w.Header().Get("X-Fallback-Reason"))
+		assert.NotEmpty(t, sliceStrings(payload["values"]))
 	})
 
 	t.Run("question regenerate returns stored options", func(t *testing.T) {
@@ -672,8 +1010,17 @@ func TestRegisterQuestioningRoutes_WithSeededSession(t *testing.T) {
 					"type":    "subtopics",
 					"options": []any{},
 				},
+				map[string]any{
+					"id":      "q5_study_types",
+					"type":    "study_types",
+					"options": []any{},
+				},
 			},
-			"answers": map[string]any{},
+			"answers": map[string]any{
+				"q4_subtopics": map[string]any{
+					"values": []any{"alignment", "robustness"},
+				},
+			},
 		}
 		require.NoError(t, gw.StateStore.PersistAgentSessionMutation(dynSessionID, userID, dynPayload, wisdev.RuntimeJournalEntry{
 			EventID:   "evt-questioning-dyn-regen",
@@ -691,9 +1038,33 @@ func TestRegisterQuestioningRoutes_WithSeededSession(t *testing.T) {
 		assert.Contains(t, w.Body.String(), `"options":`)
 		assert.NotContains(t, w.Body.String(), `"label":"Alignment"`)
 		assert.NotContains(t, w.Body.String(), `"label":"Robustness"`)
+		var q4Payload map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &q4Payload))
+		assertOptionsHaveDescriptions(t, sliceAnyMap(q4Payload["options"]))
+
+		q5Req := httptest.NewRequest(http.MethodPost, "/wisdev/question/regenerate", bytes.NewBufferString(`{"sessionId":"`+dynSessionID+`","questionId":"q5_study_types"}`))
+		q5Req = q5Req.WithContext(context.WithValue(q5Req.Context(), contextKey("user_id"), userID))
+		q5w := httptest.NewRecorder()
+		mux.ServeHTTP(q5w, q5Req)
+		assert.Equal(t, http.StatusOK, q5w.Code)
+		assert.Contains(t, q5w.Body.String(), `"questionId":"q5_study_types"`)
+		var q5Payload map[string]any
+		require.NoError(t, json.Unmarshal(q5w.Body.Bytes(), &q5Payload))
+		q5Options := sliceAnyMap(q5Payload["options"])
+		assertOptionsHaveDescriptions(t, q5Options)
+		assert.Contains(t, optionLabels(q5Options), "Alignment benchmark study")
 	})
 
 	t.Run("question regenerate supports evidence quality and output focus", func(t *testing.T) {
+		originalBrain := gw.Brain
+		originalClient := gw.LLMClient
+		gw.Brain = nil
+		gw.LLMClient = nil
+		t.Cleanup(func() {
+			gw.Brain = originalBrain
+			gw.LLMClient = originalClient
+		})
+
 		dynSessionID := "sess-questioning-q7-q8-regen"
 		dynPayload := map[string]any{
 			"sessionId":      dynSessionID,
@@ -713,7 +1084,14 @@ func TestRegisterQuestioningRoutes_WithSeededSession(t *testing.T) {
 					"options": []any{},
 				},
 			},
-			"answers": map[string]any{},
+			"answers": map[string]any{
+				"q4_subtopics": map[string]any{
+					"values": []any{"patient selection", "safety signals"},
+				},
+				"q5_study_types": map[string]any{
+					"values": []any{"randomized controlled trial"},
+				},
+			},
 		}
 		require.NoError(t, gw.StateStore.PersistAgentSessionMutation(dynSessionID, userID, dynPayload, wisdev.RuntimeJournalEntry{
 			EventID:   "evt-questioning-q7-q8-regen",
@@ -730,6 +1108,12 @@ func TestRegisterQuestioningRoutes_WithSeededSession(t *testing.T) {
 		assert.Contains(t, w.Body.String(), `"questionId":"q7_evidence_quality"`)
 		assert.Contains(t, w.Body.String(), `"options":`)
 		assert.NotContains(t, w.Body.String(), `"label":"Peer-reviewed evidence"`)
+		var q7Payload map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &q7Payload))
+		q7Options := sliceAnyMap(q7Payload["options"])
+		assertOptionsHaveDescriptions(t, q7Options)
+		assert.Contains(t, optionLabels(q7Options), "Benchmark protocol reproducibility")
+		assert.Contains(t, optionLabels(q7Options), "Randomized or controlled clinical evidence")
 
 		req2 := httptest.NewRequest(http.MethodPost, "/wisdev/question/regenerate", bytes.NewBufferString(`{"sessionId":"`+dynSessionID+`","questionId":"q8_output_focus","previousOptions":["Best papers first"]}`))
 		req2 = req2.WithContext(context.WithValue(req2.Context(), contextKey("user_id"), userID))
@@ -739,6 +1123,283 @@ func TestRegisterQuestioningRoutes_WithSeededSession(t *testing.T) {
 		assert.Contains(t, w2.Body.String(), `"questionId":"q8_output_focus"`)
 		assert.Contains(t, w2.Body.String(), `"options":`)
 		assert.NotContains(t, w2.Body.String(), `"label":"Best papers first"`)
+		var q8Payload map[string]any
+		require.NoError(t, json.Unmarshal(w2.Body.Bytes(), &q8Payload))
+		q8Options := sliceAnyMap(q8Payload["options"])
+		assertOptionsHaveDescriptions(t, q8Options)
+		assert.Contains(t, optionLabels(q8Options), "Benchmark leaderboard caveats")
+		assert.Contains(t, optionLabels(q8Options), "Clinical relevance and safety")
+	})
+
+	t.Run("question regenerate uses structured ai for biomedical evidence and output options", func(t *testing.T) {
+		t.Setenv("INTERNAL_SERVICE_KEY", "test-key")
+		dynSessionID := "sess-questioning-biomedical-ai-q7-q8"
+		dynPayload := map[string]any{
+			"sessionId":      dynSessionID,
+			"userId":         userID,
+			"correctedQuery": "single-cell CRISPR perturbation biomarkers in glioblastoma",
+			"originalQuery":  "single-cell CRISPR perturbation biomarkers in glioblastoma",
+			"detectedDomain": "biomedical research",
+			"questions": []any{
+				map[string]any{"id": "q7_evidence_quality", "type": "clarification", "options": []any{}},
+				map[string]any{"id": "q8_output_focus", "type": "clarification", "options": []any{}},
+			},
+			"answers": map[string]any{
+				"q4_subtopics": map[string]any{
+					"values": []any{"single-cell perturbation screens", "glioblastoma biomarkers"},
+				},
+				"q5_study_types": map[string]any{
+					"values": []any{"experimental study", "cohort study"},
+				},
+			},
+		}
+		require.NoError(t, gw.StateStore.PersistAgentSessionMutation(dynSessionID, userID, dynPayload, wisdev.RuntimeJournalEntry{
+			EventID:   "evt-questioning-biomedical-ai-q7-q8",
+			SessionID: dynSessionID,
+			UserID:    userID,
+			Status:    "completed",
+		}))
+		getSessionID := "sess-questioning-biomedical-ai-q7-get"
+		getPayload := map[string]any{
+			"sessionId":      getSessionID,
+			"userId":         userID,
+			"correctedQuery": "single-cell CRISPR perturbation biomarkers in glioblastoma",
+			"originalQuery":  "single-cell CRISPR perturbation biomarkers in glioblastoma",
+			"detectedDomain": "biomedical research",
+			"questions": []any{
+				map[string]any{"id": "q7_evidence_quality", "type": "clarification", "options": []any{}},
+			},
+			"answers": dynPayload["answers"],
+		}
+		require.NoError(t, gw.StateStore.PersistAgentSessionMutation(getSessionID, userID, getPayload, wisdev.RuntimeJournalEntry{
+			EventID:   "evt-questioning-biomedical-ai-q7-get",
+			SessionID: getSessionID,
+			UserID:    userID,
+			Status:    "completed",
+		}))
+
+		prompts := []string{}
+		llmServer := newLoopbackTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, http.MethodPost, r.Method)
+			assert.Equal(t, "/llm/structured-output", r.URL.Path)
+			var captured structuredRequestCapture
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&captured))
+			prompts = append(prompts, captured.Prompt)
+			switch {
+			case strings.Contains(captured.Prompt, "q7_evidence_quality"):
+				require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+					"jsonResult": `{"options":[{"label":"Single-cell assay reproducibility","description":"Check whether perturbation effects replicate across cells, batches, and orthogonal assays."},{"label":"CRISPR perturbation specificity","description":"Prefer studies that control off-target effects and validate guide-level specificity."},{"label":"Tumor cohort annotation quality","description":"Prioritize biomarker evidence tied to clear glioblastoma cohort metadata and pathology labels."},{"label":"Mechanism validation evidence","description":"Favor papers that connect candidate biomarkers to functional tumor biology."}],"explanation":"AI inferred biomedical evidence-quality criteria from the query."}`,
+					"modelUsed":  "mock-biomedical-options",
+				}))
+			case strings.Contains(captured.Prompt, "q8_output_focus"):
+				require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+					"jsonResult": `{"options":[{"label":"Mechanism-to-translation synthesis","description":"Organize the answer around which perturbation findings plausibly translate to biomarker use."},{"label":"Assay and cohort limitations","description":"Separate biological signal from single-cell assay limits and cohort composition risks."},{"label":"Biomarker validation roadmap","description":"End with validation steps needed before clinical or translational use."},{"label":"Conflicting perturbation signals","description":"Call out disagreements across perturbation screens, cell states, and tumor contexts."}],"explanation":"AI inferred biomedical output-focus criteria from the query."}`,
+					"modelUsed":  "mock-biomedical-options",
+				}))
+			default:
+				t.Fatalf("unexpected structured prompt: %s", captured.Prompt)
+			}
+		}))
+		defer llmServer.Close()
+
+		client := llm.NewClientWithTimeout(2 * time.Second)
+		clientValue := reflect.ValueOf(client).Elem()
+		transportField := clientValue.FieldByName("transport")
+		reflect.NewAt(transportField.Type(), unsafe.Pointer(transportField.UnsafeAddr())).Elem().SetString("http-json")
+		baseURLField := clientValue.FieldByName("httpBaseURL")
+		reflect.NewAt(baseURLField.Type(), unsafe.Pointer(baseURLField.UnsafeAddr())).Elem().SetString(llmServer.URL)
+		originalClient := gw.LLMClient
+		gw.LLMClient = client
+		t.Cleanup(func() { gw.LLMClient = originalClient })
+
+		getReq := httptest.NewRequest(http.MethodGet, "/wisdev/question/options?sessionId="+getSessionID+"&questionId=q7_evidence_quality", nil)
+		getReq = getReq.WithContext(context.WithValue(getReq.Context(), contextKey("user_id"), userID))
+		getW := httptest.NewRecorder()
+		mux.ServeHTTP(getW, getReq)
+		require.Equal(t, http.StatusOK, getW.Code)
+		var q7GetPayload map[string]any
+		require.NoError(t, json.Unmarshal(getW.Body.Bytes(), &q7GetPayload))
+		assert.Equal(t, "llm_structured", q7GetPayload["source"])
+		assert.Equal(t, false, q7GetPayload["fallbackTriggered"])
+		assert.Contains(t, optionLabels(sliceAnyMap(q7GetPayload["options"])), "Single-cell assay reproducibility")
+
+		req := httptest.NewRequest(http.MethodPost, "/wisdev/question/regenerate", bytes.NewBufferString(`{"sessionId":"`+dynSessionID+`","questionId":"q7_evidence_quality","previousOptions":["Peer-reviewed evidence"]}`))
+		req = req.WithContext(context.WithValue(req.Context(), contextKey("user_id"), userID))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+		var q7Payload map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &q7Payload))
+		assert.Equal(t, "llm_structured", q7Payload["source"])
+		assert.Equal(t, false, q7Payload["fallbackTriggered"])
+		q7Options := sliceAnyMap(q7Payload["options"])
+		assertOptionsHaveDescriptions(t, q7Options)
+		assert.Contains(t, optionLabels(q7Options), "Single-cell assay reproducibility")
+		assert.NotContains(t, optionLabels(q7Options), "Peer-reviewed evidence")
+
+		req2 := httptest.NewRequest(http.MethodPost, "/wisdev/question/regenerate", bytes.NewBufferString(`{"sessionId":"`+dynSessionID+`","questionId":"q8_output_focus","previousOptions":["Best papers first"]}`))
+		req2 = req2.WithContext(context.WithValue(req2.Context(), contextKey("user_id"), userID))
+		w2 := httptest.NewRecorder()
+		mux.ServeHTTP(w2, req2)
+		require.Equal(t, http.StatusOK, w2.Code)
+		var q8Payload map[string]any
+		require.NoError(t, json.Unmarshal(w2.Body.Bytes(), &q8Payload))
+		assert.Equal(t, "llm_structured", q8Payload["source"])
+		assert.Equal(t, false, q8Payload["fallbackTriggered"])
+		q8Options := sliceAnyMap(q8Payload["options"])
+		assertOptionsHaveDescriptions(t, q8Options)
+		assert.Contains(t, optionLabels(q8Options), "Mechanism-to-translation synthesis")
+		assert.NotContains(t, optionLabels(q8Options), "Best papers first")
+
+		require.Len(t, prompts, 3)
+		for _, prompt := range prompts {
+			assert.Contains(t, prompt, "Do not hard-code domain playbooks")
+			assert.Contains(t, prompt, "biomedical research")
+			assert.Contains(t, prompt, "single-cell CRISPR perturbation biomarkers")
+		}
+	})
+
+	t.Run("question options refresh exclusions with structured ai for biomedical context", func(t *testing.T) {
+		t.Setenv("INTERNAL_SERVICE_KEY", "test-key")
+		dynSessionID := "sess-questioning-biomedical-ai-q6"
+		dynPayload := map[string]any{
+			"sessionId":      dynSessionID,
+			"userId":         userID,
+			"correctedQuery": "single-cell CRISPR perturbation biomarkers in glioblastoma",
+			"originalQuery":  "single-cell CRISPR perturbation biomarkers in glioblastoma",
+			"detectedDomain": "biomedical research",
+			"questions": []any{
+				map[string]any{
+					"id":                "q6_exclusions",
+					"type":              "exclusions",
+					"optionsContextKey": "",
+					"options": []any{
+						map[string]any{"value": "animal_studies", "label": "Exclude animal studies"},
+					},
+				},
+			},
+			"answers": map[string]any{
+				"q4_subtopics": map[string]any{
+					"values": []any{"single-cell perturbation screens", "glioblastoma biomarkers"},
+				},
+				"q5_study_types": map[string]any{
+					"values": []any{"single-cell perturbation experiment", "prospective cohort study"},
+				},
+			},
+		}
+		require.NoError(t, gw.StateStore.PersistAgentSessionMutation(dynSessionID, userID, dynPayload, wisdev.RuntimeJournalEntry{
+			EventID:   "evt-questioning-biomedical-ai-q6",
+			SessionID: dynSessionID,
+			UserID:    userID,
+			Status:    "completed",
+		}))
+
+		var captured structuredRequestCapture
+		llmServer := newLoopbackTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, http.MethodPost, r.Method)
+			assert.Equal(t, "/llm/structured-output", r.URL.Path)
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&captured))
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+				"jsonResult": `{"options":[{"label":"Exclude xenograft-only evidence","description":"Filter animal-only tumor models unless they directly validate the perturbation mechanism."},{"label":"Exclude cohorts without tumor subtype labels","description":"Down-rank biomarker studies that lack glioblastoma subtype or pathology metadata."},{"label":"Exclude unvalidated assay-only findings","description":"Filter exploratory single-cell signals without orthogonal validation."}],"explanation":"AI inferred biomedical exclusions from the query and selected study types."}`,
+				"modelUsed":  "mock-biomedical-exclusions",
+			}))
+		}))
+		defer llmServer.Close()
+
+		client := llm.NewClientWithTimeout(2 * time.Second)
+		clientValue := reflect.ValueOf(client).Elem()
+		transportField := clientValue.FieldByName("transport")
+		reflect.NewAt(transportField.Type(), unsafe.Pointer(transportField.UnsafeAddr())).Elem().SetString("http-json")
+		baseURLField := clientValue.FieldByName("httpBaseURL")
+		reflect.NewAt(baseURLField.Type(), unsafe.Pointer(baseURLField.UnsafeAddr())).Elem().SetString(llmServer.URL)
+		originalClient := gw.LLMClient
+		gw.LLMClient = client
+		t.Cleanup(func() { gw.LLMClient = originalClient })
+
+		req := httptest.NewRequest(http.MethodGet, "/wisdev/question/options?sessionId="+dynSessionID+"&questionId=q6_exclusions", nil)
+		req = req.WithContext(context.WithValue(req.Context(), contextKey("user_id"), userID))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &payload))
+		assert.Equal(t, "llm_structured", payload["source"])
+		assert.Equal(t, false, payload["fallbackTriggered"])
+		options := sliceAnyMap(payload["options"])
+		assertOptionsHaveDescriptions(t, options)
+		assert.Contains(t, optionLabels(options), "Exclude xenograft-only evidence")
+		assert.NotContains(t, optionLabels(options), "Exclude animal studies")
+		assert.Contains(t, captured.Prompt, "q6_exclusions")
+		assert.Contains(t, captured.Prompt, "fixed checklist")
+	})
+
+	t.Run("question recommendations refresh stale evidence quality options", func(t *testing.T) {
+		originalBrain := gw.Brain
+		originalClient := gw.LLMClient
+		gw.Brain = nil
+		gw.LLMClient = nil
+		t.Cleanup(func() {
+			gw.Brain = originalBrain
+			gw.LLMClient = originalClient
+		})
+
+		staleSessionID := "sess-questioning-stale-q7-rec"
+		stalePayload := map[string]any{
+			"sessionId":      staleSessionID,
+			"userId":         userID,
+			"correctedQuery": "clinical AI benchmark comparison safety",
+			"originalQuery":  "clinical AI benchmark comparison safety",
+			"detectedDomain": "medicine",
+			"questions": []any{
+				map[string]any{
+					"id":                "q7_evidence_quality",
+					"type":              "clarification",
+					"isMultiSelect":     true,
+					"optionsContextKey": "speculative",
+					"options": []any{
+						map[string]any{"value": "peer_reviewed_evidence", "label": "Peer-reviewed evidence"},
+					},
+				},
+			},
+			"answers": map[string]any{
+				"q4_subtopics": map[string]any{
+					"values": []any{"patient selection", "safety signals"},
+				},
+				"q5_study_types": map[string]any{
+					"values": []any{"randomized controlled trial"},
+				},
+			},
+		}
+		require.NoError(t, gw.StateStore.PersistAgentSessionMutation(staleSessionID, userID, stalePayload, wisdev.RuntimeJournalEntry{
+			EventID:   "evt-questioning-stale-q7-rec",
+			SessionID: staleSessionID,
+			UserID:    userID,
+			Status:    "completed",
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/wisdev/question/recommendations?sessionId="+staleSessionID+"&questionId=q7_evidence_quality", nil)
+		req = req.WithContext(context.WithValue(req.Context(), contextKey("user_id"), userID))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &payload))
+		values := sliceStrings(payload["values"])
+		assert.Contains(t, values, "benchmark_protocol_reproducibility")
+		assert.NotContains(t, values, "peer_reviewed_evidence")
+
+		latest, err := gw.StateStore.LoadAgentSession(staleSessionID)
+		require.NoError(t, err)
+		for _, question := range sliceAnyMap(latest["questions"]) {
+			if wisdev.AsOptionalString(question["id"]) == "q7_evidence_quality" {
+				assert.Equal(t, "q4:patient selection|safety signals;q5:randomized controlled trial", wisdev.AsOptionalString(question["optionsContextKey"]))
+				assert.Contains(t, optionLabels(sliceAnyMap(question["options"])), "Benchmark protocol reproducibility")
+				return
+			}
+		}
+		t.Fatal("q7_evidence_quality question not persisted")
 	})
 
 	t.Run("question regenerate missing ids rejected", func(t *testing.T) {

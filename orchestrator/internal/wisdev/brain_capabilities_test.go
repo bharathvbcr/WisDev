@@ -934,8 +934,8 @@ func TestBrainCapabilities_SystematicReviewPrismaRateLimitUsesFallback(t *testin
 	result, err := caps.SystematicReviewPrisma(context.Background(), "query", []Source{{ID: "p1"}, {ID: "p2"}}, "")
 	require.NoError(t, err)
 	assert.Equal(t, true, result["degraded"])
-	assert.Equal(t, float64(2), result["records_identified"])
-	assert.Equal(t, float64(2), result["studies_included"])
+	assert.Equal(t, 2, result["identified"])
+	assert.Equal(t, 2, result["included"])
 	mockLLM.AssertExpectations(t)
 }
 

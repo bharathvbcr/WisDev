@@ -12,7 +12,7 @@ func TestAutoCoverageGenerated(t *testing.T) {
 	callWithZeroValueArgs(BuildDossier)
 	callWithZeroValueArgs(BuildRawMaterialSet)
 	callWithZeroValueArgs(assignContradictions)
-	callWithZeroValueArgs(buildCanonicalRecord)
+	callWithZeroValueArgs(BuildCanonicalRecord)
 	callWithZeroValueArgs(buildContradictionPayloads)
 	callWithZeroValueArgs(buildSectionCoverage)
 	callWithZeroValueArgs(classifyClaimType)

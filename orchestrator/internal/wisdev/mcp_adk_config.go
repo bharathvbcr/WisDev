@@ -9,8 +9,9 @@ package wisdev
 import (
 	"fmt"
 
-	adktool "google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	adktool "google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 type adkGetConfigInput struct {
@@ -29,7 +30,7 @@ func (b *MCPADKBridge) getConfigTool() adktool.Tool {
 	tool, _ := functiontool.New(functiontool.Config{
 		Name:        MCPToolGetConfig,
 		Description: "Inspect the WisDev runtime's tunable configuration: every knob with type, range/enum, default, and current value. Call before tuning to discover what can change.",
-	}, func(_ adktool.Context, in adkGetConfigInput) (adkConfigOutput, error) {
+	}, func(_ agent.Context, in adkGetConfigInput) (adkConfigOutput, error) {
 		views, _ := b.server.buildConfigViews(in.Keys)
 		return adkConfigOutput{Knobs: views, MCPTool: MCPToolGetConfig}, nil
 	})
@@ -44,7 +45,7 @@ func (b *MCPADKBridge) tuneConfigTool() adktool.Tool {
 	tool, _ := functiontool.New(functiontool.Config{
 		Name:        MCPToolTuneConfig,
 		Description: "Tune the WisDev runtime. Pass settings (knob key -> value) to change defaults that subsequent search/evidence/author/manuscript calls inherit. Values are validated against each knob's type and range/enum.",
-	}, func(_ adktool.Context, in adkTuneConfigInput) (adkConfigOutput, error) {
+	}, func(_ agent.Context, in adkTuneConfigInput) (adkConfigOutput, error) {
 		if len(in.Settings) == 0 {
 			return adkConfigOutput{}, fmt.Errorf("settings is required (map of knob key -> value)")
 		}
@@ -66,7 +67,7 @@ func (b *MCPADKBridge) resetConfigTool() adktool.Tool {
 	tool, _ := functiontool.New(functiontool.Config{
 		Name:        MCPToolResetConfig,
 		Description: "Reset WisDev runtime knobs to their built-in defaults. Pass keys to reset a subset, or omit to reset all.",
-	}, func(_ adktool.Context, in adkResetConfigInput) (adkConfigOutput, error) {
+	}, func(_ agent.Context, in adkResetConfigInput) (adkConfigOutput, error) {
 		resetErr := b.server.cfg().Reset(in.Keys...)
 		out := adkConfigOutput{Config: b.server.cfg().Snapshot(), MCPTool: MCPToolResetConfig}
 		if resetErr != nil {
@@ -89,7 +90,7 @@ func (b *MCPADKBridge) listProvidersTool() adktool.Tool {
 	tool, _ := functiontool.New(functiontool.Config{
 		Name:        MCPToolListProviders,
 		Description: "List the registered academic search providers with name, specialised domains, and health. Use to discover valid 'sources' values and the search.defaultSources knob.",
-	}, func(_ adktool.Context, _ adkListProvidersInput) (adkListProvidersOutput, error) {
+	}, func(_ agent.Context, _ adkListProvidersInput) (adkListProvidersOutput, error) {
 		views := b.server.providerViews()
 		return adkListProvidersOutput{ProviderCount: len(views), Providers: views, MCPTool: MCPToolListProviders}, nil
 	})

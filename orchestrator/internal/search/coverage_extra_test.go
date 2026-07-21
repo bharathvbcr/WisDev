@@ -187,6 +187,10 @@ func (p *testCitationProvider) GetCitations(context.Context, string, int) ([]Pap
 	p.getCalled++
 	return p.papers, p.err
 }
+func (p *testCitationProvider) GetReferences(context.Context, string, int) ([]Paper, error) {
+	p.getCalled++
+	return p.papers, p.err
+}
 
 func TestCacheHelpers(t *testing.T) {
 	t.Parallel()
@@ -196,11 +200,11 @@ func TestCacheHelpers(t *testing.T) {
 		t.Fatalf("unexpected cache key: %s", key)
 	}
 
-	if _, ok := checkCache(context.Background(), nil, "missing"); ok {
+	if _, ok := checkCache(context.Background(), nil, nil, "missing"); ok {
 		t.Fatal("expected nil cache client to miss")
 	}
-	setCache(context.Background(), nil, "missing", SearchResult{})
-	setCache(context.Background(), nil, "missing", SearchResult{Papers: []Paper{{ID: "1"}}})
+	setCache(context.Background(), nil, nil, "missing", SearchResult{})
+	setCache(context.Background(), nil, nil, "missing", SearchResult{Papers: []Paper{{ID: "1"}}})
 }
 
 func TestListToolDefinitionsIncludesRetrievalSchemas(t *testing.T) {

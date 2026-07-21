@@ -83,6 +83,7 @@ func modelConfigPaths() []string {
 		"../../scholar_models.json",
 		"../../../scholar_models.json",
 		"../../../../scholar_models.json",
+		"../../../../../scholar_models.json",
 	}
 }
 

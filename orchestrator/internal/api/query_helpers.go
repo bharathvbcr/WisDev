@@ -258,9 +258,9 @@ func buildOverviewSentence(fieldLabel, fieldFamily string, fieldConfidence float
 func buildTopicPrimer(fieldLabel string) string {
 	normalized := strings.ToLower(strings.TrimSpace(fieldLabel))
 	switch {
-	case containsAny(normalized, []string{"rlhf", "reinforcement learning from human feedback"}):
+	case containsAnyTerm(normalized, []string{"reinforcement learning from human feedback"}, []string{"rlhf"}):
 		return "RLHF (reinforcement learning from human feedback) fine-tunes a model against a reward signal learned from human preference data, usually after supervised instruction tuning. In large language model work, it is a core alignment step for steering outputs toward more helpful, safe, and instruction-following behavior."
-	case containsAny(normalized, []string{"rlaif", "reinforcement learning from ai feedback"}):
+	case containsAnyTerm(normalized, []string{"reinforcement learning from ai feedback"}, []string{"rlaif"}):
 		return "RLAIF (reinforcement learning from AI feedback) replaces some human preference judgments with model-generated critiques or rankings so alignment data can scale more cheaply."
 	case containsAny(normalized, []string{"reinforcement learning"}):
 		return "Reinforcement learning studies how an agent improves a policy through reward-driven feedback over sequential decisions."
@@ -271,8 +271,7 @@ func buildTopicPrimer(fieldLabel string) string {
 
 func isRLHFTopic(value string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(value))
-	return containsAny(normalized, []string{
-		"rlhf",
+	return containsAnyTerm(normalized, []string{
 		"reinforcement learning from human feedback",
 		"reward model",
 		"reward-model",
@@ -280,7 +279,7 @@ func isRLHFTopic(value string) bool {
 		"direct preference optimization",
 		"human preference",
 		"human feedback",
-	})
+	}, []string{"rlhf"})
 }
 
 func joinOverviewParts(parts ...string) string {
@@ -655,13 +654,17 @@ func collectCoreThemeDetails(papers []queryIntroductionPaper) []queryIntroductio
 	for i, paper := range papers {
 		ref := i + 1
 		text := strings.ToLower(strings.TrimSpace(paper.Abstract + " " + paper.Summary + " " + paper.Title))
-		if containsAny(text, []string{"rlhf", "rlaif", "reward model", "reward-model", "preference optimization", "direct preference optimization", "dpo", "ppo", "preference dataset", "human preference", "human feedback"}) {
+		if containsAnyTerm(text,
+			[]string{"reward model", "reward-model", "preference optimization", "direct preference optimization", "preference dataset", "human preference", "human feedback"},
+			[]string{"rlhf", "rlaif", "dpo", "ppo"}) {
 			record("Preference data, reward modeling, and policy optimization", ref)
 		}
 		if containsAny(text, []string{"alignment", "instruction following", "helpful", "harmless", "assistant behavior", "chatbot", "safety", "toxicity"}) {
 			record("Alignment behavior, safety, and instruction following", ref)
 		}
-		if containsAny(text, []string{"reward hacking", "specification gaming", "adversarial", "jailbreak", "multi-turn", "out-of-distribution", "ood"}) {
+		if containsAnyTerm(text,
+			[]string{"reward hacking", "specification gaming", "adversarial", "jailbreak", "multi-turn", "out-of-distribution"},
+			[]string{"ood"}) {
 			record("Reward hacking, robustness, and multi-turn evaluation", ref)
 		}
 		if containsAny(text, []string{"benchmark", "evaluation", "metric", "accuracy", "precision", "recall"}) {
@@ -811,6 +814,11 @@ func dedupeDirectionStructs(directions []queryIntroductionResearchDirection) []q
 	return normalized
 }
 
+// containsAny does raw substring matching, which is deliberate for stems and
+// plurals ("generaliz" -> "generalization", "benchmark" -> "benchmarks"). It is
+// wrong for short acronyms: "ppo" is inside "hippocampal" and "supports", "dpo"
+// is inside "endpoint", "ood" is inside "likelihood", "ai" is inside "domain".
+// Use containsAnyWord for those needles.
 func containsAny(value string, needles []string) bool {
 	for _, needle := range needles {
 		if strings.Contains(value, needle) {
@@ -818,6 +826,66 @@ func containsAny(value string, needles []string) bool {
 		}
 	}
 	return false
+}
+
+// containsAnyWord is the word-boundary sibling of containsAny: a needle only
+// matches when it is delimited by non-word characters, so hyphens, slashes and
+// punctuation still count as boundaries ("PPO-clip", "(OOD)") but longer words
+// never produce a false hit.
+func containsAnyWord(value string, needles []string) bool {
+	lowerValue := strings.ToLower(value)
+	for _, needle := range needles {
+		trimmed := strings.TrimSpace(strings.ToLower(needle))
+		if trimmed != "" && containsWholeWord(lowerValue, trimmed) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsAnyTerm matches phrases as substrings — so stems and plurals still
+// work — and acronyms only on word boundaries. Any needle short enough to hide
+// inside an unrelated word belongs in acronyms, not phrases.
+func containsAnyTerm(value string, phrases []string, acronyms []string) bool {
+	return containsAny(value, phrases) || containsAnyWord(value, acronyms)
+}
+
+// containsWholeWord reports whether needle occurs in haystack delimited by
+// non-word characters on both sides. Both arguments must already be lowercased.
+func containsWholeWord(haystack, needle string) bool {
+	for offset := 0; offset+len(needle) <= len(haystack); {
+		idx := strings.Index(haystack[offset:], needle)
+		if idx < 0 {
+			return false
+		}
+		start := offset + idx
+		end := start + len(needle)
+		if !wordRuneBefore(haystack, start) && !wordRuneAt(haystack, end) {
+			return true
+		}
+		offset = start + 1
+	}
+	return false
+}
+
+func wordRuneBefore(value string, idx int) bool {
+	if idx <= 0 {
+		return false
+	}
+	r, _ := utf8.DecodeLastRuneInString(value[:idx])
+	return isWordRune(r)
+}
+
+func wordRuneAt(value string, idx int) bool {
+	if idx >= len(value) {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(value[idx:])
+	return isWordRune(r)
+}
+
+func isWordRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
 func titleCasePreservingAcronyms(value string) string {

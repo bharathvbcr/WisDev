@@ -46,14 +46,9 @@ func TestModels(t *testing.T) {
 		is.Equal("env-light", models.Light)
 	})
 
-	t.Run("returns fallback if missing", func(t *testing.T) {
+	t.Run("missing file and missing env returns empty config", func(t *testing.T) {
 		resetAndUseTempDir(t, nil)
-		expected := ScholarModels{
-			Heavy:    "gemini-2.5-pro",
-			Standard: "gemini-2.5-flash",
-			Light:    "gemini-2.5-flash-lite",
-		}
-		is.Equal(expected, FetchModelConfig())
+		is.Equal(ScholarModels{}, FetchModelConfig())
 	})
 
 	t.Run("load from file", func(t *testing.T) {

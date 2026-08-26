@@ -502,14 +502,14 @@ func TestRegisterQuestioningRoutes_WithSeededSession(t *testing.T) {
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &payload))
 		options := sliceAnyMap(payload["options"])
 		assertOptionsHaveDescriptions(t, options)
-		assert.NotEmpty(t, options)
+		assert.Contains(t, optionLabels(options), "Reward Modeling benchmark study")
 
 		latest, err := gw.StateStore.LoadAgentSession(staleSessionID)
 		require.NoError(t, err)
 		for _, question := range sliceAnyMap(latest["questions"]) {
 			if wisdev.AsOptionalString(question["id"]) == "q5_study_types" {
 				assert.Equal(t, "q4:policy optimization|reward modeling", wisdev.AsOptionalString(question["optionsContextKey"]))
-				assert.NotEmpty(t, sliceAnyMap(question["options"]))
+				assert.Contains(t, optionLabels(sliceAnyMap(question["options"])), "Reward Modeling benchmark study")
 				return
 			}
 		}
@@ -573,7 +573,7 @@ func TestRegisterQuestioningRoutes_WithSeededSession(t *testing.T) {
 					"jsonResult": `{"subtopics":["Single-cell perturbation screens","Glioblastoma biomarker validation","Tumor subtype context"],"keywords":["CRISPR","single-cell","glioblastoma"],"queryVariations":["single-cell CRISPR perturbation biomarkers validation","glioblastoma subtype biomarker perturbation screens"],"explanation":"AI inferred subtopics from the biomedical query."}`,
 					"modelUsed":  "mock-biomedical-q4",
 				}))
-			case strings.Contains(captured.Prompt, "study types"):
+			case strings.Contains(captured.Prompt, "methodological study types"):
 				require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
 					"jsonResult": `{"studyTypes":["single-cell perturbation experiment","prospective cohort validation study","case-control biomarker study"],"matchedSignals":["single-cell screens","biomarker validation"],"explanation":"AI inferred study designs from selected subtopics."}`,
 					"modelUsed":  "mock-biomedical-q5",
@@ -1052,7 +1052,7 @@ func TestRegisterQuestioningRoutes_WithSeededSession(t *testing.T) {
 		require.NoError(t, json.Unmarshal(q5w.Body.Bytes(), &q5Payload))
 		q5Options := sliceAnyMap(q5Payload["options"])
 		assertOptionsHaveDescriptions(t, q5Options)
-		assert.NotEmpty(t, q5Options)
+		assert.Contains(t, optionLabels(q5Options), "Alignment benchmark study")
 	})
 
 	t.Run("question regenerate supports evidence quality and output focus", func(t *testing.T) {

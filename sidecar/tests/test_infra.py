@@ -102,6 +102,6 @@ def test_rate_limiter_config():
     # Since we can't easily change env vars for the already-imported main module
     # without reloading it, we check the current state (which should be memory in test env)
     if not os.environ.get("UPSTASH_REDIS_URL"):
-        # slowapi/limits uses None or "memory://" depending on version, 
+        # slowapi/limits uses None or "memory://" depending on version,
         # but typically None means "no explicit storage URI provided" -> defaults to memory
         assert limiter._storage_uri is None or limiter._storage_uri == "memory://"

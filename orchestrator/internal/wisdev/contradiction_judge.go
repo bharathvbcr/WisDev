@@ -50,6 +50,16 @@ func judgeContradictionPairsWithLLM(ctx context.Context, h *Hypothesis, candidat
 		return candidates
 	}
 	if len(pairs) > maxContradictionPairsJudged {
+		// Candidates past the cap are NOT judged. This function returns only the
+		// pairs it CONFIRMED, so a caller that treats "absent from the result" as
+		// "checked and cleared" would silently clear contradictions nobody read —
+		// the defect fixed upstream in ScholarLM, where the callers that make it
+		// exploitable live. No such caller exists here yet; log it so adding one
+		// does not reintroduce the bug invisibly.
+		slog.Warn("contradiction judge batch truncated; candidates past the cap were not examined",
+			"component", "wisdev.contradictions", "operation", "adjudicate",
+			"cap", maxContradictionPairsJudged, "dropped", len(pairs)-maxContradictionPairsJudged,
+			"result", "partial", "error_code", "CONTRADICTION_ADJUDICATION_TRUNCATED")
 		pairs = pairs[:maxContradictionPairsJudged]
 	}
 

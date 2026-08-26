@@ -175,3 +175,13 @@ func TestInferEvidenceLevel_CaseControl(t *testing.T) {
 		t.Fatalf("expected case-control evidence level, got %q", got)
 	}
 }
+
+func TestInferEvidenceLevel_PrimaryDesignBeatsBareReview(t *testing.T) {
+	got := InferEvidenceLevel(Paper{
+		Title:    "Efficacy of drug X",
+		Abstract: "We conducted a randomized controlled trial. We review prior work on related therapies.",
+	})
+	if got != "rct" {
+		t.Fatalf("expected rct when abstract has both RCT and bare review language, got %q", got)
+	}
+}

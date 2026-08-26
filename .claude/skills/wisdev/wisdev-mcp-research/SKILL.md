@@ -1,74 +1,85 @@
 ---
 name: wisdev-mcp-research
-description: "Use when WisDev is wired in as an MCP server and you need to search academic literature, look up a paper, find claim-grounded evidence, or look up an author from inside Claude Code, Cursor, or another MCP client. Examples: \"find papers on X\", \"what's the evidence for Y\", \"look up this DOI\", \"what has this author published\""
+description: "Use when ScholarLM/WisDev MCP is available and you need academic search, paper lookup, claim evidence, author lookup, or async ScholarDoc manuscript jobs from Claude Code, Cursor, or another MCP client. Prefer SaaS remote MCP over wisdev-arc stdio."
 ---
 
-# Researching with the WisDev MCP Tools
+# Researching with ScholarLM Native MCP
 
 ## When to Use
 
-- WisDev is registered as an MCP server (`claude mcp add wisdev -- wisdev mcp`) and you need literature answers, not codebase answers.
-- A user asks for papers/evidence/citations on a topic, a specific paper by ID/DOI/arXiv, or an author's publication list.
-- You need claim-grounded evidence snippets to cite in an answer, not just a freeform literature search.
+- ScholarLM SaaS MCP is registered (HTTP/SSE via rust_gateway, or `scripts/agent/mcp-server.mjs` stdio→HTTP bridge) and you need literature answers or a Full Paper / ScholarDoc job.
+- A user asks for papers/evidence/citations, a DOI/arXiv lookup, an author list, or a grounded manuscript draft.
+- You need claim-grounded snippets to cite — use returned IDs/DOIs only.
 
-> MCP gives you search + DocGen tools, not the full autonomous loop. For the multi-iteration research loop with hypothesis generation and gap analysis, use the CLI (`wisdev "question"`) — see [[wisdev-yolo]].
+> MCP is **not** the multi-iteration YOLO research loop. For that, use the CLI (`wisdev "question"` / ScholarLM YOLO routes) — see [[wisdev-yolo]].
 
-## Setup (once)
+## Setup (SaaS-first)
 
 ```bash
 # Skills (Claude Code + Cursor)
 ./scripts/install-skills.sh
-
-# MCP — Cursor (merges into existing mcpServers)
-wisdev setup --write ~/.cursor/mcp.json --binary
-
-# MCP — Claude Code
-claude mcp add wisdev -- "$(command -v wisdev)" mcp
 ```
 
-Or hand-write config (absolute binary path preferred):
+Cursor / Codex `.cursor/mcp.json`:
 
 ```json
-{"mcpServers": {"wisdev": {"command": "/absolute/path/to/wisdev", "args": ["mcp", "--provider", "openalex,arxiv"]}}}
+{
+  "mcpServers": {
+    "scholarlm": {
+      "command": "node",
+      "args": ["scripts/agent/mcp-server.mjs"],
+      "env": {
+        "SCHOLARLM_AGENT_BASE_URL": "http://127.0.0.1:8080",
+        "SCHOLARLM_AGENT_TOKEN": "<firebase-id-token-for-non-local>"
+      }
+    }
+  }
+}
 ```
 
-The stdio server keeps stdout protocol-clean; logs go to stderr. Optional flags: `--provider openalex,arxiv`, `--offline`.
-On `initialize`, the server returns routing **instructions** plus prompts
-(`wisdev_literature_search`, `wisdev_evidence_check`, `wisdev_docgen`).
+Claude Code remote SSE:
+
+```bash
+claude mcp add scholarlm http://127.0.0.1:8080/wisdev/mcp/sse
+```
+
+Optional local Go stdio (search/config; no FullPaper persist unless wired):  
+`SCHOLARLM_MCP_MODE=go` → `go run ./backend/go_orchestrator/cmd/mcp`.
+
+Authenticate with **Authorization: Bearer** (or local gateway user headers). Do not pass secrets in tool arguments (`scholarlmSignIn` is instructional only).
+
+Full ops guide: `docs/ops/MCP_SERVER_GUIDE.md`.
 
 ## Tools
 
-| Tool | Purpose | Key params |
+| Tool | Purpose | Notes |
 |---|---|---|
 | `wisdevSearchPapers` | Multi-provider paper search | `query`, `sources`, `minCitations` |
-| `wisdevPaperLookup` | Single-paper metadata by ID/DOI/arXiv | `paperId` |
-| `wisdevEvidenceSearch` | Claim-grounded evidence snippets | `claim` |
+| `wisdevPaperLookup` | Metadata by ID/DOI/arXiv | `paperId` |
+| `wisdevEvidenceSearch` | Claim-oriented snippets | Search + abstracts — not a separate RAG index |
 | `wisdevAuthorSearch` | Papers by author ID | `authorId` |
-| `wisdevGenerateManuscript` | DocGen — see [[wisdev-docgen]] | `query`, `words`, `flow`, ... |
-| `wisdevListProviders` | Registered providers + health (valid `sources` values) | — |
-| `wisdevCapabilities` | Full control-surface overview: tools, tunable groups, resources | — |
-| `wisdevGetConfig` / `wisdevTuneConfig` / `wisdevResetConfig` | Read / change / reset runtime knobs | `settings` |
+| `wisdevGenerateManuscript` | ScholarDoc async start | Returns `jobId` + `pollHint`; same store as `/full-paper/*` |
+| `scholarlmExportPaper` | Gate-aware export | Requires `jobId` |
+| `scholarlmListScripts` / `RunScript` | Capability router | Remote: `search`, `paper.*`. Local-only: `stack.*`. Never shell on SaaS |
+| `wisdevGetConfig` / `Tune` / `Reset` / `ListProviders` / `Capabilities` | Runtime knobs | Session defaults |
 
-Legacy `scholarlm*` aliases (e.g. `scholarlmSearchPapers`, `scholarlmGenerateManuscript`) are also accepted on `tools/call`.
+Legacy `scholarlm*` aliases remain accepted on `tools/call`.
 
 ## Workflow
 
-1. `wisdevListProviders` (or `wisdevCapabilities`) once per session if you're unsure which `sources` values are valid for this deployment.
-2. Pick the narrowest tool for the question:
-   - General topic search → `wisdevSearchPapers`
-   - Known paper, ID/DOI in hand → `wisdevPaperLookup`
-   - "What's the evidence that X" / need quotable snippets → `wisdevEvidenceSearch`
-   - "What has author Y published" → `wisdevAuthorSearch`
-3. If results are too sparse or too broad, retune before re-querying rather than guessing flags per call: `wisdevTuneConfig({"settings": {"search.limit": 20, "search.minCitations": 5}})`. Tuned values persist as defaults for subsequent calls in the session.
-4. Cite returned papers by their returned IDs/DOIs; don't invent citation text not present in the tool result.
+1. `wisdevCapabilities` or `wisdevListProviders` once if unsure of valid `sources`.
+2. Narrowest tool: topic → `wisdevSearchPapers`; known ID → `PaperLookup`; claim → `EvidenceSearch`; author → `AuthorSearch`.
+3. Manuscript: `wisdevGenerateManuscript` → poll `scholarlmRunScript` with `paper.status` / `paper.manuscript` / `paper.export` (or HTTP `/full-paper/*`). Do not expect a multi-minute sync hold.
+4. Cite returned IDs/DOIs only.
 
-## Tuning knobs
+## Tuning
 
-Discover with `wisdevGetConfig`, change with `wisdevTuneConfig({"settings": {...}})`, restore with `wisdevResetConfig`. Groups: `search.*`, `evidence.*`, `author.*`, `manuscript.*`, `server.*` (e.g. `search.limit`, `search.defaultSources`, `search.minCitations`, `manuscript.maxPapers`, `manuscript.genre`, `manuscript.reviewRounds`, `server.timeoutSeconds`). Out-of-range/unknown keys are rejected; valid keys in the same call still apply. Same state is also readable as resources: `wisdev://config`, `wisdev://providers`, `wisdev://capabilities`.
+`wisdevGetConfig` → `wisdevTuneConfig({"settings": {...}})` → `wisdevResetConfig`. Groups: `search.*`, `evidence.*`, `author.*`, `manuscript.*`, `server.*`. Resources: `wisdev://config`, `wisdev://providers`, `wisdev://capabilities`.
 
-## Remote / HTTP MCP
+## Remote endpoints
 
-- Local: `http://127.0.0.1:8081/wisdev/mcp` (needs `wisdev serve` running — see [[wisdev-embed]])
-- Prod gateway: `https://rust-gateway-cyucrnqqnq-uc.a.run.app/wisdev/mcp` (auth required)
+- Local gateway: `http://127.0.0.1:8080/wisdev/mcp`
+- Production: rust_gateway `/wisdev/mcp` (auth required)
+- Flag: `WISDEV_MCP_ENABLED` (default on)
 
-Full reference: `docs/MCP_CLIENTS.md`.
+ADK in-process bridge is **search/config only**; ScholarDoc stays on MCP HTTP + script router.

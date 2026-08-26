@@ -10,7 +10,6 @@ addopts = [
 [tool.coverage.run]
 omit = [
     "tests/*",
-    "load-testing/*",
     "proto/*",
     "sidecar_proto/*",
     "grpc_server.py",

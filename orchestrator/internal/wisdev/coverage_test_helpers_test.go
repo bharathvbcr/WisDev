@@ -52,6 +52,7 @@ type coverageFakeRows struct {
 	errors     []error
 	index      int
 	closed     bool
+	iterErr    error
 	commandTag pgconn.CommandTag
 	fieldDesc  []pgconn.FieldDescription
 	rawValues  [][]byte
@@ -62,7 +63,7 @@ func (r *coverageFakeRows) Close() {
 }
 
 func (r *coverageFakeRows) Err() error {
-	return nil
+	return r.iterErr
 }
 
 func (r *coverageFakeRows) CommandTag() pgconn.CommandTag {

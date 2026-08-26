@@ -1,7 +1,9 @@
 package evidence
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 
@@ -32,12 +34,15 @@ func TestBuildDossier(t *testing.T) {
 		assert.Equal(t, "job-123", dossier.JobID)
 		assert.Equal(t, "graph neural networks", dossier.Query)
 		assert.Len(t, dossier.CanonicalSources, 1)
-		assert.GreaterOrEqual(t, len(dossier.VerifiedClaims), 4)
+		// DOI presence alone is identity_present / needs_review, not content-verified.
+		assert.Empty(t, dossier.VerifiedClaims)
+		assert.GreaterOrEqual(t, len(dossier.TentativeClaims), 4)
 		assert.Equal(t, "doi:10.1000/graph", dossier.CanonicalSources[0].CanonicalID)
 		assert.Equal(t, 1, dossier.CoverageMetrics["sourceCount"])
-		assert.GreaterOrEqual(t, dossier.CoverageMetrics["verifiedClaimCount"], 4)
+		assert.Equal(t, 0, dossier.CoverageMetrics["verifiedClaimCount"])
+		assert.GreaterOrEqual(t, dossier.CoverageMetrics["identityStrongCount"], 4)
 		assert.Equal(t, 1, dossier.CoverageMetrics["resolvedSourceCount"])
-		assert.Contains(t, dossier.VerifiedClaims[0].ClaimText, "Graph neural networks improve retrieval")
+		assert.Contains(t, dossier.TentativeClaims[0].ClaimText, "Graph neural networks improve retrieval")
 	})
 
 	t.Run("validation errors", func(t *testing.T) {
@@ -207,14 +212,77 @@ func TestBuildRawMaterialSetCorroboratesAcrossSources(t *testing.T) {
 }
 
 func TestDerivePacketVerifierStatus(t *testing.T) {
-	// Strongly-resolved (DOI/arXiv-grade) -> verified.
-	assert.Equal(t, "verified", derivePacketVerifierStatus(CanonicalCitationRecord{Resolved: true, ResolutionConfidence: 0.95}))
-	assert.Equal(t, "verified", derivePacketVerifierStatus(CanonicalCitationRecord{Resolved: true, ResolutionConfidence: 0.82}))
+	// Strong bibliographic IDs are identity_present → needs_review, never "verified".
+	assert.Equal(t, "needs_review", derivePacketVerifierStatus(CanonicalCitationRecord{Resolved: true, ResolutionConfidence: 0.95, SourceIDs: CanonicalIDs{DOI: "10.1/2"}}))
+	assert.Equal(t, "needs_review", derivePacketVerifierStatus(CanonicalCitationRecord{Resolved: true, ResolutionConfidence: 0.82, SourceIDs: CanonicalIDs{SemanticScholar: "S1"}}))
+	assert.True(t, hasStrongBibliographicIdentity(CanonicalCitationRecord{Resolved: true, ResolutionConfidence: 0.95, SourceIDs: CanonicalIDs{DOI: "10.1/2"}}))
 	// Resolved only by a fuzzy title match -> needs_review, not verified.
 	assert.Equal(t, "needs_review", derivePacketVerifierStatus(CanonicalCitationRecord{Resolved: true, ResolutionConfidence: 0.7, Title: "A Title"}))
+	assert.False(t, hasStrongBibliographicIdentity(CanonicalCitationRecord{Resolved: true, ResolutionConfidence: 0.95, Title: "A Title"}))
 	// Unresolved but titled -> needs_review; untitled -> provisional.
 	assert.Equal(t, "needs_review", derivePacketVerifierStatus(CanonicalCitationRecord{Resolved: false, Title: "A Title"}))
 	assert.Equal(t, "provisional", derivePacketVerifierStatus(CanonicalCitationRecord{}))
+}
+
+func TestBuildRawMaterialSetDedupesByCanonicalID(t *testing.T) {
+	raw, _, err := BuildRawMaterialSet("job-dedupe", "duplicate doi", []search.Paper{
+		{ID: "doi:10.1/dup", DOI: "10.1/dup", Title: "First Copy of Duplicate Paper", Abstract: "Duplicate sources share one CanonicalID. Claims must not double-count."},
+		{ID: "openalex:W999", DOI: "10.1/dup", Title: "Second Copy of Duplicate Paper", Abstract: "Duplicate sources share one CanonicalID. Claims must not double-count."},
+	})
+	require.NoError(t, err)
+	assert.Len(t, raw.CanonicalSources, 1)
+	assert.Equal(t, "doi:10.1/dup", raw.CanonicalSources[0].CanonicalID)
+	assert.Equal(t, 1, raw.CoverageMetrics["sourceCount"])
+}
+
+func TestBuildContradictionPayloadsSkipsSelfLinks(t *testing.T) {
+	packets := []EvidencePacket{
+		{
+			PacketID:               "same",
+			ClaimText:              "Retrieval augmentation improved diagnostic accuracy in the cohort",
+			ContradictionPacketIDs: []string{"same", "other"},
+		},
+		{
+			PacketID:  "other",
+			ClaimText: "Retrieval augmentation did not improve diagnostic accuracy in the cohort",
+		},
+	}
+	payloads := buildContradictionPayloads(packets)
+	require.Len(t, payloads, 1)
+	ids, ok := payloads[0]["packetIds"].([]string)
+	require.True(t, ok)
+	assert.Equal(t, []string{"other", "same"}, ids)
+}
+
+func TestSanitizeStringRuneSafe(t *testing.T) {
+	in := "日本語テスト"
+	got := sanitizeString(in, 5)
+	assert.Equal(t, 5, utf8.RuneCountInString(got))
+	assert.True(t, utf8.ValidString(got))
+	assert.False(t, strings.ContainsRune(got, utf8.RuneError))
+}
+
+func TestPolarityUngatedForDistinctSupport(t *testing.T) {
+	raw, _, err := BuildRawMaterialSet("job-polarity", "polarity check", []search.Paper{{
+		ID:    "doi:10.9/polarity",
+		DOI:   "10.9/polarity",
+		Title: "Polarity Flip Paper On Clinical Retrieval Augmentation",
+		Abstract: "Retrieval augmentation improved diagnostic accuracy in the cohort. " +
+			"Retrieval augmentation did not improve diagnostic accuracy in the cohort.",
+	}})
+	require.NoError(t, err)
+	foundNote := false
+	for _, packet := range raw.ClaimPackets {
+		assert.NotEqual(t, "verified", packet.VerifierStatus)
+		for _, note := range packet.VerifierNotes {
+			if strings.Contains(note, "polarity") {
+				foundNote = true
+			}
+		}
+	}
+	assert.True(t, foundNote, "distinct opposed support should emit a polarity verifier note")
+	assert.Equal(t, 0, raw.CoverageMetrics["verifiedClaimCount"])
+	assert.Greater(t, raw.CoverageMetrics["identityStrongCount"], 0)
 }
 
 func TestAssignContradictions(t *testing.T) {
@@ -246,6 +314,16 @@ func TestAssignContradictions(t *testing.T) {
 		packets := []EvidencePacket{
 			{PacketID: "a", ClaimText: "Retrieval augmentation improved diagnostic accuracy", SectionRelevance: []string{"results"}},
 			{PacketID: "b", ClaimText: "Retrieval augmentation did not improve diagnostic accuracy", SectionRelevance: []string{"discussion"}},
+		}
+		assignContradictions(packets)
+		assert.Empty(t, packets[0].ContradictionPacketIDs)
+		assert.Empty(t, packets[1].ContradictionPacketIDs)
+	})
+
+	t.Run("does not self-link identical packet IDs", func(t *testing.T) {
+		packets := []EvidencePacket{
+			{PacketID: "dup", ClaimText: "Retrieval augmentation improved diagnostic accuracy in the cohort", SectionRelevance: []string{"results"}},
+			{PacketID: "dup", ClaimText: "Retrieval augmentation did not improve diagnostic accuracy in the cohort", SectionRelevance: []string{"results"}},
 		}
 		assignContradictions(packets)
 		assert.Empty(t, packets[0].ContradictionPacketIDs)

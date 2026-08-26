@@ -48,7 +48,7 @@ async def test_rate_limit_handler():
     from main import app
     from slowapi.errors import RateLimitExceeded
     from fastapi.responses import JSONResponse
-    
+
     handler = app.exception_handlers.get(RateLimitExceeded)
     if handler:
         request = MagicMock(spec=Request)
@@ -56,7 +56,7 @@ async def test_rate_limit_handler():
         mock_limit = MagicMock()
         mock_limit.error_message = "limit exceeded"
         exc = RateLimitExceeded(mock_limit)
-        
+
         # If the handler is a mock or returns a mock, just pass
         response = handler(request, exc)
         if isinstance(response, JSONResponse):

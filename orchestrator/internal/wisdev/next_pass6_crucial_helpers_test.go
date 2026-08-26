@@ -23,7 +23,7 @@ func TestNextPass6CrucialWisdevHelpers(t *testing.T) {
 		selected := claimPacketsByIDs(packets, []string{"missing", "p2", "p1", "p2"})
 		require.Len(t, selected, 3)
 		assert.Equal(t, []string{"p2", "p1", "p2"}, []string{selected[0].PacketID, selected[1].PacketID, selected[2].PacketID})
-		assert.Equal(t, []string{"p2", "p1"}, uniquePacketIDs(selected))
+		assert.Equal(t, []string{"p1", "p2"}, uniquePacketIDs(selected))
 		assert.Empty(t, claimPacketsByIDs(packets, []string{"missing"}))
 	})
 

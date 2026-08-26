@@ -629,8 +629,11 @@ func NewAgentGateway(db DBProvider, rdb redis.UniversalClient, journal *RuntimeJ
 		Gate:             rag.NewEvidenceGate(llmClient),
 		Loop:             NewAutonomousLoop(resolvedSearchRegistry, llmClient),
 	}
-	gw.QuestRuntime = NewResearchQuestRuntime(gw)
+	// Memory must be constructed before QuestRuntime: NewResearchQuestRuntime
+	// copies gateway.Memory into rt.memory (and falls back to a nil-DB
+	// consolidator when Memory is still unset).
 	gw.Memory = NewMemoryConsolidator(db, memoryStore)
+	gw.QuestRuntime = NewResearchQuestRuntime(gw)
 	gw.ResearchMemory = NewResearchMemoryCompiler(gw.StateStore, journal)
 	gw.PythonExecute = gw.defaultPythonExecutor
 	gw.Executor = NewPlanExecutor(registry, policyCfg, llmClient, gw.Brain, rdb, gw.PythonExecute, adkRuntime, resolvedSearchRegistry)

@@ -8,9 +8,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bharathvbcr/wisdev-arc/orchestrator/internal/search"
 )
+
+// sentenceSplitPattern splits prose on sentence-ending punctuation plus whitespace.
+// Hoisted out of extractSentences so hot dossier builds do not recompile per call.
+var sentenceSplitPattern = regexp.MustCompile(`[.!?]\s+`)
 
 type extractedClaim struct {
 	text         string
@@ -60,6 +65,8 @@ func BuildRawMaterialSet(jobID string, query string, papers []search.Paper) (Man
 	sourceClusters := make([]ManuscriptSourceCluster, 0, len(papers))
 	visualEvidence := make([]VisualEvidence, 0, len(papers))
 	gaps := make([]string, 0)
+	identityStrongCount := 0
+	seenCanonicalIDs := make(map[string]struct{}, len(papers))
 	packetCounter := 0
 
 	for idx, paper := range papers {
@@ -69,7 +76,15 @@ func BuildRawMaterialSet(jobID string, query string, papers []search.Paper) (Man
 		}
 
 		record := BuildCanonicalRecord(paper)
+		if cid := strings.TrimSpace(record.CanonicalID); cid != "" {
+			if _, seen := seenCanonicalIDs[cid]; seen {
+				slog.Debug("skipping duplicate paper by CanonicalID", "job_id", jobID, "canonical_id", cid, "index", idx)
+				continue
+			}
+			seenCanonicalIDs[cid] = struct{}{}
+		}
 		canonical = append(canonical, record)
+		strongIdentity := hasStrongBibliographicIdentity(record)
 
 		clusterID := fmt.Sprintf("cluster_%d_%d", now, idx+1)
 		claims, visuals := extractClaimsFromPaper(paper, record)
@@ -91,17 +106,21 @@ func BuildRawMaterialSet(jobID string, query string, papers []search.Paper) (Man
 			// Use a DISTINCT adjacent sentence as the evidence span when available, so
 			// the span is corroborating text rather than a copy of the claim.
 			snippet, supportLabel := claim.text, "asserts"
+			hasDistinctSupport := false
 			if distinct := strings.TrimSpace(claim.support); distinct != "" && normalizeTitle(distinct) != normalizeTitle(claim.text) {
 				snippet, supportLabel = distinct, "corroborates"
+				hasDistinctSupport = true
 			}
 			verifierStatus := derivePacketVerifierStatus(record)
 			var verifierNotes []string
-			// Entailment sanity check: if a distinct supporting sentence is on the
-			// same subject but flips polarity vs the claim, the source's own text is
-			// inconsistent — do not call the packet "verified".
-			if verifierStatus == "verified" && !claimSnippetConsistent(claim.text, claim.support) {
+			// Polarity check runs whenever support is distinct. Bibliographic identity
+			// strength must not gate content-consistency review (identity ≠ verified).
+			if hasDistinctSupport && !claimSnippetConsistent(claim.text, claim.support) {
 				verifierStatus = "needs_review"
 				verifierNotes = append(verifierNotes, "claim and its supporting sentence disagree in polarity")
+			}
+			if strongIdentity {
+				identityStrongCount++
 			}
 			packet := EvidencePacket{
 				PacketID:         packetID,
@@ -209,7 +228,8 @@ func BuildRawMaterialSet(jobID string, query string, papers []search.Paper) (Man
 	coverageMetrics := map[string]any{
 		"sourceCount":         len(canonical),
 		"claimPacketCount":    len(claimPackets),
-		"verifiedClaimCount":  len(verified),
+		"verifiedClaimCount":  len(verified), // content verification only; stays 0 until entailment lands
+		"identityStrongCount": identityStrongCount,
 		"tentativeClaimCount": len(tentative),
 		"resolvedSourceCount": countResolved(canonical),
 		"visualEvidenceCount": len(visualEvidence),
@@ -422,6 +442,8 @@ func extractQuantitativeClaims(text string) []QuantitativeClaim {
 // sentence are consistent: true when there is no distinct snippet or they address
 // different subjects (cannot judge), false only when they share a subject but flip
 // polarity (one negates the other) — a real same-source inconsistency.
+//
+// Called whenever support is distinct (not gated on verifier status).
 func claimSnippetConsistent(claim, snippet string) bool {
 	snippet = strings.TrimSpace(snippet)
 	if snippet == "" || normalizeTitle(snippet) == normalizeTitle(claim) {
@@ -440,17 +462,23 @@ func fallbackClaimText(title string, abstract string) string {
 	return sanitizeString(title, 1024)
 }
 
-// derivePacketVerifierStatus reports how strongly a claim packet's SOURCE is
-// resolved — NOT whether the claim text was independently fact-checked. The
-// pipeline runs no entailment check: the evidence span is the claim sentence
-// itself, so "verified" must not imply content verification. It therefore means
-// the citation resolves to a strong canonical identifier (DOI / arXiv / OpenAlex /
-// Semantic Scholar, confidence >= 0.8); a title-only fuzzy match is "needs_review"
-// (a real but weakly-identified source), and an unresolved/untitled source is
-// "provisional".
+// hasStrongBibliographicIdentity reports DOI/arXiv/OpenAlex/S2 resolution at
+// confidence >= 0.8. This is identity strength only — never content verification.
+func hasStrongBibliographicIdentity(record CanonicalCitationRecord) bool {
+	hasPersistentID := strings.TrimSpace(record.SourceIDs.DOI) != "" ||
+		strings.TrimSpace(record.SourceIDs.Arxiv) != "" ||
+		strings.TrimSpace(record.SourceIDs.OpenAlex) != "" ||
+		strings.TrimSpace(record.SourceIDs.SemanticScholar) != ""
+	return record.Resolved && hasPersistentID && record.ResolutionConfidence >= 0.8
+}
+
+// derivePacketVerifierStatus never returns "verified" for bibliographic identity
+// alone. Strong persistent IDs and title-resolved sources are "needs_review";
+// untitled/unresolved sources are "provisional". Content verification (entailment)
+// is the only path that may later emit "verified".
 func derivePacketVerifierStatus(record CanonicalCitationRecord) string {
-	if record.Resolved && record.ResolutionConfidence >= 0.8 {
-		return "verified"
+	if hasStrongBibliographicIdentity(record) {
+		return "needs_review"
 	}
 	if strings.TrimSpace(record.Title) != "" {
 		return "needs_review"
@@ -469,9 +497,13 @@ func annotateCorroboration(packets []EvidencePacket) {
 		indices []int
 		sources map[string]struct{}
 	}
+	tokenMaps := make([]map[string]struct{}, len(packets))
+	for i := range packets {
+		tokenMaps[i] = contradictionSubjectTokens(packets[i].ClaimText)
+	}
 	groups := make([]*corroborationGroup, 0)
 	for i := range packets {
-		tokens := contradictionSubjectTokens(packets[i].ClaimText)
+		tokens := tokenMaps[i]
 		if len(tokens) == 0 {
 			continue
 		}
@@ -536,6 +568,10 @@ func jaccardTokenSets(a, b map[string]struct{}) float64 {
 // manufactured dozens of spurious "contradictions"; that star topology and the
 // cross-section fallback are removed here.
 func assignContradictions(packets []EvidencePacket) {
+	tokenMaps := make([]map[string]struct{}, len(packets))
+	for i := range packets {
+		tokenMaps[i] = contradictionSubjectTokens(packets[i].ClaimText)
+	}
 	bySection := map[string][]int{}
 	for idx := range packets {
 		packet := &packets[idx]
@@ -548,9 +584,12 @@ func assignContradictions(packets []EvidencePacket) {
 		for a := 0; a < len(idxs); a++ {
 			for b := a + 1; b < len(idxs); b++ {
 				pa, pb := &packets[idxs[a]], &packets[idxs[b]]
+				if pa.PacketID == "" || pa.PacketID == pb.PacketID {
+					continue
+				}
 				opposed := isPotentiallyContradictory(pa.ClaimText, pa.ClaimType) ||
 					isPotentiallyContradictory(pb.ClaimText, pb.ClaimType)
-				if !opposed || !sharesContradictionSubject(pa.ClaimText, pb.ClaimText) {
+				if !opposed || !sharesContradictionSubjectTokens(tokenMaps[idxs[a]], tokenMaps[idxs[b]]) {
 					continue
 				}
 				pa.ContradictionPacketIDs = uniqueStrings(append(pa.ContradictionPacketIDs, pb.PacketID))
@@ -586,7 +625,7 @@ func buildContradictionPayloads(packets []EvidencePacket) []map[string]any {
 	}
 	for _, packet := range packets {
 		for _, otherID := range packet.ContradictionPacketIDs {
-			if otherID == "" {
+			if otherID == "" || otherID == packet.PacketID {
 				continue
 			}
 			left := packet.PacketID
@@ -631,7 +670,7 @@ func extractSentences(text string, limit int) []string {
 	if trimmed == "" || limit <= 0 {
 		return nil
 	}
-	parts := regexp.MustCompile(`[.!?]\s+`).Split(trimmed, -1)
+	parts := sentenceSplitPattern.Split(trimmed, -1)
 	out := make([]string, 0, limit)
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
@@ -797,7 +836,10 @@ func contradictionSubjectTokens(text string) map[string]struct{} {
 // sharesContradictionSubject requires at least two shared content tokens so two
 // claims must genuinely address the same subject before being linked.
 func sharesContradictionSubject(a, b string) bool {
-	ta, tb := contradictionSubjectTokens(a), contradictionSubjectTokens(b)
+	return sharesContradictionSubjectTokens(contradictionSubjectTokens(a), contradictionSubjectTokens(b))
+}
+
+func sharesContradictionSubjectTokens(ta, tb map[string]struct{}) bool {
 	if len(ta) == 0 || len(tb) == 0 {
 		return false
 	}
@@ -851,19 +893,25 @@ func validatePaper(paper *search.Paper, idx int) error {
 	return nil
 }
 
+// truncateRunes cuts s to at most maxLen runes without splitting UTF-8 code points.
+func truncateRunes(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= maxLen {
+		return s
+	}
+	return string([]rune(s)[:maxLen])
+}
+
 func sanitizeString(s string, maxLen int) string {
 	s = strings.TrimSpace(s)
-	if len(s) > maxLen {
-		s = s[:maxLen]
-	}
-	return s
+	return truncateRunes(s, maxLen)
 }
 
 func sanitizeURL(u string) string {
 	u = strings.TrimSpace(u)
-	if len(u) > 2048 {
-		u = u[:2048]
-	}
+	u = truncateRunes(u, 2048)
 	if u != "" && !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
 		return ""
 	}
@@ -895,10 +943,7 @@ func validateYear(year int) int {
 }
 
 func hashID(id string) string {
-	if len(id) > 16 {
-		return id[:16]
-	}
-	return id
+	return truncateRunes(id, 16)
 }
 
 func countResolved(records []CanonicalCitationRecord) int {
@@ -933,13 +978,22 @@ func firstSentence(text string) string {
 	if trimmed == "" {
 		return ""
 	}
+	// Take the EARLIEST terminator across all separators, not the first
+	// separator that happens to appear in loop order. Scanning "." before "!"
+	// made "Results were striking! We found X." return through the later ".",
+	// swallowing a whole sentence.
+	best := -1
 	for _, sep := range []string{".", "!", "?"} {
-		if idx := strings.Index(trimmed, sep); idx > 20 {
-			return strings.TrimSpace(trimmed[:idx+1])
+		idx := strings.Index(trimmed, sep)
+		if idx > 20 && (best == -1 || idx < best) {
+			best = idx
 		}
 	}
-	if len(trimmed) > 240 {
-		return strings.TrimSpace(trimmed[:240]) + "..."
+	if best > 20 {
+		return strings.TrimSpace(trimmed[:best+1])
+	}
+	if utf8.RuneCountInString(trimmed) > 240 {
+		return strings.TrimSpace(truncateRunes(trimmed, 240)) + "..."
 	}
 	return trimmed
 }

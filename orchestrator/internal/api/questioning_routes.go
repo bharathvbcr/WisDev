@@ -244,7 +244,9 @@ func defaultEvidenceQualityOptions(query string, domain string, contextGroups ..
 	text := strings.ToLower(strings.TrimSpace(query + " " + domain))
 	anchors := dynamicQuestionOptionContextAnchors(query, domain, contextGroups...)
 	options := make([]string, 0, 12)
-	if containsAny(text, []string{"rlhf", "reinforcement learning from human feedback", "preference learning", "human feedback", "reward model", "reward modeling", "alignment"}) {
+	if containsAnyTerm(text,
+		[]string{"reinforcement learning from human feedback", "preference learning", "human feedback", "reward model", "reward modeling", "alignment"},
+		[]string{"rlhf"}) {
 		options = append(options,
 			"Human preference label reliability",
 			"Reward model validation benchmarks",
@@ -281,7 +283,7 @@ func defaultEvidenceQualityOptions(query string, domain string, contextGroups ..
 		if len(anchors) > 1 {
 			options = append(options, primary+" vs "+anchors[1]+" evidence quality")
 		}
-		if strings.Contains(text, "benchmark") || strings.Contains(text, "model") || strings.Contains(text, "ai") || strings.Contains(text, "computer") || strings.Contains(text, "rlhf") {
+		if containsAnyTerm(text, []string{"benchmark", "model", "computer"}, []string{"ai", "rlhf"}) {
 			options = append(options, primary+" benchmark protocol quality")
 		}
 		if strings.Contains(text, "human") || strings.Contains(text, "feedback") || strings.Contains(text, "label") || strings.Contains(text, "rlhf") {
@@ -292,7 +294,7 @@ func defaultEvidenceQualityOptions(query string, domain string, contextGroups ..
 	if strings.Contains(text, "clinical") || strings.Contains(text, "medicine") || strings.Contains(text, "health") {
 		options = append(options, "Randomized or controlled evidence", "Systematic review evidence")
 	}
-	if strings.Contains(text, "benchmark") || strings.Contains(text, "model") || strings.Contains(text, "ai") || strings.Contains(text, "computer") {
+	if containsAnyTerm(text, []string{"benchmark", "model", "computer"}, []string{"ai"}) {
 		options = append(options, "Reproducible benchmarks", "Ablation-backed evidence")
 	}
 	return uniqueStrings(options)
@@ -302,7 +304,9 @@ func defaultOutputFocusOptions(query string, domain string, contextGroups ...[]s
 	text := strings.ToLower(strings.TrimSpace(query + " " + domain))
 	anchors := dynamicQuestionOptionContextAnchors(query, domain, contextGroups...)
 	options := make([]string, 0, 12)
-	if containsAny(text, []string{"rlhf", "reinforcement learning from human feedback", "preference learning", "human feedback", "reward model", "reward modeling", "alignment"}) {
+	if containsAnyTerm(text,
+		[]string{"reinforcement learning from human feedback", "preference learning", "human feedback", "reward model", "reward modeling", "alignment"},
+		[]string{"rlhf"}) {
 		options = append(options,
 			"Reward-model comparison takeaways",
 			"Preference-data failure modes",
@@ -332,7 +336,7 @@ func defaultOutputFocusOptions(query string, domain string, contextGroups ...[]s
 		if len(anchors) > 1 {
 			options = append(options, primary+" vs "+anchors[1]+" comparison")
 		}
-		if strings.Contains(text, "benchmark") || strings.Contains(text, "model") || strings.Contains(text, "ai") || strings.Contains(text, "computer") || strings.Contains(text, "rlhf") {
+		if containsAnyTerm(text, []string{"benchmark", "model", "computer"}, []string{"ai", "rlhf"}) {
 			options = append(options, primary+" benchmark takeaways")
 		}
 	}
@@ -398,7 +402,7 @@ func defaultExclusionOptions(query string, domain string, contextGroups ...[]str
 			"Exclude non-primary research",
 		)
 	}
-	if containsAny(text, []string{"benchmark", "model", "ai", "evaluation", "leaderboard"}) {
+	if containsAnyTerm(text, []string{"benchmark", "model", "evaluation", "leaderboard"}, []string{"ai"}) {
 		options = append(options,
 			"Exclude non-reproducible benchmarks",
 			"Exclude papers without baseline comparisons",

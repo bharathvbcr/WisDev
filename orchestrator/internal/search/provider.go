@@ -1589,18 +1589,18 @@ func ScoreQuality(papers []Paper, query string) {
 }
 
 // InferEvidenceLevel uses keyword matching to estimate the level of evidence.
+// Precedence: systematic-review → primary designs → bare review/survey → preprint → unknown.
+// Primary designs must beat bare "review"/"survey" so RCT abstracts that mention
+// reviewing prior work are not mislabeled as review.
 func InferEvidenceLevel(p Paper) string {
 	text := strings.ToLower(p.Title + " " + p.Abstract)
 
-	// Tier 1: Secondary/Synthesized Evidence
+	// Tier 1: Secondary/Synthesized Evidence (explicit systematic forms only)
 	if containsAny(text, "systematic review", "meta-analysis", "meta analysis", "cochrane") {
 		return "systematic-review"
 	}
-	if strings.Contains(text, "review") || strings.Contains(text, "survey") {
-		return "review"
-	}
 
-	// Tier 2: Primary Experimental
+	// Tier 2: Primary Experimental / Observational designs
 	if containsAny(text, "randomized controlled trial", "randomized trial", " rct ", "clinical trial") {
 		return "rct"
 	}
@@ -1610,8 +1610,6 @@ func InferEvidenceLevel(p Paper) string {
 	if strings.Contains(text, "case-control") || strings.Contains(text, "case control") {
 		return "case-control"
 	}
-
-	// Tier 3: Observational/Descriptive
 	if strings.Contains(text, "case report") || strings.Contains(text, "case series") {
 		return "case-report"
 	}
@@ -1619,7 +1617,12 @@ func InferEvidenceLevel(p Paper) string {
 		return "cross-sectional"
 	}
 
-	// Specific Source Indicators
+	// Tier 3: Bare review/survey (after primary designs)
+	if strings.Contains(text, "review") || strings.Contains(text, "survey") {
+		return "review"
+	}
+
+	// Tier 4: Specific Source Indicators
 	if strings.Contains(strings.ToLower(p.Source), "arxiv") ||
 		strings.Contains(strings.ToLower(p.Source), "biorxiv") ||
 		strings.Contains(strings.ToLower(p.Source), "medrxiv") {

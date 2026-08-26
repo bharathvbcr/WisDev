@@ -195,12 +195,37 @@ streamed autonomous research loop. DocGen supports three ScholarDoc intents
 .\wisdev.cmd "your research question"
 ```
 
-Or use ScholarLM: https://scholarlm-vbcr.web.app
+Or use ScholarLM: https://scholarlm.dev
 
 ## HTTP MCP (remote)
 
-- Local server: `http://127.0.0.1:8081/wisdev/mcp`
-- Prod gateway: `https://rust-gateway-cyucrnqqnq-uc.a.run.app/wisdev/mcp` (auth required)
+- Canonical local endpoint: `http://127.0.0.1:8081/mcp`
+- Canonical deployed endpoint: `https://<gateway-host>/mcp` (auth required)
+- `/wisdev/mcp` remains a compatibility alias.
+
+The deployed endpoint uses Streamable HTTP JSON-RPC. Authenticate the connection
+with a bearer token; never send credentials in MCP tool arguments. The Rust gateway
+validates the token and forwards trusted identity context to the Go orchestrator.
+
+### Claude Code
+
+```bash
+claude mcp add --transport http scholarlm https://<gateway-host>/mcp \
+  --header "Authorization: Bearer $SCHOLARLM_AGENT_TOKEN"
+```
+
+### Codex
+
+```toml
+[mcp_servers.scholarlm]
+url = "https://<gateway-host>/mcp"
+http_headers = { Authorization = "Bearer ${SCHOLARLM_AGENT_TOKEN}" }
+```
+
+Use `wisdevSearchPapers`, `wisdevGenerateManuscript`, and the ScholarLM skill and
+workflow tools directly. `scholarlmRunScript` intentionally returns the local
+wrapper command instead of executing code inside the deployed server; run the
+wrapper in the coding agent's own workspace.
 
 OSS note: this surface is academic search + DocGen + tuning only — no Firebase/Stripe
 or Scholar product routes.

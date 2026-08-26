@@ -341,11 +341,9 @@ func (h *SynthesisHandler) HandleSynthesis(w http.ResponseWriter, r *http.Reques
 		h.handleSummary(w, r)
 	case "compare":
 		h.handleCompare(w, r)
-	case "verify-citations":
-		h.handleVerifyCitations(w, r)
 	default:
 		WriteError(w, http.StatusBadRequest, ErrInvalidParameters, "invalid action", map[string]any{
-			"allowedActions": []string{"review", "summary", "compare", "verify-citations"},
+			"allowedActions": []string{"review", "summary", "compare"},
 		})
 	}
 }

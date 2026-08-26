@@ -3,6 +3,7 @@ package wisdev
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -36,25 +37,38 @@ func (c *MemoryConsolidator) ConsolidateQuest(ctx context.Context, quest *QuestS
 		return fmt.Errorf("cannot consolidate incomplete quest")
 	}
 
+	var firstErr error
+	projectID := firstNonEmpty(quest.QuestID, quest.ID)
 	for _, hyp := range quest.Hypotheses {
+		if hyp == nil {
+			continue
+		}
 		if hyp.ConfidenceScore > 0.8 {
-			err := c.kg.SaveFinding(ctx, quest.ID, hyp)
-			if err != nil {
-				return err
+			embedding := c.embedFindingText(ctx, hyp)
+			if err := c.kg.SaveFinding(ctx, projectID, quest.UserID, hyp, embedding); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
 			}
 		}
 	}
 
 	for _, hyp := range quest.Hypotheses {
+		if hyp == nil {
+			continue
+		}
 		if hyp.ConfidenceScore < 0.2 && hyp.EvidenceCount > 5 {
-			err := c.kg.RecordDeadEnd(ctx, quest.UserID, quest.Query, hyp)
-			if err != nil {
-				return err
+			if err := c.kg.RecordDeadEnd(ctx, quest.UserID, quest.Query, hyp); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
 			}
 		}
 	}
 
-	return nil
+	return firstErr
 }
 
 // ConsolidateResearchQuest persists replay-worthy findings and dead ends from the
@@ -64,6 +78,7 @@ func (c *MemoryConsolidator) ConsolidateResearchQuest(ctx context.Context, quest
 		return nil
 	}
 
+	var firstErr error
 	if quest.CitationVerdict.Promoted {
 		for _, finding := range quest.AcceptedClaims {
 			hyp := &Hypothesis{
@@ -87,8 +102,12 @@ func (c *MemoryConsolidator) ConsolidateResearchQuest(ctx context.Context, quest
 					},
 				},
 			}
-			if err := c.kg.SaveFinding(ctx, quest.QuestID, hyp); err != nil {
-				return err
+			embedding := c.embedFindingText(ctx, hyp)
+			if err := c.kg.SaveFinding(ctx, quest.QuestID, quest.UserID, hyp, embedding); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
 			}
 		}
 	}
@@ -107,11 +126,46 @@ func (c *MemoryConsolidator) ConsolidateResearchQuest(ctx context.Context, quest
 			EvidenceCount:   MaxInt(1, quest.RetrievedCount),
 		}
 		if err := c.kg.RecordDeadEnd(ctx, quest.UserID, quest.Query, hyp); err != nil {
-			return err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 	}
 
-	return nil
+	return firstErr
+}
+
+func (c *MemoryConsolidator) embedFindingText(ctx context.Context, hyp *Hypothesis) []float64 {
+	if c == nil || c.compute == nil || hyp == nil {
+		return nil
+	}
+	text := strings.TrimSpace(firstNonEmpty(hyp.Text, hyp.Claim))
+	if text == "" {
+		return nil
+	}
+	vectors, err := c.compute.EmbedTextBatch(ctx, []string{text})
+	if err != nil {
+		// Keep NULL embedding so SaveFinding still persists; keyword fallback remains available.
+		slog.Warn("finding embedding failed; continuing with null vector",
+			"component", "wisdev.memory_consolidation",
+			"operation", "embed_finding_text",
+			"result", "error",
+			"error_code", "embed_batch_failed",
+			"error", err.Error(),
+		)
+		return nil
+	}
+	if len(vectors) == 0 || len(vectors[0]) == 0 {
+		slog.Warn("finding embedding empty; continuing with null vector",
+			"component", "wisdev.memory_consolidation",
+			"operation", "embed_finding_text",
+			"result", "empty",
+			"error_code", "embed_batch_empty",
+		)
+		return nil
+	}
+	return vectors[0]
 }
 
 // GetRelevantPastFindings retrieves replay-worthy findings from both the Redis
@@ -198,7 +252,7 @@ func rankRelevantMemoryEntries(entries []MemoryEntry, query string, limit int) [
 				score++
 			}
 		}
-		if score == 0 && len(terms) > 0 {
+		if score == 0 {
 			continue
 		}
 		ranked = append(ranked, rankedEntry{entry: entry, score: score})
@@ -210,12 +264,7 @@ func rankRelevantMemoryEntries(entries []MemoryEntry, query string, limit int) [
 		return ranked[i].score > ranked[j].score
 	})
 	if len(ranked) == 0 {
-		latest := append([]MemoryEntry(nil), entries...)
-		sort.SliceStable(latest, func(i, j int) bool { return latest[i].CreatedAt > latest[j].CreatedAt })
-		if limit > 0 && len(latest) > limit {
-			latest = latest[:limit]
-		}
-		return latest
+		return nil
 	}
 	out := make([]MemoryEntry, 0, MinInt(limit, len(ranked)))
 	for _, item := range ranked {

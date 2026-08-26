@@ -118,6 +118,19 @@ func TestNewAgentGateway_InitializesQuestRuntime(t *testing.T) {
 	}
 }
 
+func TestNewAgentGateway_QuestRuntimeSharesMemoryConsolidator(t *testing.T) {
+	mdb := new(coverageMockDBProvider)
+	gw := NewAgentGateway(mdb, nil, nil)
+	require.NotNil(t, gw)
+	require.NotNil(t, gw.Memory)
+	require.NotNil(t, gw.QuestRuntime)
+	require.NotNil(t, gw.QuestRuntime.memory)
+
+	assert.Same(t, gw.Memory, gw.QuestRuntime.memory)
+	assert.Same(t, mdb, gw.Memory.db)
+	assert.Same(t, mdb, gw.QuestRuntime.memory.db)
+}
+
 func TestAgentGateway_EnsureADKSession(t *testing.T) {
 	gw := &AgentGateway{
 		Store:        NewInMemorySessionStore(),

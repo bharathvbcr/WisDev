@@ -36,7 +36,7 @@ pydantic-settings==2.14.2
 
 # Document processing
 docling>=2.3.0
-pypdf==6.13.3
+pypdf==6.14.2
 python-docx==1.2.0
 pymupdf>=1.27.1
 # Optional: install google/langextract separately if you want the PDF metadata
@@ -65,8 +65,9 @@ structlog==25.5.0
 # Secret Management
 google-cloud-secret-manager==2.27.0
 
-# Rate limiting
-slowapi==0.1.9
+# Rate limiting: none. This sidecar is a subordinate worker reached only by the
+# orchestrator, so it has no user-facing edge to limit. slowapi was dropped
+# rather than left installed with no decorated routes.
 
 # ── OpenTelemetry (observability) ──────────────────────────────────────────
 # Core SDK + GCP Cloud Trace exporter + FastAPI auto-instrumentation.

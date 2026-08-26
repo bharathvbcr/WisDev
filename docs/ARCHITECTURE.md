@@ -4,6 +4,13 @@ ScholarLM is a closed prototype product. **WisDev ARC** is the open-source
 autonomous research agent that powers it (Apache-2.0). The same agent runs
 hosted (Cloud Run) and locally (single binary / TUI / MCP server).
 
+> **Boundary with SaaS ScholarLM:** Parent-app SaaS ownership (billing, secrets,
+> session authority, manuscript verify/rescore, CRS) lives in
+> `backend/go_orchestrator`. ARC DocGen / CLI / MCP are the OSS twin — do not
+> treat ARC as the owner of SaaS routes or citation-authority brokering (Rust-first
+> in the parent app). Parent architecture map:
+> [`../../docs/dev/architecture/ARCHITECTURE.md`](../../docs/dev/architecture/ARCHITECTURE.md).
+
 ```mermaid
 flowchart TB
     %% ---------- Entry points ----------
@@ -97,19 +104,21 @@ flowchart TB
   Cloud Run, Firebase Hosting, and Firestore; the local path is a single Go binary
   with no login required.
 
-## Headless document generation (DocGen)
+## Headless document generation & evidence synthesis (ScholarDoc & Dossier)
 
-ScholarDoc-equivalent documents are generated headless through a shared Go layer:
+ScholarDoc documents and Evidence Dossiers are generated through a shared Go layer:
 
 ```text
 CLI / TUI / MCP / pkg/wisdev.GenerateDocument
         │
         ▼
-internal/docgen.Generate(intent, options)
+internal/evidence & internal/docgen.Generate(intent, options)
         │
-        ├── report     → Quick Report synthesis
-        ├── litreview  → Literature-review synthesis + grounded citations
-        └── fullpaper  → ManuscriptPipeline (plan → draft → review → fact-check)
+        ├── Evidence Dossier → Verified findings, tentative insights, contradictions, gaps
+        │
+        ├── report     → Quick Report synthesis (ScholarDoc)
+        ├── litreview  → Literature-review synthesis + grounded citations (ScholarDoc)
+        └── fullpaper  → ManuscriptPipeline: plan → draft → review → fact-check (ScholarDoc)
         │
         ▼
 internal/docgen.Render(format, citationStyle)
@@ -118,8 +127,6 @@ internal/docgen.Render(format, citationStyle)
 internal/citations (APA, MLA, Chicago, Vancouver, IEEE, Harvard, Nature)
 ```
 
-Three **intents** (`report`, `litreview`, `fullpaper`) share one canonical `Document`
-envelope. Seven **citation styles** format bibliographies consistently across
-markdown, LaTeX, HTML, JSON, and DOCX (CLI) export. The Python sidecar enriches
-`fullpaper` section prose when reachable; all intents degrade to grounded scaffolds
-offline.
+**Evidence Dossier** collects and structures paper evidence (verified findings, tentative insights, contradictions, gaps, and paper source packages).
+
+**ScholarDoc** generates structured research documents across three **intents** (`report`, `litreview`, `fullpaper`) sharing one canonical `ScholarDoc` envelope. Seven **citation styles** format bibliographies consistently across markdown, LaTeX, HTML, JSON, and DOCX (CLI) export. The Python sidecar enriches `fullpaper` section prose when reachable; all intents degrade to grounded scaffolds offline.

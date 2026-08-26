@@ -140,6 +140,66 @@ func TestBuildQueryIntroductionMarkdown(t *testing.T) {
 	})
 }
 
+// Regression: the theme needle lists carry short acronyms (ppo, dpo, ood) that
+// used to be matched as raw substrings, so "hippocampal", "supports",
+// "endpoint" and "likelihood" tagged unrelated papers with RLHF themes.
+func TestCollectCoreThemesIgnoresAcronymsInsideWords(t *testing.T) {
+	const preferenceTheme = "Preference data, reward modeling, and policy optimization"
+	const robustnessTheme = "Reward hacking, robustness, and multi-turn evaluation"
+
+	neuroscience := []queryIntroductionPaper{{
+		Title:    "Hippocampal replay supports memory consolidation",
+		Abstract: "Sharp-wave ripple replay supports systems consolidation during sleep, with the opposite pattern during waking rest.",
+	}}
+	assert.NotContains(t, collectCoreThemes(neuroscience), preferenceTheme)
+
+	clinical := []queryIntroductionPaper{{
+		Title:    "A randomized trial of early mobilization after stroke",
+		Abstract: "The primary endpoint was 90-day mortality; secondary endpoints included the likelihood of discharge home.",
+	}}
+	clinicalThemes := collectCoreThemes(clinical)
+	assert.NotContains(t, clinicalThemes, preferenceTheme)
+	assert.NotContains(t, clinicalThemes, robustnessTheme)
+
+	alignment := []queryIntroductionPaper{{
+		Title:    "PPO policy optimization for language models",
+		Abstract: "We train with PPO and compare against DPO, then measure OOD degradation.",
+	}}
+	alignmentThemes := collectCoreThemes(alignment)
+	assert.Contains(t, alignmentThemes, preferenceTheme)
+	assert.Contains(t, alignmentThemes, robustnessTheme)
+}
+
+func TestContainsAnyWordIgnoresAcronymsInsideWords(t *testing.T) {
+	acronyms := []string{"ppo", "dpo", "ood", "ai", "rlhf"}
+
+	for _, decoy := range []string{
+		"hippocampal replay supports memory consolidation",
+		"the intervention supports the primary endpoint",
+		"opposite effects were observed at the endpoints",
+		"maximum likelihood estimation in a good neighborhood",
+		"the domain contains a certain brain region",
+	} {
+		assert.True(t, containsAny(decoy, acronyms), "precondition: substring matching misfires on %q", decoy)
+		assert.False(t, containsAnyWord(decoy, acronyms), "word matching should reject %q", decoy)
+	}
+
+	for _, hit := range []string{
+		"PPO policy optimization for language models",
+		"we compare DPO, PPO and RLHF",
+		"the model was trained with PPO-clip",
+		"robustness under OOD shift",
+		"evaluation of (OOD) generalization",
+		"ai-assisted triage",
+		"benchmarks for AI",
+	} {
+		assert.True(t, containsAnyWord(hit, acronyms), "word matching should accept %q", hit)
+	}
+
+	assert.False(t, containsAnyWord("ood2 dataset", []string{"ood"}))
+	assert.True(t, containsAnyWord("hippocampal ppo", []string{"ppo"}))
+}
+
 func TestBuildLocalPaperSummary(t *testing.T) {
 	assert.Contains(t, BuildLocalPaperSummary("Title", "", 3), "lightweight metadata summary")
 

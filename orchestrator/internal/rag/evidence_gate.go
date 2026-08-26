@@ -16,6 +16,11 @@ import (
 const (
 	minOverlapRatio = 0.12
 	maxClaims       = 15
+	// aiClaimCeiling is the ceiling the AI extraction PROMPT imposes. It is a
+	// separate number from maxClaims (which bounds the heuristic slice), and
+	// conflating them meant the truncation flag never fired on the AI path — the
+	// path taken for long syntheses, i.e. exactly when truncation matters.
+	aiClaimCeiling = 12
 	// AIExtractionThreshold is the minimum synthesis text length (bytes) at which
 	// the gate switches from heuristic claim extraction to AI-assisted extraction.
 	// Exported so callers can report aiClaimExtractionUsed accurately.
@@ -52,6 +57,14 @@ type EvidenceGateResult struct {
 	PassedCount        int                  `json:"passed_count"`
 	UnlinkedCount      int                  `json:"unlinked_count"`
 	ContradictionCount int                  `json:"contradiction_count"`
+	// ClaimsTruncated reports that claim extraction stopped at maxClaims, so
+	// Checked is a sample of the synthesis rather than all of it.
+	//
+	// Without this the grounded ratio is computed over the truncated set and
+	// published as a verdict on the whole synthesis: 15 of 15 sampled claims
+	// grounded reads as "Evidence gate passed" for a text that may assert dozens
+	// more nobody looked at.
+	ClaimsTruncated bool `json:"claims_truncated,omitempty"`
 }
 
 type LinkedClaim struct {
@@ -78,11 +91,18 @@ func (g *EvidenceGate) Run(ctx context.Context, synthesisText string, papers []s
 	var claims []string
 	var err error
 
+	// The ceiling depends on which extractor ran: the heuristic slices at
+	// maxClaims, the AI path is bounded by its prompt at aiClaimCeiling. Checking
+	// one number against both paths is how the flag came to never fire on the path
+	// that needs it.
+	ceiling := maxClaims
 	if len(synthesisText) > AIExtractionThreshold {
 		claims, err = g.extractClaimsWithAI(ctx, synthesisText)
 		if err != nil {
 			slog.Warn("AI claim extraction failed, falling back to heuristic", "error", err)
 			claims = g.extractHeuristicClaims(synthesisText)
+		} else {
+			ceiling = aiClaimCeiling
 		}
 	} else {
 		claims = g.extractHeuristicClaims(synthesisText)
@@ -112,6 +132,12 @@ func (g *EvidenceGate) Run(ctx context.Context, synthesisText string, papers []s
 		}
 	}
 
+	// Hitting the ceiling means the synthesis may hold claims nobody extracted,
+	// let alone checked. Exactly-at-ceiling counts as truncated even when it
+	// happened to be the true total — erring toward "coverage unknown" is the
+	// safe direction for a gate.
+	truncated := len(claims) >= ceiling
+
 	total := len(claims)
 	linkedCount := len(linkedClaims)
 	unlinkedCount := len(unlinkedClaims)
@@ -132,6 +158,7 @@ func (g *EvidenceGate) Run(ctx context.Context, synthesisText string, papers []s
 		UnlinkedCount:      unlinkedCount,
 		ContradictionCount: contradictionCount,
 		Confidence:         confidence,
+		ClaimsTruncated:    truncated,
 	}
 
 	if total == 0 {
@@ -139,8 +166,18 @@ func (g *EvidenceGate) Run(ctx context.Context, synthesisText string, papers []s
 		result.WarningPrefix = "⚠️ "
 		result.Message = "No verifiable claims extracted from synthesis."
 	} else if float64(linkedCount)/float64(total) >= 0.8 && contradictionCount == 0 {
-		result.Verdict = "passed"
-		result.Message = fmt.Sprintf("Evidence gate passed: %d/%d claims grounded in sources.", linkedCount, total)
+		if result.ClaimsTruncated {
+			// A clean sample is not a clean synthesis. "passed" is a statement
+			// about the whole text and cannot be made from a capped extraction.
+			result.Verdict = "provisional"
+			result.WarningPrefix = "⚠️ "
+			result.Message = fmt.Sprintf(
+				"Sampled grounding: %d/%d extracted claims grounded, but claim extraction hit its cap — "+
+					"the rest of the synthesis was not checked.", linkedCount, total)
+		} else {
+			result.Verdict = "passed"
+			result.Message = fmt.Sprintf("Evidence gate passed: %d/%d claims grounded in sources.", linkedCount, total)
+		}
 	} else if float64(linkedCount)/float64(total) >= 0.5 {
 		result.Verdict = "provisional"
 		result.WarningPrefix = "⚠️ "
@@ -171,7 +208,7 @@ func (g *EvidenceGate) RunStructured(ctx context.Context, answer *StructuredAnsw
 	for _, section := range answer.Sections {
 		for _, sent := range section.Sentences {
 			claims = append(claims, sent.Text)
-			
+
 			if len(sent.EvidenceIDs) == 0 {
 				unlinkedClaims = append(unlinkedClaims, sent.Text)
 				continue
@@ -184,7 +221,7 @@ func (g *EvidenceGate) RunStructured(ctx context.Context, answer *StructuredAnsw
 				if !ok {
 					continue
 				}
-				
+
 				overlap := g.calculateOverlap(sent.Text, abstract)
 				if overlap >= minOverlapRatio {
 					supported = true
@@ -282,7 +319,7 @@ Text:
 """
 %s
 """
-Return up to 12 complete-sentence claims.`, synthesisText))
+Return up to %d complete-sentence claims.`, synthesisText, aiClaimCeiling))
 
 	resp, err := g.llmClient.StructuredOutput(ctx, applyRAGLightStructuredPolicy(&llmv1.StructuredRequest{
 		Prompt:     prompt,

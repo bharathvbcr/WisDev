@@ -42,3 +42,4 @@ wisdev-results/
 
 # OSS-mirror provenance marker written by scripts/sync-wisdev-oss.ps1
 .oss-sync-stamp.json
+.DS_Store

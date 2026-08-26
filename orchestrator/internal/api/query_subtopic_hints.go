@@ -13,7 +13,9 @@ func queryAwareSubtopicHints(query string, domain string) []string {
 		hints = append(hints, values...)
 	}
 
-	if containsAny(text, []string{"rlhf", "reinforcement learning from human feedback", "preference learning", "human feedback", "reward model", "reward modeling", "alignment"}) {
+	if containsAnyTerm(text,
+		[]string{"reinforcement learning from human feedback", "preference learning", "human feedback", "reward model", "reward modeling", "alignment"},
+		[]string{"rlhf"}) {
 		add(
 			"Reward Modeling",
 			"Policy Optimization",

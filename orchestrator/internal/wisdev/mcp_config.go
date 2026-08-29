@@ -85,7 +85,7 @@ func intPtr(v int) *int { return &v }
 func knobRegistry() []configKnob {
 	return []configKnob{
 		{Key: CfgSearchLimit, Kind: kindInt, Group: "search", Description: "Default max results for wisdevSearchPapers when 'limit' is omitted.", Min: intPtr(1), Max: intPtr(50), Default: 10},
-		{Key: CfgSearchQualitySort, Kind: kindBool, Group: "search", Description: "Default citation-weighted quality sort for searches.", Default: true},
+		{Key: CfgSearchQualitySort, Kind: kindBool, Group: "search", Description: "Citation-weighted re-ranking. ScoreQuality gives relevance 0.50 and citations+venue+author-impact 0.35, so on a narrow technical query it surfaces highly-cited papers from adjacent fields ahead of on-topic ones. Off by default on this agent surface, where precision matters more than prestige; turn it on for landscape or review questions.", Default: false},
 		{Key: CfgSearchMinCitations, Kind: kindInt, Group: "search", Description: "Default minimum citation count filter (0 = no minimum).", Min: intPtr(0), Default: 0},
 		{Key: CfgSearchYearFrom, Kind: kindInt, Group: "search", Description: "Default inclusive start-year filter (0 = no floor).", Min: intPtr(0), Default: 0},
 		{Key: CfgSearchYearTo, Kind: kindInt, Group: "search", Description: "Default inclusive end-year filter (0 = no ceiling).", Min: intPtr(0), Default: 0},

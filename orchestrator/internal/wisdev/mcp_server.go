@@ -109,7 +109,7 @@ func mcpSearchPapersTool() mcpTool {
 				"yearFrom":     map[string]any{"type": "integer", "description": "Start year filter (inclusive)"},
 				"yearTo":       map[string]any{"type": "integer", "description": "End year filter (inclusive)"},
 				"minCitations": map[string]any{"type": "integer", "description": "Only return papers with at least this many citations (quality filter). 0 = no minimum.", "minimum": 0},
-				"qualitySort":  map[string]any{"type": "boolean", "description": "Sort by citation-weighted quality score (default true)"},
+				"qualitySort":  map[string]any{"type": "boolean", "description": "Re-rank by citation-weighted quality (default FALSE). Relevance carries 0.50 of that score and citation/venue/author-impact 0.35, so enabling it on a narrow technical query surfaces famous papers from adjacent fields. Enable for landscape or review questions, not for precision lookups."},
 			},
 			"required": []string{"query"},
 		},
@@ -807,27 +807,43 @@ func (s *MCPServer) callEvidenceSearch(ctx context.Context, args map[string]any)
 		Domain:      domain,
 		QualitySort: true,
 	})
-	lines := make([]string, 0, len(sr.Papers)+3)
-	lines = append(lines, fmt.Sprintf("Evidence search for claim: %q", claim))
-	lines = append(lines, fmt.Sprintf("Retrieved %d supporting sources", len(sr.Papers)))
+	// This tool retrieves; it does not verify entailment. Calling the results
+	// "supporting sources" and the abstract "Evidence" asserted a relationship
+	// to the claim that nothing here established, and an agent acting on that
+	// label will cite papers that do not support what they are cited for.
+	// Every label below states what was actually done: retrieval, ranked by
+	// term overlap with the claim, unverified.
+	lines := make([]string, 0, len(sr.Papers)+6)
+	lines = append(lines, fmt.Sprintf("Candidate sources for claim: %q", claim))
+	lines = append(lines, fmt.Sprintf(
+		"Retrieved %d candidates. NOT entailment-checked: these are search results for the "+
+			"claim text, not passages verified to support or contradict it. Read the source "+
+			"before citing it as support.", len(sr.Papers)))
 	lines = append(lines, "")
+
+	ranked := rankByClaimOverlap(claim, sr.Papers)
 	shown := 0
-	for _, p := range sr.Papers {
+	for _, scored := range ranked {
 		if shown >= limit {
 			break
 		}
+		p := scored.paper
 		snippet := p.Abstract
 		if len(snippet) > 400 {
 			snippet = snippet[:400] + "…"
 		}
+		if strings.TrimSpace(snippet) == "" {
+			snippet = "(no abstract returned by the provider)"
+		}
 		lines = append(lines, fmt.Sprintf(
-			"Source %d: %s (%d)\n  Authors: %s | Citations: %d\n  Evidence: %s\n  Link: %s",
-			shown+1, p.Title, p.Year, strings.Join(p.Authors, ", "), p.CitationCount, snippet, p.Link,
+			"Candidate %d: %s (%d)\n  Authors: %s | Citations: %d\n  Claim-term overlap: %.2f (lexical, not entailment)\n  Abstract: %s\n  Link: %s",
+			shown+1, p.Title, p.Year, strings.Join(p.Authors, ", "), p.CitationCount,
+			scored.overlap, snippet, p.Link,
 		))
 		shown++
 	}
 	if shown == 0 {
-		lines = append(lines, "No supporting evidence found.")
+		lines = append(lines, "No candidates retrieved. This is a retrieval miss and says nothing about whether the claim is true.")
 	}
 	return &mcpToolResult{Content: []mcpContent{{Type: "text", Text: strings.Join(lines, "\n")}}}, nil
 }

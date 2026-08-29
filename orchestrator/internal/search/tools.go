@@ -119,23 +119,17 @@ func HandleToolSearch(ctx context.Context, reg *ProviderRegistry, tool string, p
 			return SearchResult{}, fmt.Errorf("missing paperId parameter")
 		}
 
-		for _, p := range reg.All() {
-			if lookup, ok := p.(PaperLookupProvider); ok {
-				for _, t := range p.Tools() {
-					if t == "paper_lookup" {
-						paper, err := lookup.SearchByPaperID(ctx, paperID)
-						if err != nil {
-							continue
-						}
-						return SearchResult{
-							Papers:    []Paper{*paper},
-							Providers: map[string]int{p.Name(): 1},
-						}, nil
-					}
-				}
-			}
+		// Identifier-routed lookup with typed outcomes. A provider failure is
+		// never reported as a missing capability, and provider errors are
+		// preserved on the returned error. See paper_lookup.go.
+		lookupResult := LookupPaperByID(ctx, reg, paperID)
+		if err := lookupResult.Err(); err != nil {
+			return SearchResult{}, err
 		}
-		return SearchResult{}, fmt.Errorf("no provider found for paper_lookup")
+		return SearchResult{
+			Papers:    []Paper{*lookupResult.Paper},
+			Providers: map[string]int{lookupResult.Provider: 1},
+		}, nil
 
 	default:
 		return SearchResult{}, fmt.Errorf("unsupported tool: %s", tool)

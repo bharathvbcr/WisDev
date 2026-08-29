@@ -39,8 +39,12 @@ func TestRuntimeConfigDefaultsAndTune(t *testing.T) {
 	if got := c.Int(CfgSearchLimit); got != 10 {
 		t.Fatalf("default search.limit want 10 got %d", got)
 	}
-	if !c.Bool(CfgSearchQualitySort) {
-		t.Fatalf("default search.qualitySort want true")
+	// Changed deliberately: citation-weighted re-ranking gives relevance only
+	// 0.50 of ScoreQuality, so on a narrow technical query it surfaced famous
+	// papers from adjacent fields. See TestQualitySortDefaultsOffOnAgentSurface
+	// for the reasoning; it remains tunable per call and per session.
+	if c.Bool(CfgSearchQualitySort) {
+		t.Fatalf("default search.qualitySort want false on the agent surface")
 	}
 
 	applied, err := c.Tune(map[string]any{
